@@ -229,7 +229,10 @@ details.saved[open] summary::before { transform: translateY(1px) rotate(90deg); 
 .check { display: flex; align-items: center; gap: 7px; color: var(--ink-3); cursor: pointer; font: 10.5px/1.3 var(--mono); letter-spacing: .025em; }
 .check input, .perm input { accent-color: var(--signal); }
 .check input { width: 15px; height: 15px; margin: 0; }
-.status { min-height: 16px; color: var(--ink-3); font-size: 11.5px; }
+.status { min-height: 16px; color: var(--ink-3); font-size: 11.5px;
+  /* Status text now names unscanned and unreadable holdings, and error
+     strings can carry a long unbroken URL. Neither may widen the popup. */
+  overflow-wrap: anywhere; }
 .status:empty { display: none; }
 .status:not(:empty)::before { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 7px 1px 1px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 3px var(--signal-soft); }
 .status.error { color: var(--warn); }

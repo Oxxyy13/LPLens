@@ -289,14 +289,39 @@ function jobLabel(ev) {
   return `${w} · ${chainLabel(ev.chainKey)}`;
 }
 
-/** "Base: nothing" vs "Base failed: …" must stay distinguishable. */
+/**
+ * "Base: nothing" vs "Base failed: …" must stay distinguishable — and so must
+ * "Base: 60" vs "Base: 60, and 91 more we did not scan plus 230 v4 we could
+ * not read at all".
+ *
+ * `lib/positions.js` computes exactly which holdings it failed to render
+ * (`result.truncated`, `result.v4.unavailable`, `v4.held` vs `v4.shown`) and
+ * this function used to discard all of it, reporting only the rendered count.
+ * A bare count reads as "this is all of it", which on a real wallet was wildly
+ * false: measured 2026-08-20 against Dan's address, Base held 151 v3 positions
+ * (60 scanned) and 230 v4 positions that Blockscout rate-limited away, and the
+ * popup said "Base: 60" with no qualifier. Silently showing part of someone's
+ * portfolio as though it were the whole thing is the one failure this project
+ * does not accept.
+ */
 function jobOutcome(job, s) {
   const name = jobLabel(job);
   if (!s || s.phase === 'start') return `${name} reading`;
   if (s.ok === false) return `${name} failed: ${s.error || 'unknown error'}`;
-  const n = s.result && s.result.positions ? s.result.positions.length : 0;
-  if (n) return `${name}: ${n}`;
-  return `${name}: nothing`;
+  const r = s.result || {};
+  const n = r.positions ? r.positions.length : 0;
+
+  const gaps = [];
+  if (r.count > r.scanned) gaps.push(`${r.count - r.scanned} v3 not scanned`);
+  const v4 = r.v4;
+  if (v4) {
+    // held unknown in the enumeration-failed case, so do not imply a number.
+    if (v4.unavailable) gaps.push(v4.held ? `${v4.held} v4 unreadable` : 'v4 unreadable');
+    else if (v4.held > v4.shown) gaps.push(`${v4.held - v4.shown} v4 failed to load`);
+  }
+
+  const base = n ? `${name}: ${n}` : `${name}: nothing`;
+  return gaps.length ? `${base} (${gaps.join(', ')})` : base;
 }
 
 function totalsCard(positions) {

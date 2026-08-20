@@ -8,7 +8,7 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.24.0 — invite-only beta
+## Status: 0.24.1 — invite-only beta
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -29,7 +29,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.24.0
+diff -r extension build/lplens-0.24.1
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -231,9 +231,16 @@ applies to any unpacked extension, not just this one.
 ## Known limits
 
 - `MAX_POSITIONS = 60` per address per chain, scanned **newest-first** and
-  stopped early after 20 consecutive closed positions. Both are surfaced, not
-  hidden. Scanning oldest-first was a real bug: a Robinhood Chain wallet with
-  67 positions whose only open one sat at index 66 rendered as an empty list.
+  stopped early after 20 consecutive closed positions. Scanning oldest-first was
+  a real bug: a Robinhood Chain wallet with 67 positions whose only open one sat
+  at index 66 rendered as an empty list.
+- **Anything held but not rendered is named in the status line**, per wallet and
+  per chain — `Base: 60 (91 v3 not scanned, 230 v4 unreadable)`. This is the
+  claim to check first if you check only one, because a count on its own reads
+  as "this is all of it". It was not true until 0.24.1: the popup previously
+  reported the rendered count alone, so a wallet holding 151 v3 positions on
+  Base plus 230 v4 positions the log source rate-limited away was shown as
+  plain `Base: 60`. Measured against a real wallet, not hypothesised.
 - Lifetime history needs a log source that will serve a full-range,
   topic-filtered query. The measured landscape as of 2026-08-19:
   - **Robinhood Chain's public RPC serves it keylessly.** Nothing to configure.
