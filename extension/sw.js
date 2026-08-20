@@ -14,8 +14,6 @@
 import { loadPositionByVersion } from './lib/positions.js';
 import { entitlement } from './lib/license.js';
 
-const CACHE_MS = 30_000;
-const cache = new Map();     // `${chain}:${tokenId}` -> {at, data}
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
 
 // Concurrency limit across ALL callers. One position load issues 6-10 fetches,
@@ -40,15 +38,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== 'LPLENS_POSITION') return false;
 
   const key = `${msg.chain}:${msg.version || 'v3'}:${msg.tokenId}`;
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_MS) {
-    sendResponse({ ok: true, data: hit.data, cached: true });
-    return false;
-  }
 
-  // Coalesce duplicate requests for the same position. The 30s cache only helps
-  // AFTER a load completes; without this, N simultaneous asks for one position
-  // all miss the cache and each run a full fetch set.
+  // Coalesce only concurrently in-flight requests. Completed results are not
+  // cached: after Increase/Decrease/Collect, reloading the Uniswap page must
+  // read the just-mined state rather than replay a plausible 30-second-old one.
   // Gate here rather than in the UI: the check then covers every surface at
   // once, and a patched content script still gets nothing back.
   const gated = (async () => {
@@ -73,7 +66,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // BigInt does not survive structured clone to the content script.
         const safe = JSON.parse(JSON.stringify(data, (_k, v) =>
           typeof v === 'bigint' ? v.toString() : v));
-        cache.set(key, { at: Date.now(), data: safe });
         return safe;
       } finally {
         release();

@@ -312,12 +312,20 @@ function jobOutcome(job, s) {
   const n = r.positions ? r.positions.length : 0;
 
   const gaps = [];
-  if (r.count > r.scanned) gaps.push(`${r.count - r.scanned} v3 not scanned`);
+  if (r.count > (r.attempted ?? r.scanned)) {
+    gaps.push(`${r.count - (r.attempted ?? r.scanned)} v3 beyond scan limit`);
+  }
+  if (r.enumUnreadable) gaps.push(`${r.enumUnreadable} v3 ownership unreadable`);
+  if (r.positionUnreadable) gaps.push(`${r.positionUnreadable} v3 unreadable`);
+  if (r.closedHidden) gaps.push(`${r.closedHidden} closed v3 hidden`);
   const v4 = r.v4;
   if (v4) {
     // held unknown in the enumeration-failed case, so do not imply a number.
     if (v4.unavailable) gaps.push(v4.held ? `${v4.held} v4 unreadable` : 'v4 unreadable');
-    else if (v4.held > v4.shown) gaps.push(`${v4.held - v4.shown} v4 failed to load`);
+    else {
+      if (v4.unreadable) gaps.push(`${v4.unreadable} v4 unreadable`);
+      if (v4.closedHidden) gaps.push(`${v4.closedHidden} closed v4 hidden`);
+    }
   }
 
   const base = n ? `${name}: ${n}` : `${name}: nothing`;

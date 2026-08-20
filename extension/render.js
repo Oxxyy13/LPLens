@@ -327,8 +327,9 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
    */
   function rebalance(d, h) {
     if (!h || h.unavailable || h.deposited0 === undefined) return null;
-    const net0 = h.received0 + (d.amount0 || 0) + (d.collectable0 || 0) - h.deposited0;
-    const net1 = h.received1 + (d.amount1 || 0) + (d.collectable1 || 0) - h.deposited1;
+    if (d.collectable0 === null || d.collectable1 === null) return null;
+    const net0 = h.received0 + (d.amount0 || 0) + d.collectable0 - h.deposited0;
+    const net1 = h.received1 + (d.amount1 || 0) + d.collectable1 - h.deposited1;
     if (!net0 && !net1) return null;
     const u = d.usd;
     const v0 = u && u.price0 ? net0 * u.price0 : null;
@@ -361,7 +362,8 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
       rows.push(`<div class="kv"><span>fees earned</span><span class="num pos">+${v.feesPct.toFixed(3)}%</span></div>`);
       rows.push(`<div class="kv"><span>impermanent loss</span><span class="num ${v.il > 0 ? 'neg' : ''}">${v.il > 0 ? '−' : '+'}${Math.abs(v.ilPct).toFixed(3)}%</span></div>`);
     }
-    if (u && u.costBasis !== null && u.costBasis !== undefined) {
+    if (u && u.costBasis !== null && u.costBasis !== undefined
+        && u.totalNow !== null && u.totalNow !== undefined) {
       rows.push(`<div class="kv"><span>cost basis</span><span class="num">$${u.costBasis.toLocaleString('en-US', { maximumFractionDigits: 2 })}${u.costBasisExact ? '' : '*'}</span></div>`);
       rows.push(`<div class="kv"><span>worth now</span><span class="num">$${u.totalNow.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>`);
     }
@@ -378,7 +380,8 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
       // unit travels with the number, and the drift states which side won.
       const unit = `${esc(s1)} per ${esc(s0)}`;
       rows.push('<div class="sep"></div>');
-      rows.push(`<div class="kv"><span>entry price</span><span class="num">${priceText(h.entry)}<br><span class="unit">${unit}</span></span></div>`);
+      rows.push(`<div class="kv"><span>${h.adds > 1 ? 'first add price' : 'entry price'}</span><span class="num">${priceText(h.entry)}<br><span class="unit">${unit}</span></span></div>`);
+      if (h.adds > 1) rows.push(`<div class="kv"><span>liquidity additions</span><span class="num">${h.adds}</span></div>`);
       if (h.exit) rows.push(`<div class="kv"><span>exit price</span><span class="num">${priceText(h.exit)}<br><span class="unit">${unit}</span></span></div>`);
       if (drift !== null) {
         // Same move, stated as the token that actually appreciated.
@@ -388,8 +391,6 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
         rows.push(`<div class="kv"><span>price ${closed ? 'entry to exit' : 'since entry'}</span><span class="num ${cls(drift)}">${esc(qual)}${drift > 0 ? '+' : ''}${drift.toFixed(2)}%<br><span class="unit">${unit}</span></span></div>`);
         rows.push(`<div class="note" style="margin-top:2px">i.e. ${winner}</div>`);
       }
-      const net0 = h.received0 + (d.amount0 || 0) + (d.collectable0 || 0) - h.deposited0;
-      const net1 = h.received1 + (d.amount1 || 0) + (d.collectable1 || 0) - h.deposited1;
       rows.push('<div class="sep"></div>');
       rows.push(`<div class="kv"><span>deposited</span><span class="num">${fmt(h.deposited0)} ${esc(s0)}<br>${fmt(h.deposited1)} ${esc(s1)}</span></div>`);
       rows.push(`<div class="kv"><span>collected</span><span class="num">${fmt(h.received0)} ${esc(s0)}<br>${fmt(h.received1)} ${esc(s1)}</span></div>`);
@@ -411,7 +412,8 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     if (v && v.apr !== null && v.aprDays !== null && v.aprDays < 7) {
       caveats.push(`*APR extrapolated from ${humanSpan(v.aprDays)} — a ×${Math.round(365.25 / v.aprDays)} annualisation, so a direction not a rate.`);
     }
-    if (u && u.costBasis && !u.costBasisExact) caveats.push('*Cost basis is a bound: that mint was single-sided.');
+    if (u && u.costBasis && !u.costBasisExact) caveats.push('*Cost basis is a bound: at least one liquidity addition was single-sided.');
+    if (h && h.currentUnavailable) caveats.push('Current collectable amounts could not be read, so return and fee figures are withheld.');
     if (u && u.bridged) caveats.push('USD priced via the bridge origin chain; assumes the wrapped token holds its peg.');
     if (h && h.unavailable) caveats.push(`History unavailable — ${esc(h.unavailable)}`);
 

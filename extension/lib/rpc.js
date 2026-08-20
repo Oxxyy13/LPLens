@@ -42,6 +42,38 @@ export async function rpcCall(url, method, params) {
 }
 
 /**
+ * Batched read-only JSON-RPC. Every item is checked against the same method
+ * allowlist as rpcCall; a per-item provider error is returned as `__error` so
+ * callers can retry only the failed proof reads.
+ */
+export async function rpcBatch(url, requests) {
+  for (const request of requests) {
+    if (!RPC_METHODS.includes(request.method)) {
+      throw new RpcError(`${request.method}: not an issued JSON-RPC method`);
+    }
+  }
+  const payload = requests.map((request) => ({
+    jsonrpc: '2.0', id: nextId++, method: request.method, params: request.params,
+  }));
+  const ids = payload.map((row) => row.id);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new RpcError(`batch: HTTP ${res.status}`);
+  const json = await res.json();
+  if (!Array.isArray(json)) throw new RpcError('batch: malformed response');
+  const byId = new Map(json.map((row) => [row.id, row]));
+  return ids.map((id) => {
+    const row = byId.get(id);
+    if (!row) return { __error: 'missing batch response' };
+    if (row.error) return { __error: row.error.message || 'batch item failed' };
+    return row.result;
+  });
+}
+
+/**
  * eth_call. `from` matters for the collect() staticcall; `block` enables
  * archive reads, which is how historical USD prices are derived from a
  * reference pool's past state.
@@ -50,6 +82,14 @@ export function ethCall(url, to, data, from, block = 'latest') {
   const tx = { to, data: data.startsWith('0x') ? data : '0x' + data };
   if (from) tx.from = from;
   return rpcCall(url, 'eth_call', [tx, block]);
+}
+
+export function ethCallBatch(url, calls) {
+  return rpcBatch(url, calls.map(({ to, data, from, block = 'latest' }) => {
+    const tx = { to, data: data.startsWith('0x') ? data : '0x' + data };
+    if (from) tx.from = from;
+    return { method: 'eth_call', params: [tx, block] };
+  }));
 }
 
 /** Bounded-concurrency map. Public RPCs rate-limit aggressively. */

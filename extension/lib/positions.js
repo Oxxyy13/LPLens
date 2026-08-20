@@ -4,21 +4,76 @@ import {
   dataGetPool, dataCollect, dataOwnerOf, decodePositions, decodeSlot0, decodeCollect,
   decodeSymbol, SELECTOR, toUint, toAddress, words, encUint,
 } from './abi.js';
-import { ethCall, mapLimit } from './rpc.js';
-import { fetchHistory, solveSqrtPrice, accounting, reconciles } from './history.js';
-import { fingerprint, readHistory, writeHistory, readEnum, writeEnum } from './cache.js';
+import { ethCall, ethCallBatch, mapLimit } from './rpc.js';
+import {
+  fetchHistory, fetchRecentHistory, mergeHistoryEvents, hasNewHistoryEvent,
+  solveSqrtPrice, accounting, reconciles, lifetimeFees,
+} from './history.js';
+import { fingerprint, readHistory, readHistoryAny, writeHistory } from './cache.js';
 import { enumerateV4, loadV4Position, V4 } from './v4.js';
 import { costBasisUsd, usdPairAt } from './histprice.js';
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
 
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function retryRead(fn, attempts = 3) {
+  let last;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try { return await fn(); }
+    catch (err) {
+      last = err;
+      if (attempt + 1 < attempts) await wait(120 * (attempt + 1));
+    }
+  }
+  throw last;
+}
+
+const isAlchemyRpc = (rpc) => {
+  try { return new URL(rpc).hostname.toLowerCase().endsWith('.g.alchemy.com'); }
+  catch { return false; }
+};
+
+/** Batch high-volume Alchemy eth_calls; public RPCs retain bounded singles. */
+async function readMany(rpc, calls) {
+  if (!isAlchemyRpc(rpc)) {
+    return mapLimit(calls, 4, (call) => retryRead(() => ethCall(
+      rpc, call.to, call.data, call.from, call.block || 'latest')));
+  }
+
+  const out = new Array(calls.length);
+  for (let offset = 0; offset < calls.length; offset += 25) {
+    const chunk = calls.slice(offset, offset + 25);
+    let pending = chunk.map((call, index) => ({ call, index }));
+    for (let attempt = 0; attempt < 4 && pending.length; attempt++) {
+      let rows;
+      try { rows = await ethCallBatch(rpc, pending.map((item) => item.call)); }
+      catch {
+        if (attempt < 3) await wait(2000 * (attempt + 1));
+        continue;
+      }
+      const retry = [];
+      for (let i = 0; i < pending.length; i++) {
+        if (!rows[i] || rows[i].__error) retry.push(pending[i]);
+        else out[offset + pending[i].index] = rows[i];
+      }
+      pending = retry;
+      if (pending.length && attempt < 3) await wait(2000 * (attempt + 1));
+    }
+    for (const item of pending) {
+      out[offset + item.index] = { __error: 'eth_call unreadable after retries' };
+    }
+    if (offset + chunk.length < calls.length) await wait(250);
+  }
+  return out;
+}
+
 async function tokenMeta(rpc, chainKey, addr) {
   const key = `${chainKey}:${addr.toLowerCase()}`;
   if (tokenCache.has(key)) return tokenCache.get(key);
   const [symRaw, decRaw] = await Promise.all([
-    ethCall(rpc, addr, SELECTOR.symbol).catch(() => null),
-    ethCall(rpc, addr, SELECTOR.decimals).catch(() => null),
+    retryRead(() => ethCall(rpc, addr, SELECTOR.symbol)).catch(() => null),
+    retryRead(() => ethCall(rpc, addr, SELECTOR.decimals)).catch(() => null),
   ]);
   const meta = {
     symbol: symRaw ? decodeSymbol(symRaw) : '?',
@@ -38,9 +93,6 @@ async function tokenMeta(rpc, chainKey, addr) {
  * 429 likely. Single-chain loads are unchanged.
  */
 export const ALL_CHAIN_CONCURRENCY = 2;
-
-const CHUNK = 10;
-const STOP_AFTER_CLOSED = 20;
 
 // DexScreener mark memo, keyed `chain:token`. In memory only — prices are live
 // numbers and must not survive into a later session from chrome.storage.
@@ -83,6 +135,7 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     }
     return {
       chain: chainKey, count: 0, scanned: 0, truncated: false, stoppedEarly: false,
+      attempted: 0, enumUnreadable: 0, positionUnreadable: 0, closedHidden: 0,
       positions, v4,
       enumSource: 'empty',
     };
@@ -103,29 +156,18 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   // increaseLiquidity can be called on any tokenId whose NFT has not been
   // burned, so a "closed" position can come back to life and would then be
   // invisible until the cache happened to be rebuilt.
-  let live;
-  let scanned;
-  let stoppedEarly;
-  let enumSource;
-  const truncated = count > MAX_POSITIONS;
+  // Re-enumerate ownership on every load. ERC721Enumerable uses swap-and-pop:
+  // mint D then transfer B can change [A,B,C] to [A,D,C] while both balanceOf
+  // and the newest token stay unchanged. No constant-size cache sentinel can
+  // prove the set did not change.
+  const v3 = await scanV3Holdings(rpc, chain, owner, count, includeClosed);
+  const { live, scanned } = v3;
 
-  if (truncated) {
-    // A capped walk is a partial list. Never cache it as complete. Keep the
-    // interleaved tokenOfOwnerByIndex + positions() scan so early-stop can
-    // still skip the tail of a 60-deep cap.
-    enumSource = 'rpc';
-    ({ live, scanned, stoppedEarly } = await scanInterleaved(
-      rpc, chain, owner, count, includeClosed));
-  } else {
-    const resolved = await resolveCompleteIds(chainKey, owner, rpc, chain, count);
-    enumSource = resolved.fromCache ? 'cache' : 'rpc';
-    ({ live, scanned, stoppedEarly } = await walkPositions(
-      rpc, chain.nfpm, resolved.tokenIds, includeClosed));
-  }
-
-  const enriched = await mapLimit(live, 3, (p) => enrichPosition(rpc, chain, chainKey, owner, p));
+  const enriched = await mapLimit(live, 3, (p) =>
+    retryRead(() => enrichPosition(rpc, chain, chainKey, owner, p), 2));
 
   const rendered = enriched.filter((p) => p && !p.__error);
+  const enrichUnreadable = enriched.length - rendered.length;
 
   // Lifetime history is fetched only for positions that will actually render,
   // so its cost scales with what you see rather than with what was scanned —
@@ -139,6 +181,7 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   const withHistory = await mapLimit(rendered, 3, (p) => attachHistory(source, chain, p));
 
   const v3Positions = withHistory.filter((p) => p && !p.__error);
+  const historyUnreadable = withHistory.length - v3Positions.length;
   const v4 = await scanV4(chainKey, owner, opts);
 
   let positions = [
@@ -160,9 +203,13 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     chain: chainKey,
     count,
     scanned,
-    truncated: truncated || count > scanned,
-    stoppedEarly,
-    enumSource,
+    attempted: v3.attempted,
+    enumUnreadable: v3.enumUnreadable,
+    positionUnreadable: v3.positionUnreadable + enrichUnreadable + historyUnreadable,
+    closedHidden: v3.closedHidden,
+    truncated: count > v3.attempted,
+    stoppedEarly: false,
+    enumSource: 'rpc-verified',
     positions,
     v4,
   };
@@ -216,146 +263,46 @@ export async function loadAllChains(owner, opts = {}) {
 }
 
 /**
- * Complete (owner, chain) tokenId list, newest first.
+ * Current v3 holdings, newest first.
  *
- * Validation is 2 calls: balanceOf is already known; newest =
- * tokenOfOwnerByIndex(owner, count-1). balanceOf alone is not enough — a
- * burn plus a mint between views leaves the count identical, and
- * ERC721Enumerable appends the new token last, so the newest index is
- * exactly what catches that case.
- *
- * On a hit, tokenOfOwnerByIndex is not walked. positions() still is.
+ * Every ownership index is read on every scan, followed by positions() for
+ * every id. Closed NFTs are read too because increaseLiquidity can revive any
+ * unburned token. Failures are counted instead of being filtered away.
  */
-async function resolveCompleteIds(chainKey, owner, rpc, chain, count) {
-  let newest = null;
-  try {
-    newest = await readTokenAtIndex(rpc, chain.nfpm, owner, count - 1);
-  } catch {
-    newest = null;
+export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = false) {
+  const attempted = Math.min(count, MAX_POSITIONS);
+  const indexes = Array.from({ length: attempted }, (_, i) => count - 1 - i);
+  const idHexes = await readMany(rpc, indexes.map((index) => ({
+    to: chain.nfpm, data: dataTokenOfOwnerByIndex(owner, index),
+  })));
+
+  const tokenIds = [];
+  let enumUnreadable = 0;
+  for (const hex of idHexes) {
+    if (!hex || hex.__error) { enumUnreadable++; continue; }
+    try { tokenIds.push(toUint(words(hex)[0])); }
+    catch { enumUnreadable++; }
   }
 
-  const hit = await readEnum(chainKey, owner);
-  if (
-    hit
-    && newest !== null
-    && hit.count === count
-    && hit.newest === String(newest)
-    && hit.tokenIds.length === count
-  ) {
-    return {
-      tokenIds: hit.tokenIds.map((id) => BigInt(id)),
-      fromCache: true,
-    };
-  }
-
-  const tokenIds = new Array(count);
-  if (newest !== null) tokenIds[0] = newest; // newest first
-  const missing = [];
-  for (let i = 0; i < count; i++) {
-    const index = count - 1 - i;
-    if (i === 0 && newest !== null) continue;
-    missing.push({ i, index });
-  }
-  const hexes = await mapLimit(missing, 4, (m) =>
-    ethCall(rpc, chain.nfpm, dataTokenOfOwnerByIndex(owner, m.index))
-  );
-  let failed = false;
-  for (let k = 0; k < missing.length; k++) {
-    const h = hexes[k];
-    if (typeof h !== 'string') { failed = true; continue; }
-    tokenIds[missing[k].i] = toUint(words(h)[0]);
-  }
-  if (tokenIds.some((id) => id === undefined || id === null)) failed = true;
-
-  if (!failed && newest !== null) {
-    await writeEnum(chainKey, owner, {
-      count,
-      newest: String(newest),
-      tokenIds: tokenIds.map(String),
-    });
-  }
-  return { tokenIds: tokenIds.filter((id) => id !== undefined && id !== null), fromCache: false };
-}
-
-async function readTokenAtIndex(rpc, nfpm, owner, index) {
-  const hex = await ethCall(rpc, nfpm, dataTokenOfOwnerByIndex(owner, index));
-  return toUint(words(hex)[0]);
-}
-
-/** positions() walk over a known id list, newest first, with early-stop. */
-async function walkPositions(rpc, nfpm, tokenIds, includeClosed) {
   const live = [];
   let scanned = 0;
-  let consecutiveClosed = 0;
-  let stoppedEarly = false;
-
-  for (let off = 0; off < tokenIds.length; off += CHUNK) {
-    const chunkIds = tokenIds.slice(off, off + CHUNK);
-    const chunk = await mapLimit(chunkIds, 4, async (tokenId) => {
-      const posHex = await ethCall(rpc, nfpm, dataPositions(tokenId));
-      const pos = decodePositions(posHex);
-      if (!pos) return null;
-      return { tokenId, ...pos };
-    });
-    scanned += chunkIds.length;
-    for (const p of chunk) {
-      if (!p || p.__error) continue;
-      const dead = p.liquidity === 0n && p.tokensOwed0 === 0n && p.tokensOwed1 === 0n;
-      if (dead) consecutiveClosed++; else consecutiveClosed = 0;
-      if (!dead || includeClosed) live.push(p);
-    }
-    if (!includeClosed && consecutiveClosed >= STOP_AFTER_CLOSED) {
-      stoppedEarly = true;
-      break;
-    }
+  let positionUnreadable = 0;
+  let closedHidden = 0;
+  const posHexes = await readMany(rpc, tokenIds.map((tokenId) => ({
+    to: chain.nfpm, data: dataPositions(tokenId),
+  })));
+  for (let i = 0; i < tokenIds.length; i++) {
+    const hex = posHexes[i];
+    if (!hex || hex.__error) { positionUnreadable++; continue; }
+    const pos = decodePositions(hex);
+    if (!pos) { positionUnreadable++; continue; }
+    const p = { tokenId: tokenIds[i], ...pos };
+    scanned++;
+    const dead = p.liquidity === 0n && p.tokensOwed0 === 0n && p.tokensOwed1 === 0n;
+    if (dead && !includeClosed) closedHidden++;
+    if (!dead || includeClosed) live.push(p);
   }
-  return { live, scanned, stoppedEarly };
-}
-
-/**
- * Truncated wallets (count > MAX_POSITIONS): interleave tokenOfOwnerByIndex
- * with positions() in chunks so early-stop can still skip the tail. The
- * resulting id list is partial, so it is never written to the enum cache.
- */
-async function scanInterleaved(rpc, chain, owner, count, includeClosed) {
-  const scanCap = Math.min(count, MAX_POSITIONS);
-  const live = [];
-  let scanned = 0;
-  let consecutiveClosed = 0;
-  let stoppedEarly = false;
-
-  for (let off = 0; off < scanCap; off += CHUNK) {
-    const size = Math.min(CHUNK, scanCap - off);
-    const idxs = Array.from({ length: size }, (_, i) => count - 1 - off - i);
-
-    const idHexes = await mapLimit(idxs, 4, (i) =>
-      ethCall(rpc, chain.nfpm, dataTokenOfOwnerByIndex(owner, i))
-    );
-    const tokenIds = idHexes
-      .filter((h) => typeof h === 'string')
-      .map((h) => toUint(words(h)[0]));
-
-    const chunk = await mapLimit(tokenIds, 4, async (tokenId) => {
-      const posHex = await ethCall(rpc, chain.nfpm, dataPositions(tokenId));
-      const pos = decodePositions(posHex);
-      if (!pos) return null;
-      return { tokenId, ...pos };
-    });
-    scanned += size;
-
-    for (const p of chunk) {
-      if (!p || p.__error) continue;
-      const dead = p.liquidity === 0n && p.tokensOwed0 === 0n && p.tokensOwed1 === 0n;
-      if (dead) consecutiveClosed++; else consecutiveClosed = 0;
-      if (!dead || includeClosed) live.push(p);
-    }
-
-    if (!includeClosed && consecutiveClosed >= STOP_AFTER_CLOSED) {
-      stoppedEarly = true;
-      break;
-    }
-  }
-  return { live, scanned, stoppedEarly };
+  return { live, attempted, scanned, enumUnreadable, positionUnreadable, closedHidden };
 }
 
 /**
@@ -483,40 +430,62 @@ export function valueUsd(amount0, amount1, price0, price1) {
 async function scanV4(chainKey, owner, opts = {}) {
   const chain = CHAINS[chainKey];
   if (!chain || !chain.v4PositionManager) {
-    return { positions: [], held: 0, shown: 0, unavailable: null };
+    return {
+      positions: [], held: 0, shown: 0, closedHidden: 0, unreadable: 0,
+      unavailable: null,
+    };
   }
   const rpc = opts.rpcOverride || chain.rpc;
 
   const found = await enumerateV4(chainKey, owner, opts);
   if (found.unavailable) {
-    return { positions: [], held: 0, shown: 0, unavailable: found.unavailable };
+    return {
+      positions: [], held: found.balanceOf ?? null, shown: 0,
+      closedHidden: 0, unreadable: found.balanceOf ?? null,
+      unavailable: found.unavailable,
+    };
   }
   // A short list would read as "you hold fewer positions"; say so instead.
   if (!found.reconciles) {
     return {
       positions: [], held: found.balanceOf, shown: 0,
+      closedHidden: 0,
+      unreadable: Math.max(0, found.balanceOf - found.tokenIds.length),
       unavailable: `v4 enumeration incomplete — Transfer logs give ${found.tokenIds.length}`
         + ` positions but balanceOf reports ${found.balanceOf}`,
     };
   }
 
-  const live = await mapLimit(found.tokenIds, 4, async (tokenId) => {
-    const hex = await ethCall(rpc, chain.v4PositionManager, V4.positionLiquidity + encUint(tokenId));
-    const liquidity = toUint(words(hex)[0] || '0');
-    return liquidity === 0n && !opts.includeClosed ? null : tokenId;
+  const liquidityHexes = await readMany(rpc, found.tokenIds.map((tokenId) => ({
+    to: chain.v4PositionManager, data: V4.positionLiquidity + encUint(tokenId),
+  })));
+  const checked = found.tokenIds.map((tokenId, index) => {
+    const hex = liquidityHexes[index];
+    if (!hex || hex.__error) return { __error: hex && hex.__error || 'liquidity unreadable' };
+    return { tokenId, closed: toUint(words(hex)[0] || '0') === 0n };
   });
-  const wanted = live.filter((t) => t && !t.__error);
+  const liquidityUnreadable = checked.filter((row) => row && row.__error).length;
+  const readable = checked.filter((row) => row && !row.__error);
+  const closedHidden = opts.includeClosed ? 0 : readable.filter((row) => row.closed).length;
+  const wanted = readable
+    .filter((row) => opts.includeClosed || !row.closed)
+    .map((row) => row.tokenId);
 
   const loaded = await mapLimit(wanted, 3, (tokenId) =>
-    loadV4Position(chainKey, tokenId, {
+    retryRead(() => loadV4Position(chainKey, tokenId, {
       ...opts,
       tokenMeta: (addr) => tokenMeta(rpc, chainKey, addr),
-    }));
+    }), 2));
 
+  const positions = loaded.filter((p) => p && !p.__error);
+  const loadUnreadable = loaded.length - positions.length;
   return {
-    positions: loaded.filter((p) => p && !p.__error),
-    held: found.tokenIds.length,
-    shown: loaded.filter((p) => p && !p.__error).length,
+    positions,
+    held: found.balanceOf,
+    shown: positions.length,
+    closedHidden,
+    unreadable: liquidityUnreadable + loadUnreadable,
+    source: found.source,
     unavailable: null,
   };
 }
@@ -575,10 +544,12 @@ export async function attachUsd(chainKey, p, opts = {}) {
   let basis = null;
   try { basis = await costBasisUsd(chainKey, p, opts); } catch { basis = null; }
 
-  const nowAll = mark(
-    (h.received0 ?? 0) + (p.amount0 || 0) + (p.collectable0 || 0),
-    (h.received1 ?? 0) + (p.amount1 || 0) + (p.collectable1 || 0),
-  );
+  const nowAll = p.collectable0 === null || p.collectable1 === null
+    ? null
+    : mark(
+      (h.received0 ?? 0) + (p.amount0 || 0) + p.collectable0,
+      (h.received1 ?? 0) + (p.amount1 || 0) + p.collectable1,
+    );
 
   return {
     ...p,
@@ -598,7 +569,8 @@ export async function attachUsd(chainKey, p, opts = {}) {
       vsHodl: v && p1 !== undefined ? v.delta * p1 : null,
       value: mark(p.amount0, p.amount1),
       collectable: mark(p.collectable0, p.collectable1),
-      fees: h.fees0 !== undefined && p1 !== undefined ? mark(h.fees0, h.fees1) : null,
+      fees: h.fees0 !== undefined && h.fees0 !== null && p1 !== undefined
+        ? mark(h.fees0, h.fees1) : null,
       deposited: h.deposited0 !== undefined ? mark(h.deposited0, h.deposited1) : null,
     },
   };
@@ -620,16 +592,18 @@ function historySource(chain, rpc, opts) {
  * lookup so the two paths cannot drift apart.
  */
 async function enrichPosition(rpc, chain, chainKey, owner, p) {
-  const poolHex = await ethCall(rpc, chain.factory, dataGetPool(p.token0, p.token1, p.fee));
+  const poolHex = await retryRead(() =>
+    ethCall(rpc, chain.factory, dataGetPool(p.token0, p.token1, p.fee)));
   const pool = toAddress(words(poolHex)[0]);
   if (/^0x0{40}$/.test(pool)) return { ...p, error: 'pool not found' };
 
   const [slotHex, t0, t1, collectHex] = await Promise.all([
-    ethCall(rpc, pool, dataSlot0()),
+    retryRead(() => ethCall(rpc, pool, dataSlot0())),
     tokenMeta(rpc, chainKey, p.token0),
     tokenMeta(rpc, chainKey, p.token1),
     // from == owner is required; collect() checks the caller is approved.
-    ethCall(rpc, chain.nfpm, dataCollect(p.tokenId, owner), owner).catch(() => null),
+    retryRead(() => ethCall(rpc, chain.nfpm, dataCollect(p.tokenId, owner), owner))
+      .catch(() => null),
   ]);
 
   const slot = decodeSlot0(slotHex);
@@ -652,6 +626,8 @@ async function enrichPosition(rpc, chain, chainKey, owner, p) {
     // principal owed + fees when a decreaseLiquidity is pending.
     collectable0: collectable ? scale(Number(collectable.amount0), t0.decimals) : null,
     collectable1: collectable ? scale(Number(collectable.amount1), t1.decimals) : null,
+    collectableRaw0: collectable ? collectable.amount0 : null,
+    collectableRaw1: collectable ? collectable.amount1 : null,
   };
 }
 
@@ -673,7 +649,44 @@ async function attachHistory(source, chain, p) {
   if (h && (!h.events.length || !reconciles(h.events, p.liquidity))) h = null;
 
   if (!h) {
-    h = await fetchHistory(source, chain.nfpm, p.tokenId);
+    const previous = await readHistoryAny(chain.nfpm, p.tokenId);
+    const [full, recent] = await Promise.all([
+      fetchHistory(source, chain.nfpm, p.tokenId),
+      fetchRecentHistory(source, chain.nfpm, p.tokenId),
+    ]);
+
+    // A complete lifetime result is the base. If it is unavailable, a stale
+    // complete cache plus newly mined RPC events is also sufficient. Recent
+    // events alone are never mistaken for an old NFT's whole lifetime.
+    if (!full.unavailable) {
+      h = {
+        events: mergeHistoryEvents(
+          previous && previous.events, full.events, recent && recent.events),
+        source: [full.source, recent && !recent.unavailable ? recent.source : null]
+          .filter(Boolean).join('+'),
+      };
+    } else if (previous && recent && !recent.unavailable
+        && hasNewHistoryEvent(previous.events, recent.events)) {
+      h = {
+        events: mergeHistoryEvents(previous.events, recent.events),
+        source: `${previous.source || 'cache'}+${recent.source}`,
+      };
+    } else {
+      h = {
+        unavailable: [full.unavailable, recent && recent.unavailable]
+          .filter(Boolean).join('; ') || 'history refresh unavailable',
+      };
+    }
+
+    // A fingerprint miss proves positions() changed. If no source contains a
+    // new event yet, do not cache old figures under the new fingerprint.
+    if (!h.unavailable && previous
+        && !hasNewHistoryEvent(previous.events, h.events)) {
+      return {
+        ...p,
+        history: { unavailable: 'latest transaction is not indexed yet — retry in a moment' },
+      };
+    }
     if (!h.unavailable && (!h.events || h.events.length === 0)) {
       return {
         ...p,
@@ -707,6 +720,32 @@ async function attachHistory(source, chain, p) {
 
   const firstAdd = h.events.find((e) => e.kind === 'increase');
   const lastRemove = [...h.events].reverse().find((e) => e.kind === 'decrease');
+  const deposits = h.events.filter((e) => e.kind === 'increase').map((e) => ({
+    block: e.block,
+    time: e.time,
+    amount0: scale(Number(e.amount0), d0),
+    amount1: scale(Number(e.amount1), d1),
+    entry: priced(e),
+  }));
+  const fee0 = p.collectableRaw0 === null
+    ? null : lifetimeFees(acct.received0, p.collectableRaw0, acct.withdrawn0);
+  const fee1 = p.collectableRaw1 === null
+    ? null : lifetimeFees(acct.received1, p.collectableRaw1, acct.withdrawn1);
+  const fees0 = fee0 === null ? null : scale(Number(fee0), d0);
+  const fees1 = fee1 === null ? null : scale(Number(fee1), d1);
+  const currentUnavailable = p.collectable0 === null || p.collectable1 === null;
+  const historyForComparison = {
+    deposited0: scale(Number(acct.deposited0), d0),
+    deposited1: scale(Number(acct.deposited1), d1),
+    received0: scale(Number(acct.received0), d0),
+    received1: scale(Number(acct.received1), d1),
+    fees0,
+    fees1,
+    firstTime: acct.firstTime,
+    lastTime: acct.lastTime,
+    exit: p.liquidity === 0n && lastRemove ? priced(lastRemove) : null,
+    adds: acct.adds,
+  };
 
   return {
     ...p,
@@ -714,30 +753,20 @@ async function attachHistory(source, chain, p) {
       entry: firstAdd ? priced(firstAdd) : null,
       // An exit price only exists once the position is actually closed.
       exit: p.liquidity === 0n && lastRemove ? priced(lastRemove) : null,
+      deposits,
       deposited0: scale(Number(acct.deposited0), d0),
       deposited1: scale(Number(acct.deposited1), d1),
       received0: scale(Number(acct.received0), d0),
       received1: scale(Number(acct.received1), d1),
-      fees0: scale(Number(acct.fees0), d0),
-      fees1: scale(Number(acct.fees1), d1),
+      fees0,
+      fees1,
       adds: acct.adds,
       firstBlock: acct.firstBlock,
       firstTime: acct.firstTime,
       lastTime: acct.lastTime,
+      currentUnavailable,
       source: h.source + (h.cached ? ' (cached)' : ''),
-      vsHodl: vsHodl(p, {
-        deposited0: scale(Number(acct.deposited0), d0),
-        deposited1: scale(Number(acct.deposited1), d1),
-        received0: scale(Number(acct.received0), d0),
-        received1: scale(Number(acct.received1), d1),
-        fees0: scale(Number(acct.fees0), d0),
-        fees1: scale(Number(acct.fees1), d1),
-        collectable0: p.collectable0 || 0,
-        collectable1: p.collectable1 || 0,
-        firstTime: acct.firstTime,
-        lastTime: acct.lastTime,
-        exit: p.liquidity === 0n && lastRemove ? priced(lastRemove) : null,
-      }),
+      vsHodl: currentUnavailable ? null : vsHodl(p, historyForComparison),
     },
   };
 }
@@ -765,8 +794,11 @@ function vsHodl(p, h) {
   const price = closed ? h.exit.price : p.price;
   if (!price || !Number.isFinite(price)) return null;
 
-  const have0 = h.received0 + (p.amount0 || 0) + (p.collectable0 || 0);
-  const have1 = h.received1 + (p.amount1 || 0) + (p.collectable1 || 0);
+  if (p.collectable0 === null || p.collectable1 === null
+      || h.fees0 === null || h.fees1 === null) return null;
+
+  const have0 = h.received0 + (p.amount0 || 0) + p.collectable0;
+  const have1 = h.received1 + (p.amount1 || 0) + p.collectable1;
 
   const hodl = h.deposited0 * price + h.deposited1;
   const have = have0 * price + have1;
@@ -781,7 +813,7 @@ function vsHodl(p, h) {
   // only the net hides which of the two is driving it — a position can be up
   // on huge fees despite severe IL, or barely up because neither happened, and
   // those call for opposite decisions.
-  const fees = (h.fees0 + h.collectable0) * price + (h.fees1 + h.collectable1);
+  const fees = h.fees0 * price + h.fees1;
   const il = fees - delta;   // positive means IL cost you
 
   // Realised fee yield over the position's ACTUAL life, which is a different
@@ -790,7 +822,7 @@ function vsHodl(p, h) {
   // timestamps rather than guessed from block heights.
   let apr = null, aprDays = null;
   const end = closed ? h.lastTime : Math.floor(Date.now() / 1000);
-  if (h.firstTime && end && end > h.firstTime) {
+  if (h.adds === 1 && h.firstTime && end && end > h.firstTime) {
     const years = (end - h.firstTime) / 31557600;
     if (years > 0) {
       apr = (fees / hodl) / years * 100;

@@ -40,6 +40,7 @@ const SEL_TOKEN0 = '0x0dfe1681';   // token0(), derived with keccak256
 
 const poolCache = new Map();    // `${chain}` -> {pool, stableIsToken0, stableDecimals}
 const priceCache = new Map();   // `${chain}:${block}` -> number | null
+const LATEST_PRICE_TTL_MS = 60_000;
 
 /** Resolve the chain's USDC/WETH reference pool from the factory, once. */
 async function referencePool(chainKey, rpc) {
@@ -76,7 +77,16 @@ async function referencePool(chainKey, rpc) {
  */
 export async function refUsdAtBlock(chainKey, block, opts = {}) {
   const key = `${chainKey}:${block}`;
-  if (priceCache.has(key)) return priceCache.get(key);
+  if (priceCache.has(key)) {
+    const hit = priceCache.get(key);
+    if (block !== 'latest') return hit;
+    if (hit && Date.now() - hit.at < LATEST_PRICE_TTL_MS) return hit.price;
+    priceCache.delete(key);
+  }
+  const remember = (price) => {
+    priceCache.set(key, block === 'latest' ? { price, at: Date.now() } : price);
+    return price;
+  };
 
   const chain = CHAINS[chainKey];
   const rpc = opts.rpcOverride || (chain && chain.rpc);
@@ -84,12 +94,11 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
   // Bridged chain: price the asset where it actually has dollar liquidity.
   if (chain && chain.usdRef && chain.usdRef.via) {
     const price = await bridgedUsd(chainKey, block, opts);
-    priceCache.set(key, price);
-    return price;
+    return remember(price);
   }
 
   const ref = await referencePool(chainKey, rpc);
-  if (!ref) { priceCache.set(key, null); return null; }
+  if (!ref) return remember(null);
 
   let price = null;
   try {
@@ -104,8 +113,7 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
   } catch {
     price = null;   // no archive access, or the pool did not exist yet
   }
-  priceCache.set(key, price);
-  return price;
+  return remember(price);
 }
 
 /**
@@ -203,27 +211,39 @@ export async function costBasisUsd(chainKey, p, opts = {}) {
   const chain = CHAINS[chainKey];
   const ref = chain && chain.usdRef;
   const h = p.history;
-  if (!ref || !h || h.unavailable || !h.entry || !h.firstBlock) return null;
+  if (!ref || !h || h.unavailable) return null;
+  const deposits = h.deposits && h.deposits.length ? h.deposits : (
+    h.entry && h.firstBlock ? [{
+      block: h.firstBlock, amount0: h.deposited0, amount1: h.deposited1, entry: h.entry,
+    }] : []);
+  return sumDepositBasis(deposits, async (deposit) => {
+    if (!deposit.entry || !(deposit.entry.price > 0)) return null;
+    return usdPairAt(
+      chainKey, p.token0, p.token1, deposit.entry.price, deposit.block, opts);
+  });
+}
 
-  // entry.price is token1 per token0, decimal-adjusted.
-  const entry = h.entry.price;
-  if (!(entry > 0)) return null;
-
-  const pair = await usdPairAt(chainKey, p.token0, p.token1, entry, h.firstBlock, opts);
-  if (!pair) return null;
-  const { usd0, usd1 } = pair;
-
-  const basis = h.deposited0 * usd0 + h.deposited1 * usd1;
-  if (!Number.isFinite(basis) || basis <= 0) return null;
-
+/** Sum each liquidity addition at its own historical block and pool price. */
+export async function sumDepositBasis(deposits, priceAt) {
+  if (!Array.isArray(deposits) || !deposits.length) return null;
+  let basis = 0;
+  let exact = true;
+  const legs = [];
+  for (const deposit of deposits) {
+    const pair = await priceAt(deposit);
+    if (!pair) return null;
+    const value = deposit.amount0 * pair.usd0 + deposit.amount1 * pair.usd1;
+    if (!Number.isFinite(value) || value < 0) return null;
+    basis += value;
+    if (!deposit.entry || deposit.entry.exact === false) exact = false;
+    legs.push({ block: deposit.block, value, usd0: pair.usd0, usd1: pair.usd1 });
+  }
+  if (!(basis > 0)) return null;
   return {
     basis,
-    block: h.firstBlock,
-    usd0,
-    usd1,
-    // A single-sided mint gives a bounded entry price, so the basis inherits
-    // that bound. Reported, never quietly rounded to a point value.
-    exact: h.entry.exact !== false,
-    bound: h.entry.exact === false ? h.entry.bound : null,
+    block: deposits[0].block,
+    exact,
+    bound: exact ? null : 'one or more liquidity additions were single-sided',
+    legs,
   };
 }

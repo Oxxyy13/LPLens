@@ -12,7 +12,7 @@
  * Topic hashes were derived with keccak256 (`eth_utils`) and then cross-checked
  * against a live log, not recalled. See docs/build-notes.md.
  */
-import { fetchPositionLogs } from './logs.js';
+import { fetchPositionLogs, fetchRecentPositionLogs } from './logs.js';
 import { sqrtRatioAtTick } from './v3.js';
 
 export const TOPIC = {
@@ -31,8 +31,14 @@ export async function fetchHistory(source, nfpm, tokenId) {
   const got = await fetchPositionLogs({ ...source, nfpm, tokenId });
   if (got.unavailable) return { unavailable: got.unavailable };
 
+  return { events: decodePositionLogs(got.logs), source: got.source };
+}
+
+/** Decode the normalised log shape shared by lifetime and recent RPC reads. */
+export function decodePositionLogs(logs) {
+
   const events = [];
-  for (const log of got.logs) {
+  for (const log of logs || []) {
     const t0 = (log.topics[0] || '').toLowerCase();
     const kind = t0 === TOPIC.increase ? 'increase'
       : t0 === TOPIC.decrease ? 'decrease'
@@ -44,13 +50,77 @@ export async function fetchHistory(source, nfpm, tokenId) {
       kind,
       block: log.block,
       time: log.time,
+      transactionHash: log.transactionHash || null,
+      logIndex: log.logIndex ?? null,
       liquidity: kind === 'collect' ? 0n : word(log.data, 0),
       amount0: word(log.data, 1),
       amount1: word(log.data, 2),
     });
   }
-  events.sort((a, b) => a.block - b.block);
-  return { events, source: got.source };
+  events.sort((a, b) => (a.block - b.block) || ((a.logIndex ?? 0) - (b.logIndex ?? 0)));
+  return events;
+}
+
+export async function fetchRecentHistory(source, nfpm, tokenId) {
+  const got = await fetchRecentPositionLogs({ rpc: source.rpc, nfpm, tokenId });
+  if (got.unavailable) return { unavailable: got.unavailable };
+  return { events: decodePositionLogs(got.logs), source: got.source };
+}
+
+const semanticKey = (e) => [
+  e.block, e.kind, e.liquidity, e.amount0, e.amount1,
+].map(String).join(':');
+
+/** Union fetched and cached history without double-counting legacy cache rows. */
+export function mergeHistoryEvents(...sets) {
+  const keyed = new Map();
+  const keyedSemantics = new Map();
+  const legacyMax = new Map();
+  const legacyExample = new Map();
+
+  for (const events of sets) {
+    const counts = new Map();
+    for (const e of events || []) {
+      const semantic = semanticKey(e);
+      if (e.transactionHash && e.logIndex !== null && e.logIndex !== undefined) {
+        const id = `${String(e.transactionHash).toLowerCase()}:${e.logIndex}`;
+        if (!keyed.has(id)) {
+          keyed.set(id, e);
+          keyedSemantics.set(semantic, (keyedSemantics.get(semantic) || 0) + 1);
+        }
+      } else {
+        counts.set(semantic, (counts.get(semantic) || 0) + 1);
+        legacyExample.set(semantic, e);
+      }
+    }
+    for (const [semantic, count] of counts) {
+      legacyMax.set(semantic, Math.max(legacyMax.get(semantic) || 0, count));
+    }
+  }
+
+  const out = [...keyed.values()];
+  for (const [semantic, count] of legacyMax) {
+    const missing = Math.max(0, count - (keyedSemantics.get(semantic) || 0));
+    for (let i = 0; i < missing; i++) out.push(legacyExample.get(semantic));
+  }
+  return out.sort((a, b) =>
+    (a.block - b.block) || ((a.logIndex ?? 0) - (b.logIndex ?? 0)));
+}
+
+/** True when the refreshed union contains an event absent from the old cache. */
+export function hasNewHistoryEvent(previous, refreshed) {
+  const counts = (events) => {
+    const out = new Map();
+    for (const e of events || []) {
+      const k = semanticKey(e);
+      out.set(k, (out.get(k) || 0) + 1);
+    }
+    return out;
+  };
+  const before = counts(previous), after = counts(refreshed);
+  if ((refreshed || []).length > (previous || []).length) return true;
+  for (const [key, count] of after) if (count > (before.get(key) || 0)) return true;
+  return false;
 }
 
 /**
@@ -135,9 +205,6 @@ export function accounting(events) {
     deposited0: dep.a0, deposited1: dep.a1,
     withdrawn0: dec.a0, withdrawn1: dec.a1,
     received0: col.a0, received1: col.a1,
-    // Collect minus the principal it returned = the fee component.
-    fees0: col.a0 > dec.a0 ? col.a0 - dec.a0 : 0n,
-    fees1: col.a1 > dec.a1 ? col.a1 - dec.a1 : 0n,
     adds: events.filter((e) => e.kind === 'increase').length,
     firstBlock: events.length ? events[0].block : null,
     lastBlock: events.length ? events[events.length - 1].block : null,
@@ -146,4 +213,10 @@ export function accounting(events) {
     firstTime: events.length ? events[0].time : null,
     lastTime: events.length ? events[events.length - 1].time : null,
   };
+}
+
+/** collected + currently collectable - all decreased principal. */
+export function lifetimeFees(collected, collectable, decreased) {
+  const value = BigInt(collected) + BigInt(collectable) - BigInt(decreased);
+  return value > 0n ? value : 0n;
 }

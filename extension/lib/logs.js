@@ -67,6 +67,9 @@ const normalise = (log) => ({
   topics: log.topics || [],
   data: log.data || '0x',
   block: Number(BigInt(log.blockNumber)),
+  transactionHash: log.transactionHash || null,
+  logIndex: log.logIndex === undefined || log.logIndex === null
+    ? null : Number(BigInt(log.logIndex)),
   // Etherscan supplies timeStamp; JSON-RPC does not. Null rather than a guess.
   time: log.timeStamp ? Number(BigInt(log.timeStamp)) : null,
 });
@@ -113,6 +116,17 @@ function logQuery(fields) {
 async function viaRpc(rpc, nfpm, topic1) {
   const logs = await rpcCall(rpc, 'eth_getLogs', [{
     address: nfpm, fromBlock: '0x0', toBlock: 'latest', topics: [null, topic1],
+  }]);
+  if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
+  return logs.map(normalise);
+}
+
+async function viaRpcRange(rpc, nfpm, topic1, fromBlock, toBlock) {
+  const logs = await rpcCall(rpc, 'eth_getLogs', [{
+    address: nfpm,
+    fromBlock: '0x' + BigInt(fromBlock).toString(16),
+    toBlock: '0x' + BigInt(toBlock).toString(16),
+    topics: [null, topic1],
   }]);
   if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
   return logs.map(normalise);
@@ -324,4 +338,31 @@ export async function fetchPositionLogs({
   const hit = await trySource('rpc', () => viaRpc(rpc, nfpm, topic1));
   if (hit) return hit;
   return { unavailable: errors.join('; ') };
+}
+
+/**
+ * Read just-mined position events directly from the selected RPC. Explorer
+ * indexes can lag a Collect/Increase/Decrease. Normal RPCs accept the initial
+ * 128-block request; Alchemy free currently needs the ten-block fallback.
+ */
+export async function fetchRecentPositionLogs({ rpc, nfpm, tokenId, lookback = 128 }) {
+  const topic1 = '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
+  try {
+    const latest = await rpcCall(rpc, 'eth_getBlockByNumber', ['latest', false]);
+    if (!latest || latest.number === undefined) throw new Error('latest block unavailable');
+    const to = Number(BigInt(latest.number));
+    const from = Math.max(0, to - lookback + 1);
+    try {
+      return { logs: await viaRpcRange(rpc, nfpm, topic1, from, to), source: 'recent-rpc' };
+    } catch {
+      const logs = [];
+      for (let start = from; start <= to; start += 10) {
+        const end = Math.min(to, start + 9);
+        logs.push(...await viaRpcRange(rpc, nfpm, topic1, start, end));
+      }
+      return { logs, source: 'recent-rpc-chunked' };
+    }
+  } catch (err) {
+    return { unavailable: err.message || String(err) };
+  }
 }

@@ -128,4 +128,7 @@ export const CHAINS = {
 
 // Hard cap on positions enumerated per address. Surfaced in the UI when hit —
 // a silent truncation would read as "you have no other positions".
-export const MAX_POSITIONS = 60;
+// A correctness ceiling, not a display limit. The public smoke wallet has 664
+// v3 NFTs, and opening one new position must not push an older live position
+// out of sight. Positions above this guard are still named explicitly.
+export const MAX_POSITIONS = 1000;

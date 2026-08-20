@@ -25,9 +25,7 @@
  */
 
 const PREFIX = 'hist:';
-const ENUM_PREFIX = 'enum:';
 const MAX_ENTRIES = 400;   // keeps chrome.storage.local well clear of its quota
-const MAX_ENUM_ENTRIES = 200;
 
 // Falls back to memory outside an extension context so the module stays usable
 // in tests and in node.
@@ -41,6 +39,8 @@ const pack = (events) => events.map((e) => ({
   k: e.kind,
   b: e.block,
   t: e.time,
+  x: e.transactionHash || null,
+  i: e.logIndex ?? null,
   l: String(e.liquidity),
   a0: String(e.amount0),
   a1: String(e.amount1),
@@ -50,6 +50,8 @@ const unpack = (rows) => rows.map((r) => ({
   kind: r.k,
   block: r.b,
   time: r.t,
+  transactionHash: r.x || null,
+  logIndex: r.i ?? null,
   liquidity: BigInt(r.l),
   amount0: BigInt(r.a0),
   amount1: BigInt(r.a1),
@@ -80,6 +82,21 @@ export async function readHistory(nfpm, tokenId, fp) {
     return { events: unpack(hit.events), source: hit.source, cached: true };
   } catch {
     return null;   // a broken cache must never break a load
+  }
+}
+
+/** Last cached event set even when its mutable-state fingerprint is stale. */
+export async function readHistoryAny(nfpm, tokenId) {
+  const key = keyFor(nfpm, tokenId);
+  try {
+    const hit = store ? (await store.get(key))[key] : memory.get(key);
+    if (!hit || !Array.isArray(hit.events)) return null;
+    return {
+      events: unpack(hit.events), source: hit.source, fingerprint: hit.fp,
+      cached: true, stale: true,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -114,68 +131,4 @@ async function prunePrefix(prefix, max) {
   if (keys.length <= max) return;
   keys.sort((a, b) => (all[a].at || 0) - (all[b].at || 0));
   await store.remove(keys.slice(0, keys.length - max));
-}
-
-/* ---------------------------------------------------------------------------
- * Enumeration cache: (owner, chain) -> complete tokenId list.
- *
- * This removes the tokenOfOwnerByIndex half of a v3 scan, not both halves.
- * positions(tokenId) still runs every load because liquidity, tokensOwed and
- * fee growth change constantly. The saving is roughly half of enumeration,
- * not all of it.
- *
- * Do NOT skip IDs previously seen as closed. A position with zero liquidity
- * and zero owed is not permanently dead — increaseLiquidity can be called on
- * any tokenId whose NFT has not been burned, so a "closed" position can come
- * back to life and would then be invisible until the cache happened to be
- * rebuilt.
- *
- * A partial list must never be stored as complete. The writer refuses any
- * entry whose tokenIds.length !== count. Truncated scans (count above the
- * MAX_POSITIONS cap) are the caller's problem: they simply must not call
- * writeEnum.
- * ------------------------------------------------------------------------- */
-
-const enumKeyFor = (chainKey, owner) =>
-  `${ENUM_PREFIX}${chainKey}:${String(owner).toLowerCase()}`;
-
-/** Cached complete tokenId list for this owner on this chain, or null. */
-export async function readEnum(chainKey, owner) {
-  const key = enumKeyFor(chainKey, owner);
-  try {
-    const hit = store ? (await store.get(key))[key] : memory.get(key);
-    if (!hit || !Array.isArray(hit.tokenIds) || hit.tokenIds.length !== hit.count) {
-      return null;
-    }
-    return hit;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Persist a complete enumeration. No-op when the list is empty, partial, or
- * storage is unavailable. tokenIds are decimal strings, newest first.
- */
-export async function writeEnum(chainKey, owner, entry) {
-  if (!entry || !Array.isArray(entry.tokenIds)) return;
-  if (!entry.count || entry.tokenIds.length !== entry.count) return;
-  if (entry.newest === undefined || entry.newest === null) return;
-  const key = enumKeyFor(chainKey, owner);
-  const value = {
-    count: entry.count,
-    newest: String(entry.newest),
-    tokenIds: entry.tokenIds.map((id) => String(id)),
-    at: Date.now(),
-  };
-  try {
-    if (!store) {
-      memory.set(key, value);
-      return;
-    }
-    await store.set({ [key]: value });
-    await prunePrefix(ENUM_PREFIX, MAX_ENUM_ENTRIES);
-  } catch {
-    // Caching is an optimisation; failing to cache is not a load error.
-  }
 }

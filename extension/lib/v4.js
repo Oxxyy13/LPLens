@@ -28,8 +28,10 @@
  * not carry over. Positions report history as unavailable rather than showing a
  * partial or invented lifetime.
  */
-import { ethCall, mapLimit } from './rpc.js';
-import { words, toUint, toInt, toAddress, padWord, encAddress, encUint } from './abi.js';
+import { ethCall, ethCallBatch, mapLimit } from './rpc.js';
+import {
+  words, toUint, toInt, toAddress, padWord, encAddress, encUint, dataOwnerOf,
+} from './abi.js';
 import { keccak256Hex } from './keccak.js';
 import { positionAmounts, humanPrice, tickToPrice, scale } from './v3.js';
 import { CHAINS } from './chains.js';
@@ -48,6 +50,21 @@ export const V4 = {
 
 const Q128 = 1n << 128n;
 const MAX256 = 1n << 256n;
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function retryRead(fn, attempts = 4) {
+  let last;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try { return await fn(); }
+    catch (err) {
+      last = err;
+      if (attempt + 1 < attempts) {
+        const throttled = /429|rate|capacity/i.test(err.message || String(err));
+        await wait((throttled ? 2000 : 200) * (attempt + 1));
+      }
+    }
+  }
+  throw last;
+}
 
 /** ABI int24: sign-extended across the full 256-bit word, not masked to 24 bits. */
 const encInt = (v) => padWord(BigInt(v) < 0n ? MAX256 + BigInt(v) : BigInt(v));
@@ -141,6 +158,46 @@ export async function enumerateV4(chainKey, owner, opts = {}) {
   if (!chain || !chain.v4PositionManager) return { unavailable: 'no v4 deployment configured' };
   const rpc = opts.rpcOverride || chain.rpc;
 
+  let onChainCount;
+  try {
+    const hex = await retryRead(() =>
+      ethCall(rpc, chain.v4PositionManager, V4.balanceOf + encAddress(owner)));
+    onChainCount = Number(toUint(words(hex)[0]));
+  } catch (err) {
+    return { unavailable: `v4 balance could not be verified — ${err.message || String(err)}` };
+  }
+  if (onChainCount === 0) {
+    return { tokenIds: [], balanceOf: 0, reconciles: true, source: 'balanceOf' };
+  }
+
+  // A configured Alchemy RPC also exposes its NFT ownership index. It avoids
+  // the full-history getLogs limits that break large v4 wallets. The index is
+  // never trusted alone: ownerOf verifies every candidate and the final count
+  // must equal balanceOf from the same RPC.
+  let alchemyError = null;
+  try {
+    const indexed = await alchemyOwnedTokenIds(rpc, chain.v4PositionManager, owner);
+    if (indexed) {
+      const verified = await verifyOwnedIds(
+        rpc, chain.v4PositionManager, owner, indexed.tokenIds);
+      if (verified.unreadable === 0
+          && verified.tokenIds.length === onChainCount
+          && indexed.tokenIds.length === onChainCount) {
+        return {
+          tokenIds: verified.tokenIds,
+          balanceOf: onChainCount,
+          reconciles: true,
+          source: 'alchemy-nft+ownerOf',
+        };
+      }
+      alchemyError = `Alchemy NFT index gave ${indexed.tokenIds.length}, `
+        + `ownerOf verified ${verified.tokenIds.length}, balanceOf reports ${onChainCount}`;
+    }
+  } catch (err) {
+    // Never include the URL here: it contains the user's API key.
+    alchemyError = `Alchemy NFT ownership lookup failed — ${err.message || String(err)}`;
+  }
+
   const got = await fetchTransfers({
     contract: chain.v4PositionManager,
     owner,
@@ -149,7 +206,12 @@ export async function enumerateV4(chainKey, owner, opts = {}) {
     etherscanChainId: chain.etherscanChainId,
     blockscout: chain.blockscout || null,
   });
-  if (got.unavailable) return { unavailable: got.unavailable };
+  if (got.unavailable) {
+    return {
+      balanceOf: onChainCount,
+      unavailable: [alchemyError, got.unavailable].filter(Boolean).join('; '),
+    };
+  }
 
   const held = new Set();
   for (const ev of got.events) {
@@ -157,16 +219,89 @@ export async function enumerateV4(chainKey, owner, opts = {}) {
     else held.delete(ev.tokenId);
   }
 
-  let onChainCount = null;
-  try {
-    const hex = await ethCall(rpc, chain.v4PositionManager, V4.balanceOf + encAddress(owner));
-    onChainCount = Number(toUint(words(hex)[0]));
-  } catch { /* verification unavailable, not fatal */ }
-
   return {
     tokenIds: [...held].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
     balanceOf: onChainCount,
-    reconciles: onChainCount === null || onChainCount === held.size,
+    reconciles: onChainCount === held.size,
+    source: 'transfer-logs',
+    indexWarning: alchemyError,
+  };
+}
+
+/** Return null when the RPC URL is not an Alchemy v2 endpoint. */
+export async function alchemyOwnedTokenIds(rpc, contract, owner) {
+  let parsed;
+  try { parsed = new URL(rpc); } catch { return null; }
+  if (!parsed.hostname.toLowerCase().endsWith('.g.alchemy.com')) return null;
+  const match = parsed.pathname.match(/^\/v2\/([^/]+)\/?$/);
+  if (!match) return null;
+
+  const endpoint = new URL(`/nft/v3/${encodeURIComponent(match[1])}/getNFTsForOwner`, parsed.origin);
+  endpoint.searchParams.set('owner', owner);
+  endpoint.searchParams.append('contractAddresses[]', contract);
+  endpoint.searchParams.set('withMetadata', 'false');
+  endpoint.searchParams.set('pageSize', '100');
+
+  const ids = new Set();
+  let pageKey = null;
+  for (let page = 0; page < 50; page++) {
+    if (pageKey) endpoint.searchParams.set('pageKey', pageKey);
+    const res = await retryRead(async () => {
+      const response = await fetch(endpoint);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response;
+    });
+    const body = await res.json();
+    if (!Array.isArray(body.ownedNfts)) throw new Error('malformed response');
+    for (const nft of body.ownedNfts) {
+      const addr = nft && nft.contract && nft.contract.address;
+      if (addr && String(addr).toLowerCase() !== contract.toLowerCase()) continue;
+      if (nft && nft.tokenId !== undefined) ids.add(BigInt(nft.tokenId));
+    }
+    pageKey = body.pageKey || null;
+    if (!pageKey) {
+      return {
+        tokenIds: [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+      };
+    }
+  }
+  throw new Error('pagination exceeded 50 pages');
+}
+
+export async function verifyOwnedIds(rpc, contract, owner, tokenIds) {
+  const want = String(owner).toLowerCase();
+  const rows = [];
+  for (let offset = 0; offset < tokenIds.length; offset += 25) {
+    const chunk = tokenIds.slice(offset, offset + 25);
+    let pending = chunk.map((tokenId, index) => ({ tokenId, index }));
+    const resolved = new Array(chunk.length);
+    for (let attempt = 0; attempt < 4 && pending.length; attempt++) {
+      let hexes;
+      try {
+        hexes = await ethCallBatch(rpc, pending.map(({ tokenId }) => ({
+          to: contract, data: dataOwnerOf(tokenId),
+        })));
+      } catch {
+        if (attempt < 3) await wait(2000 * (attempt + 1));
+        continue;
+      }
+      const retry = [];
+      for (let i = 0; i < pending.length; i++) {
+        const item = pending[i], hex = hexes[i];
+        if (!hex || hex.__error) retry.push(item);
+        else resolved[item.index] = toAddress(words(hex)[0]).toLowerCase() === want
+          ? item.tokenId : null;
+      }
+      pending = retry;
+      if (pending.length && attempt < 3) await wait(2000 * (attempt + 1));
+    }
+    for (const item of pending) resolved[item.index] = { __error: 'ownerOf unreadable' };
+    rows.push(...resolved);
+    if (offset + chunk.length < tokenIds.length) await wait(250);
+  }
+  return {
+    tokenIds: rows.filter((id) => typeof id === 'bigint'),
+    unreadable: rows.filter((id) => id && id.__error).length,
   };
 }
 

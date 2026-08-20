@@ -8,7 +8,7 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.24.1 — invite-only beta
+## Status: 0.25.0 — invite-only beta
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -29,7 +29,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.24.1
+diff -r extension build/lplens-0.25.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -61,6 +61,11 @@ Two claims worth checking directly, because they are the ones that matter:
 - Reconstructs **lifetime history** from NFPM events — `tokenId` is the first
   indexed parameter of `IncreaseLiquidity`/`DecreaseLiquidity`/`Collect`, so one
   `eth_getLogs` per position returns its whole life with no subgraph and no key
+- Refreshes a changed v3 history with the latest raw-RPC logs as well as the
+  lifetime index, so an explorer that has not indexed a just-mined collect/add/
+  remove cannot be cached as the new truth
+- Values **every liquidity addition at its own block and pool price**. A second
+  add is not silently priced at the original mint anymore
 - Solves **entry and exit price** from the event amounts plus the tick range,
   with no archive node, cross-checked by two independent derivations
 - Scans Ethereum, Base, Arbitrum, Polygon and Robinhood Chain (4663) together;
@@ -70,8 +75,10 @@ Two claims worth checking directly, because they are the ones that matter:
 - **Uniswap v4** as well as v3. v4 needed four separate mechanisms: pools are
   addressed by `keccak256(abi.encode(PoolKey))` rather than existing as
   contracts (hence `lib/keccak.js`), the PositionManager is *not*
-  ERC721Enumerable so holdings come from `Transfer` logs, state is read through
-  StateView, and a currency may be native `address(0)` with no ERC-20 to query.
+  ERC721Enumerable so holdings come from verified Alchemy NFT ownership when a
+  matching custom RPC is configured, or `Transfer` logs otherwise; state is
+  read through StateView, and a currency may be native `address(0)` with no
+  ERC-20 to query.
   Two independent cross-checks guard it: the derived poolId's top 200 bits must
   match the truncated id v4 stores in `PositionInfo`, and StateView's liquidity
   must equal the PositionManager's.
@@ -230,17 +237,20 @@ applies to any unpacked extension, not just this one.
 
 ## Known limits
 
-- `MAX_POSITIONS = 60` per address per chain, scanned **newest-first** and
-  stopped early after 20 consecutive closed positions. Scanning oldest-first was
-  a real bug: a Robinhood Chain wallet with 67 positions whose only open one sat
-  at index 66 rendered as an empty list.
+- `MAX_POSITIONS = 1000` per address per chain. Every ownership index below the
+  guard and every corresponding `positions()` record is read on every load.
+  There is no ownership cache and no early stop on closed positions: an
+  ERC721Enumerable swap-and-pop can change the middle of a list without
+  changing either its count or newest token, and an old closed NFT can be
+  revived with `increaseLiquidity`. Each unreadable ownership/position record
+  and anything beyond the guard is named in the status line.
 - **Anything held but not rendered is named in the status line**, per wallet and
-  per chain — `Base: 60 (91 v3 not scanned, 230 v4 unreadable)`. This is the
-  claim to check first if you check only one, because a count on its own reads
-  as "this is all of it". It was not true until 0.24.1: the popup previously
-  reported the rendered count alone, so a wallet holding 151 v3 positions on
-  Base plus 230 v4 positions the log source rate-limited away was shown as
-  plain `Base: 60`. Measured against a real wallet, not hypothesised.
+  per chain. Closed-but-owned NFTs are distinguished from failed reads. A live
+  Base wallet that previously read `230 v4 unreadable` now enumerates all 230
+  through its configured Alchemy NFT index, verifies every candidate with
+  `ownerOf` plus `balanceOf`, and reports `230 closed v4 hidden` because their
+  on-chain liquidity is actually zero. The Transfer-log route remains the
+  keyless fallback.
 - Lifetime history needs a log source that will serve a full-range,
   topic-filtered query. The measured landscape as of 2026-08-19:
   - **Robinhood Chain's public RPC serves it keylessly.** Nothing to configure.
@@ -249,9 +259,11 @@ applies to any unpacked extension, not just this one.
     `rpc.ankr.com` (key), `rpc.mevblocker.io` (10k), `eth-pokt.nodies.app`,
     `rpc.flashbots.net` (pruned), `cloudflare-eth.com`, `eth.merkle.io`.
   - **Alchemy's free tier caps `eth_getLogs` at a 10-block range**, so a free
-    Alchemy key does *not* enable history — 25M blocks at 10 per request is a
-    different order of magnitude, not a rate-limit problem. PAYG lifts it.
-    Alchemy free *does* serve archive `eth_call`, which is a usable general RPC.
+    Alchemy key does *not* enable lifetime history — 25M blocks at 10 per
+    request is a different order of magnitude, not a rate-limit problem. PAYG
+    lifts it.
+    Alchemy free *does* serve archive `eth_call`, which is a usable general RPC,
+    and the NFT ownership endpoint enables verified v4 enumeration.
   - **Etherscan's V2 API serves it on the free tier for most chains**, 100k
     calls/day, and `topic1`-only filtering is accepted — so one call returns a
     position's whole lifetime. Put a key from etherscan.io/apis in the options
@@ -284,7 +296,11 @@ applies to any unpacked extension, not just this one.
 - Tick ratios use `1.0001^(tick/2)` in doubles — display-grade. Swap in
   `@uniswap/v3-sdk` TickMath before this ever produces calldata.
 - `collect()` staticcall returns fees **plus** any principal pending after a
-  `decreaseLiquidity`. Labelled "collectable", never "fees earned".
+  `decreaseLiquidity`. Labelled "collectable", never "fees earned". Lifetime
+  fees are computed as collected + currently collectable - all decreased
+  principal, so a pending partial withdrawal cannot erase old fees or count its
+  principal as new fees. If the staticcall fails, return/PnL is withheld rather
+  than treating the unknown amount as zero.
 - DexScreener misses long-tail tokens; those render "unpriced". Marks are
   guarded by chain and by pool depth, and both guards matter: DexScreener
   returns pairs across every chain it indexes, and querying Ethereum WETH
@@ -292,8 +308,11 @@ applies to any unpacked extension, not just this one.
   marked WETH at `$0.0000122` instead of `$1,932.99` was a live defect until
   0.12.0. A token whose materially liquid pools disagree by more than 25% is
   left unpriced rather than marked at a number nobody can stand behind.
-- **v4 lifetime history is not implemented.** v4 emits `ModifyLiquidity` from
-  the PoolManager keyed by poolId and salt, not per tokenId, so the
+- **v4 lifetime history is not implemented.** Current v4 ownership, liquidity,
+  composition and collectable fees refresh from chain state, but adds/removes/
+  claims are not reconstructed as lifetime token flows. v4 emits
+  `ModifyLiquidity` from the PoolManager keyed by poolId and salt, not per
+  tokenId, so the
   one-query-per-position approach that makes v3 history cheap does not carry
   over. v4 positions report history as unavailable rather than showing a
   partial one.
