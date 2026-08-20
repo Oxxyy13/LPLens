@@ -61,6 +61,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const overrides = store.rpcOverrides || {};
         const data = await loadPositionByVersion(msg.chain, msg.version || 'v3', BigInt(msg.tokenId), {
           rpcOverride: overrides[msg.chain] || undefined,
+          // Bridged USD pricing can need a second chain. Robinhood WETH, for
+          // example, maps the local event time to Ethereum and reads the
+          // historical USDC/WETH pool there. Passing only the local override
+          // made the popup exact while the on-page overlay silently lost its
+          // Ethereum archive endpoint and fell back to a vs-holding percent.
+          rpcOverrides: overrides,
           etherscanKey: store.etherscanKey || undefined,
         });
         // BigInt does not survive structured clone to the content script.

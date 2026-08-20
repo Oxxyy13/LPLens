@@ -447,8 +447,12 @@ function gutterCard(row) {
   // $15.94 displayed as -3.4% and read as a loss. vs-holding stays directly
   // underneath, because the two genuinely disagree in sign and both matter.
   const hasTotal = u && u.pnl !== null && u.pnl !== undefined;
-  const headline = hasTotal ? cash(u.pnl) : (v ? `${v.pct > 0 ? '+' : ''}${v.pct.toFixed(2)}%` : '—');
-  const headTone = hasTotal ? tone(u.pnl) : (v ? tone(v.pct) : '');
+  // The headline has one semantic contract: dollar LP return. A missing USD
+  // leg must not replace it with the differently-scoped vs-holding percent;
+  // that made two otherwise identical cards answer different questions in the
+  // largest type. Keep vs holding below and show an honest dash here.
+  const headline = hasTotal ? cash(u.pnl) : '—';
+  const headTone = hasTotal ? tone(u.pnl) : '';
 
   const lines = [];
   if (hasTotal) {
@@ -462,7 +466,7 @@ function gutterCard(row) {
   }
 
   return `<div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${(d.fee / 10000).toFixed(2)}%</span></div>
-    <div class="gc-lbl">${hasTotal ? 'LP return' : 'vs holding'}</div>
+    <div class="gc-lbl">LP return</div>
     <div class="gc-val ${headTone}">${headline}</div>
     ${lines.length ? `<div class="gc-sub">${lines.join('<br>')}</div>` : ''}
     ${bar}

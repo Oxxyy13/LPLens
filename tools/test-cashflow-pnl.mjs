@@ -109,6 +109,19 @@ async function testNoCollectedTokensInCurrentValue() {
     'historical collections must not be marked today as though still held');
 }
 
+async function testOverlayKeepsDollarReturnAsHeadline() {
+  const [overlay, worker] = await Promise.all([
+    readFile(new URL('../extension/overlay.js', import.meta.url), 'utf8'),
+    readFile(new URL('../extension/sw.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(overlay, /const headline = hasTotal \? cash\(u\.pnl\) : '—';/,
+    'the compact headline must never substitute vs-holding percent for dollar LP return');
+  assert.match(overlay, /<div class="gc-lbl">LP return<\/div>/,
+    'the compact headline must always identify itself as LP return');
+  assert.match(worker, /rpcOverrides: overrides/,
+    'the overlay worker must forward origin-chain RPCs needed for bridged historical pricing');
+}
+
 function testAggregateLabelsAndExclusions() {
   const got = summarizeAggregate([
     { history: {}, usd: { currentValue: 80, pnl: 20, pnlPct: 20,
@@ -129,5 +142,6 @@ await testExactPairCanResolveSingleSidedAdd();
 await testEveryAddUsesItsOwnEventPrice();
 await testCollectionAtEventPrice();
 await testNoCollectedTokensInCurrentValue();
+await testOverlayKeepsDollarReturnAsHeadline();
 testAggregateLabelsAndExclusions();
-console.log('cash-flow pnl: 9 regression groups passed');
+console.log('cash-flow pnl: 10 regression groups passed');
