@@ -1,0 +1,26 @@
+# Credentials. LPLens itself never reads these — the extension's only key store
+# is chrome.storage.local, written by the options page, inside the browser
+# profile. .env exists so the packager's leak scan (tools/package.mjs,
+# envSecrets) knows what values must never appear in a build or a commit.
+.env
+.env.*
+
+# Wrangler local state for the licence Worker. Contains request metadata
+# including approximate location and ISP.
+.wrangler/
+
+# Rebuildable output of `node tools/package.mjs`. A build is a zip of
+# extension/; publishing a stale one is exactly what the packager prevents.
+build/
+
+# Internal verification write-ups and monetisation planning. Kept local by
+# choice, not because they are secret.
+docs/
+
+# OS and editor noise
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+node_modules/
+*.sync-conflict-*

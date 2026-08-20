@@ -1,0 +1,101 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="popup.css?v=0.23"></head>
+<body class="options">
+  <main class="options-shell">
+    <header class="options-hero">
+      <img class="options-mark" src="icons/icon128.png" width="44" height="44" alt="">
+      <div>
+        <p class="options-kicker">LPLens control room</p>
+        <h1>Settings</h1>
+        <p class="options-subtitle">Private by default. Precise when you need it.</p>
+      </div>
+      <span class="badge"><span class="badge-dot"></span>read-only</span>
+    </header>
+
+    <section id="licenseSection" class="settings-section" hidden>
+      <div class="section-heading">
+        <span class="section-icon" aria-hidden="true">K</span>
+        <div><h2 id="licenseHeading">Access key</h2><p>Manage access to invite-only builds.</p></div>
+      </div>
+      <p class="section-copy" id="licenseCopy">This LPLens build is invite-only. Paste the access key you were sent.
+         It is an opaque string &mdash; never a wallet, a signature, or a private key.</p>
+      <input id="licenseKey" type="text" placeholder="Access key">
+      <div id="licenseState" class="inline-state"></div>
+    </section>
+
+    <section class="settings-section privacy-section">
+      <div class="section-heading">
+        <span class="section-icon privacy" aria-hidden="true">✓</span>
+        <div><h2>Privacy by construction</h2><p>The extension only asks for what it needs.</p></div>
+      </div>
+      <p class="section-copy">Only the wallet address you type and public blockchain data are read. There is no wallet connection, private key, signing, page content, or browsing history access.</p>
+      <div class="privacy-grid">
+        <span><b>Stored locally</b><small>Wallet addresses</small></span>
+        <span><b>Sent only to</b><small>RPC and price APIs</small></span>
+        <span><b>Never requested</b><small>Wallet signatures</small></span>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="section-heading">
+        <span class="section-icon" aria-hidden="true">U</span>
+        <div><h2>Uniswap overlay</h2><p>Bring position context onto the page where you use it.</p></div>
+      </div>
+      <p class="section-copy">LPLens ships with <b>no ability to read or change any web page</b>. The overlay permission is limited to one site and can be revoked instantly.</p>
+      <label class="perm switch-row">
+        <span><b>Show the position overlay</b><small>On <code>app.uniswap.org</code> position pages</small></span>
+        <input type="checkbox" id="overlayPerm">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+    </section>
+
+    <section class="settings-section">
+      <div class="section-heading">
+        <span class="section-icon" aria-hidden="true">i</span>
+        <div><h2>Live permission report</h2><p>Generated from this installed build, not from marketing copy.</p></div>
+      </div>
+      <div id="permReport" class="permreport"></div>
+    </section>
+
+    <details class="advanced settings-section">
+      <summary><span><b>Advanced connections</b><small>Custom RPC endpoints and optional Etherscan access</small></span></summary>
+      <p class="section-copy">Optional. Leave this closed unless you have a reason to
+      change endpoints or add a key. Blockscout already serves lifetime history on
+      Ethereum, Base, Arbitrum and Polygon with no key, so nothing here is
+    required. An Etherscan V2 key is faster, and it is the only way to get
+    complete Polygon history &mdash; <code>polygon.blockscout.com</code>
+    silently misses positions below roughly tokenId 1.2M. Custom RPC URLs are
+    for when a public endpoint rate-limits you.</p>
+
+    <h2>Custom RPC endpoints</h2>
+    <p class="section-copy">Leave blank to use the built-in public defaults. Your own
+    Alchemy/Infura/dRPC URL is faster and more reliable. Alchemy's free tier
+    still caps <code>eth_getLogs</code> at a 10-block range, so an Alchemy URL
+    here does not replace a history source.</p>
+    <div id="rpcs"></div>
+
+    <h2>Etherscan V2 API key</h2>
+    <p class="section-copy">Optional. Free key from
+    <a href="https://etherscan.io/apis" target="_blank">etherscan.io/apis</a>
+    (Etherscan V2 is multichain). Faster than Blockscout on Ethereum, Arbitrum
+    and Polygon. On Base, Etherscan's free tier refuses logs, so LPLens keeps
+    using Blockscout there even with a key. Robinhood Chain needs neither: its
+    public RPC already serves full-range logs.</p>
+    <div class="row">
+      <input id="etherscanKey" type="password" placeholder="Etherscan V2 API key (optional)" autocomplete="off">
+      <label class="check" style="margin:0;white-space:nowrap">
+        <input type="checkbox" id="showEtherscan"> show
+      </label>
+    </div>
+    </details>
+
+    <div class="savebar">
+      <span><b>Settings stay on this device.</b><small>Nothing is synced to an LPLens account.</small></span>
+      <span id="saved" class="status"></span>
+      <button id="save" class="primary-button" type="button">Save settings</button>
+    </div>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

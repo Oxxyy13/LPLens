@@ -1,0 +1,8 @@
+name = "lplens-beta"
+main = "worker.js"
+compatibility_date = "2026-08-19"
+# Free-tier workers.dev URL after deploy:
+#   https://lplens-beta.<your-subdomain>.workers.dev/
+# Paste that URL into extension/lib/license.js VALIDATE_URL and the matching
+# exact host into extension/manifest.json host_permissions. Do not use
+# https://*.workers.dev/* — that grants every Worker on the internet.

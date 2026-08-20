@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "LPLens \u2014 Uniswap v3 & v4 Position Reader",
+  "version": "0.23.0",
+  "description": "Read-only Uniswap v3 and v4 LP position inspector. Paste any address; nothing is signed and no wallet is connected.",
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://eth.drpc.org/*",
+    "https://base.drpc.org/*",
+    "https://1rpc.io/*",
+    "https://polygon.drpc.org/*",
+    "https://rpc.mainnet.chain.robinhood.com/*",
+    "https://*.g.alchemy.com/*",
+    "https://ethereum-rpc.publicnode.com/*",
+    "https://base.llamarpc.com/*",
+    "https://api.dexscreener.com/*",
+    "https://api.etherscan.io/*",
+    "https://eth.blockscout.com/*",
+    "https://base.blockscout.com/*",
+    "https://arbitrum.blockscout.com/*",
+    "https://polygon.blockscout.com/*",
+    "https://lplens-beta.licence-worker.workers.dev/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "LPLens",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "optional_host_permissions": [
+    "https://app.uniswap.org/*"
+  ]
+}

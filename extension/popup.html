@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css?v=0.23">
+</head>
+<body>
+  <header class="pop-head">
+    <img class="mark" src="icons/icon48.png" width="24" height="24" alt="">
+    <div class="brand-copy">
+      <h1 class="pop-title">LPLens</h1>
+      <span class="product-kicker">LP position intelligence</span>
+    </div>
+    <span class="badge"><span class="badge-dot"></span>read-only</span>
+  </header>
+
+  <div class="pop-body">
+  <form id="form" class="scan-form">
+    <label class="field-label" for="address">Wallet address</label>
+    <div class="row addr-row">
+      <input id="address" type="text" placeholder="0x… wallet address" autocomplete="off" spellcheck="false" disabled>
+      <button type="button" id="addWallet" class="icon-button" title="Enter a valid 0x address" aria-label="Save wallet" disabled>+</button>
+    </div>
+
+    <details class="saved" id="savedWallets">
+      <summary>Saved wallets (<span id="savedCount">0</span>)</summary>
+      <div id="savedList" class="saved-list"></div>
+    </details>
+
+    <div class="row scan-row">
+      <button id="go" class="primary-button" type="submit" disabled>Load positions</button>
+      <button type="button" id="scanAll" class="secondary-button" disabled title="Scan every saved wallet">Scan all</button>
+    </div>
+    <label class="check">
+      <input type="checkbox" id="includeClosed"> <span>Include closed positions</span>
+    </label>
+    <p id="scanHint" class="notice" hidden></p>
+  </form>
+
+  <div id="status" class="status">Checking access…</div>
+  <div id="results"></div>
+  </div>
+
+  <footer>
+    <div class="notice security-note">
+      <span class="security-icon" aria-hidden="true">✓</span>
+      <span>Nothing is signed and no wallet is connected.</span>
+      <a href="options.html" target="_blank">Settings <span aria-hidden="true">↗</span></a>
+    </div>
+  </footer>
+
+  <script src="render.js?v=0.23"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
