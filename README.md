@@ -8,7 +8,7 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.25.0 — invite-only beta
+## Status: 0.26.0 — invite-only beta
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -29,7 +29,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.25.0
+diff -r extension build/lplens-0.26.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -66,6 +66,9 @@ Two claims worth checking directly, because they are the ones that matter:
   remove cannot be cached as the new truth
 - Values **every liquidity addition at its own block and pool price**. A second
   add is not silently priced at the original mint anymore
+- Values every **Collect** when it left the LP. Claiming, partially removing,
+  and then reusing those tokens in another NFT no longer counts them as both
+  still held and newly deposited
 - Solves **entry and exit price** from the event amounts plus the tick range,
   with no archive node, cross-checked by two independent derivations
 - Scans Ethereum, Base, Arbitrum, Polygon and Robinhood Chain (4663) together;
@@ -83,27 +86,36 @@ Two claims worth checking directly, because they are the ones that matter:
   match the truncated id v4 stores in `PositionInfo`, and StateView's liquidity
   must equal the PositionManager's.
 
-## The two PnL numbers
+## The two LP performance numbers
 
-PnL comes in two forms, because they answer different questions. LPLens keeps
-them separate and never blends them into one headline:
+They answer different questions, so LPLens keeps them separate:
 
 - **vs holding** — did LPing beat simply holding the deposit? Fees minus
   impermanent loss, both baskets valued at one price. Exact, no USD needed.
-- **total return** — what happened to the money. Everything you hold or withdrew,
-  valued now, against what it cost at the deposit block.
+- **LP return** — what the LP strategy made. Current position plus claimable
+  amounts, plus collections valued when they left the LP, minus every addition
+  valued when it entered.
 
-The second used to be refused. The refusal was correct about price *APIs* and
-wrong about the chain: a USDC/WETH pool's `slot0` read at a historical block is
-the dollar price of ETH at that block, exactly, and archive `eth_call` serves it
-on a free tier down to block 12,500,000. So the cost basis is derived from chain
-state at the deposit block — not from today's rate applied backwards, which is
-the `token_delta x price_now` error this project exists to avoid. Current marks
-come the same way, so both halves of the subtraction share one source.
+The second is cash-flow accounting, not wallet tax basis. `gross added` is the
+fair value of each LP contribution at its own block; it is not the average price
+the wallet originally paid to acquire those tokens. Reconstructing acquisition
+lots would require the wallet's swaps, transfers and a chosen lot method, and is
+deliberately a separate future ledger.
 
-The two numbers usually differ enormously and that is the point. On a real
-closed position: total return **+$9,064 (+34.16%)**, of which **+$7.57** was
-LPing. The rest was ETH moving from $1,489 to $1,936.
+Event-time valuation is what makes rebalancing behave. A partial remove stays
+inside `claimable` until Collect transfers it out. At Collect, the same value
+moves to `cash returned`. If it is deposited into another NFT, that new addition
+is a new negative cash flow, so the two flows offset at portfolio level. The old
+formula marked every historical collection at today's price as though it were
+still held, which double-counted recycled capital.
+
+Historical dollars come from chain state, not from applying today's rate
+backwards. A USDC/WETH pool's `slot0` at a historical block supplies the dollar
+price of ETH; the position event or its own historical `slot0` supplies the pair
+price. A collection paired with DecreaseLiquidity in one transaction uses that
+decrease's exact price. Fee-only collections fall back to archival `slot0`.
+When an exact required price is unavailable, LP return is withheld rather than
+turning a bound into a point-looking percentage.
 
 **Chains with no stablecoin** are priced through the chain their asset was
 bridged from. Robinhood Chain's WETH trades against thirty memecoins and nothing
@@ -123,8 +135,9 @@ Entry price comes out of the event alone. For a two-sided mint, the two sides
 each solve for the same square-root price, so the pair is a self-check rather
 than one unverified number — measured agreement is 0.000000% across six
 positions, and any disagreement is printed as a band instead of being averaged
-away. A single-sided mint is genuinely underdetermined and renders as a bound,
-never as a price.
+away. A single-sided mint is underdetermined from its event alone. A direct WETH
+or stablecoin leg, or an archival position-pool read, can still make its dollar
+flow exact. Otherwise it renders as a bound and LP return is withheld.
 
 ## Install
 

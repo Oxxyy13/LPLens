@@ -29,18 +29,66 @@
  * WHAT IT CANNOT DO. Only positions with a leg in the reference token (WETH) or
  * in the stablecoin can be priced this way; anything else would need a second
  * hop through a pool that may not exist, and returns null instead of a guess.
- * A single-sided mint yields a *bounded* entry price, so its cost basis is a
- * bound too, and that is reported rather than rounded into a point value.
+ * A single-sided event yields a bounded pair price. A direct reference-token
+ * leg or archival slot0 can still price its dollar flow exactly; otherwise the
+ * bound is reported and LP return is withheld.
  */
 import { ethCall, rpcCall } from './rpc.js';
-import { words, toUint, toAddress, encAddress, encUint, SELECTOR } from './abi.js';
+import {
+  words, toUint, toAddress, encAddress, encUint, SELECTOR, decodeSlot0,
+} from './abi.js';
 import { CHAINS } from './chains.js';
+import { humanPrice } from './v3.js';
 
 const SEL_TOKEN0 = '0x0dfe1681';   // token0(), derived with keccak256
 
 const poolCache = new Map();    // `${chain}` -> {pool, stableIsToken0, stableDecimals}
 const priceCache = new Map();   // `${chain}:${block}` -> number | null
+const positionPriceCache = new Map(); // `${chain}:${pool}:${block}` -> pool price
+const timeBlockCache = new Map(); // `${chain}:${timestamp}` -> reference-chain block
 const LATEST_PRICE_TTL_MS = 60_000;
+const ETHERSCAN_LOOKUP_GAP_MS = 350;
+let etherscanLookupQueue = Promise.resolve();
+let lastEtherscanLookupAt = 0;
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Serialize timestamp lookups so one multi-position scan stays under free-tier limits. */
+async function referenceBlockAtTime(target, timestamp, key) {
+  const cacheKey = `${target.etherscanChainId}:${timestamp}`;
+  if (timeBlockCache.has(cacheKey)) return timeBlockCache.get(cacheKey);
+
+  const lookup = async () => {
+    if (timeBlockCache.has(cacheKey)) return timeBlockCache.get(cacheKey);
+    const gap = Date.now() - lastEtherscanLookupAt;
+    if (gap < ETHERSCAN_LOOKUP_GAP_MS) await wait(ETHERSCAN_LOOKUP_GAP_MS - gap);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      lastEtherscanLookupAt = Date.now();
+      try {
+        const qs = new URLSearchParams({
+          chainid: String(target.etherscanChainId), module: 'block',
+          action: 'getblocknobytime', timestamp: String(timestamp),
+          closest: 'before', apikey: key,
+        });
+        const res = await fetch(`https://api.etherscan.io/v2/api?${qs}`);
+        const body = await res.json();
+        if (body.status === '1') {
+          const block = Number(body.result);
+          if (block > 0) {
+            timeBlockCache.set(cacheKey, block);
+            return block;
+          }
+        }
+      } catch { /* retry below */ }
+      if (attempt < 2) await wait(500 * (attempt + 1));
+    }
+    return null;
+  };
+
+  const task = etherscanLookupQueue.then(lookup, lookup);
+  etherscanLookupQueue = task.catch(() => null);
+  return task;
+}
 
 /** Resolve the chain's USDC/WETH reference pool from the factory, once. */
 async function referencePool(chainKey, rpc) {
@@ -84,7 +132,14 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
     priceCache.delete(key);
   }
   const remember = (price) => {
-    priceCache.set(key, block === 'latest' ? { price, at: Date.now() } : price);
+    // Null usually means a provider refusal or rate limit, not a chain fact.
+    // Keeping it would make a transient failure stick for the service worker's
+    // whole lifetime, so only successful immutable prices are memoised.
+    if (price !== null && price !== undefined) {
+      priceCache.set(key, block === 'latest' ? { price, at: Date.now() } : price);
+    } else {
+      priceCache.delete(key);
+    }
     return price;
   };
 
@@ -131,7 +186,11 @@ async function bridgedUsd(chainKey, block, opts = {}) {
   if (!target) return null;
 
   // 'latest' needs no time alignment.
-  if (block === 'latest') return refUsdAtBlock(via, 'latest', {});
+  const viaOpts = {
+    ...opts,
+    rpcOverride: opts.rpcOverrides?.[via] || undefined,
+  };
+  if (block === 'latest') return refUsdAtBlock(via, 'latest', viaOpts);
 
   let timestamp = null;
   try {
@@ -145,20 +204,10 @@ async function bridgedUsd(chainKey, block, opts = {}) {
   const key = opts.etherscanKey || target.etherscanKey;
   if (!key || !target.etherscanChainId) return null;
 
-  let targetBlock = null;
-  try {
-    const qs = new URLSearchParams({
-      chainid: String(target.etherscanChainId), module: 'block',
-      action: 'getblocknobytime', timestamp: String(timestamp),
-      closest: 'before', apikey: key,
-    });
-    const res = await fetch(`https://api.etherscan.io/v2/api?${qs}`);
-    const body = await res.json();
-    if (body.status === '1') targetBlock = Number(body.result);
-  } catch { return null; }
+  const targetBlock = await referenceBlockAtTime(target, timestamp, key);
   if (!targetBlock) return null;
 
-  return refUsdAtBlock(via, targetBlock, {});
+  return refUsdAtBlock(via, targetBlock, viaOpts);
 }
 
 /**
@@ -170,9 +219,9 @@ async function bridgedUsd(chainKey, block, opts = {}) {
  * must be the reference token or the stablecoin; otherwise there is no path to
  * dollars that does not involve inventing one, and null is returned.
  *
- * Used for BOTH ends of the PnL calculation, which is deliberate: deriving the
- * cost basis from chain state and the current value from a price API would mean
- * the two halves of one subtraction came from sources that can disagree.
+ * Used for every historical cash-flow leg and for the current mark. Mixing an
+ * event-time source with an unrelated current price feed would make one return
+ * subtraction depend on sources that can disagree.
  */
 export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts = {}) {
   const chain = CHAINS[chainKey];
@@ -197,8 +246,91 @@ export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts
   return null;
 }
 
+/** Exact position-pool price at a historical block, when the RPC is archival. */
+async function positionPoolPrice(chainKey, p, block, opts = {}) {
+  if (!p.pool || block === null || block === undefined) return null;
+  const key = `${chainKey}:${String(p.pool).toLowerCase()}:${block}`;
+  if (positionPriceCache.has(key)) return positionPriceCache.get(key);
+  const chain = CHAINS[chainKey];
+  const rpc = opts.rpcOverride || (chain && chain.rpc);
+  if (!rpc) return null;
+  try {
+    const hex = await ethCall(rpc, p.pool, SELECTOR.slot0, undefined,
+      '0x' + BigInt(block).toString(16));
+    const slot = decodeSlot0(hex);
+    const price = humanPrice(
+      slot.sqrtPriceX96, p.token0Meta.decimals, p.token1Meta.decimals);
+    if (!(price > 0) || !Number.isFinite(price)) return null;
+    positionPriceCache.set(key, price);
+    return price;
+  } catch {
+    // Do not cache failure: a later configured archive endpoint may succeed.
+    return null;
+  }
+}
+
 /**
- * USD cost basis of what was deposited, valued at the deposit block.
+ * Price a flow without needing the pair ratio when every non-zero leg is
+ * already a dollar reference (stablecoin or WETH). This makes a single-sided
+ * WETH/USDC flow exact even when the position pool has no archival RPC.
+ */
+async function directPairAt(chainKey, p, flow, opts = {}) {
+  const chain = CHAINS[chainKey];
+  const ref = chain && chain.usdRef;
+  if (!ref) return null;
+  const tokens = [String(p.token0).toLowerCase(), String(p.token1).toLowerCase()];
+  const amounts = [flow.amount0, flow.amount1];
+  const weth = String(ref.weth || '').toLowerCase();
+  const stable = String(ref.stable || '').toLowerCase();
+  let wethUsd;
+  const out = [];
+  for (let i = 0; i < 2; i++) {
+    if (stable && tokens[i] === stable) out[i] = 1;
+    else if (weth && tokens[i] === weth) {
+      if (wethUsd === undefined) wethUsd = await refUsdAtBlock(chainKey, flow.block, opts);
+      if (!(wethUsd > 0)) return null;
+      out[i] = wethUsd;
+    } else if (amounts[i] === 0) out[i] = 0;
+    else return null;
+  }
+  return { usd0: out[0], usd1: out[1], exact: true, source: 'direct-reference' };
+}
+
+/**
+ * Historical USD pair for one Increase/Collect cash flow.
+ *
+ * Exact event math is cheapest and needs no archive node. Direct reference
+ * tokens come next. A historical slot0 read resolves otherwise-underdetermined
+ * single-sided adds and fee-only collects when an archive RPC is configured.
+ * The event's range bound is the final fallback and stays explicitly inexact.
+ */
+async function historicalPairAt(chainKey, p, flow, opts = {}) {
+  if (flow.entry && flow.entry.exact && flow.entry.price > 0) {
+    const pair = await usdPairAt(
+      chainKey, p.token0, p.token1, flow.entry.price, flow.block, opts);
+    return pair ? { ...pair, exact: true, source: 'event-math' } : null;
+  }
+
+  const direct = await directPairAt(chainKey, p, flow, opts);
+  if (direct) return direct;
+
+  const poolPrice = await positionPoolPrice(chainKey, p, flow.block, opts);
+  if (poolPrice) {
+    const pair = await usdPairAt(
+      chainKey, p.token0, p.token1, poolPrice, flow.block, opts);
+    if (pair) return { ...pair, exact: true, source: 'archive-slot0' };
+  }
+
+  if (flow.entry && flow.entry.price > 0) {
+    const pair = await usdPairAt(
+      chainKey, p.token0, p.token1, flow.entry.price, flow.block, opts);
+    return pair ? { ...pair, exact: false, source: 'event-bound' } : null;
+  }
+  return null;
+}
+
+/**
+ * Gross USD value added to the LP, with each addition valued at its block.
  *
  * The position's own entry price supplies the ratio between its two tokens at
  * that moment — exactly, solved from the mint event — and the reference pool
@@ -216,11 +348,8 @@ export async function costBasisUsd(chainKey, p, opts = {}) {
     h.entry && h.firstBlock ? [{
       block: h.firstBlock, amount0: h.deposited0, amount1: h.deposited1, entry: h.entry,
     }] : []);
-  return sumDepositBasis(deposits, async (deposit) => {
-    if (!deposit.entry || !(deposit.entry.price > 0)) return null;
-    return usdPairAt(
-      chainKey, p.token0, p.token1, deposit.entry.price, deposit.block, opts);
-  });
+  return sumDepositBasis(deposits,
+    (deposit) => historicalPairAt(chainKey, p, deposit, opts));
 }
 
 /** Sum each liquidity addition at its own historical block and pool price. */
@@ -235,8 +364,12 @@ export async function sumDepositBasis(deposits, priceAt) {
     const value = deposit.amount0 * pair.usd0 + deposit.amount1 * pair.usd1;
     if (!Number.isFinite(value) || value < 0) return null;
     basis += value;
-    if (!deposit.entry || deposit.entry.exact === false) exact = false;
-    legs.push({ block: deposit.block, value, usd0: pair.usd0, usd1: pair.usd1 });
+    if (pair.exact === false || (pair.exact === undefined
+        && (!deposit.entry || deposit.entry.exact === false))) exact = false;
+    legs.push({
+      block: deposit.block, value, usd0: pair.usd0, usd1: pair.usd1,
+      exact: pair.exact !== false, source: pair.source || null,
+    });
   }
   if (!(basis > 0)) return null;
   return {
@@ -246,4 +379,50 @@ export async function sumDepositBasis(deposits, priceAt) {
     bound: exact ? null : 'one or more liquidity additions were single-sided',
     legs,
   };
+}
+
+/** Collected principal and fees, valued when they actually left the LP. */
+export async function collectedProceedsUsd(chainKey, p, opts = {}) {
+  const chain = CHAINS[chainKey];
+  const h = p.history;
+  if (!chain?.usdRef || !h || h.unavailable) return null;
+  const collections = Array.isArray(h.collections) ? h.collections : [];
+  if (!collections.length) return { proceeds: 0, exact: true, bound: null, legs: [] };
+
+  let proceeds = 0;
+  let exact = true;
+  const legs = [];
+  for (const flow of collections) {
+    const pair = await historicalPairAt(chainKey, p, flow, opts);
+    if (!pair) return null;
+    const value = flow.amount0 * pair.usd0 + flow.amount1 * pair.usd1;
+    if (!Number.isFinite(value) || value < 0) return null;
+    proceeds += value;
+    if (pair.exact === false) exact = false;
+    legs.push({
+      block: flow.block, value, usd0: pair.usd0, usd1: pair.usd1,
+      exact: pair.exact !== false, source: pair.source || null,
+    });
+  }
+  return {
+    proceeds,
+    exact,
+    bound: exact ? null : 'one or more collections could only be bounded',
+    legs,
+  };
+}
+
+/**
+ * LP strategy cash-flow return. Collections stop participating in LP return
+ * at the block they leave the position; they are not assumed to remain held.
+ */
+export function strategyReturn(grossAdded, collected, currentValue) {
+  if (!grossAdded || !collected || currentValue === null || currentValue === undefined) {
+    return { pnl: null, pnlPct: null };
+  }
+  if (!grossAdded.exact || !collected.exact || !(grossAdded.basis > 0)) {
+    return { pnl: null, pnlPct: null };
+  }
+  const pnl = currentValue + collected.proceeds - grossAdded.basis;
+  return { pnl, pnlPct: pnl / grossAdded.basis * 100 };
 }

@@ -11,7 +11,9 @@ import {
 } from './history.js';
 import { fingerprint, readHistory, readHistoryAny, writeHistory } from './cache.js';
 import { enumerateV4, loadV4Position, V4 } from './v4.js';
-import { costBasisUsd, usdPairAt } from './histprice.js';
+import {
+  costBasisUsd, collectedProceedsUsd, strategyReturn, usdPairAt,
+} from './histprice.js';
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
@@ -499,13 +501,14 @@ async function scanV4(chainKey, owner, opts = {}) {
  *   vsHoldUsd  — the vs-HODL delta converted at today's price. Legitimate,
  *                because vs-HODL already values both baskets at one moment;
  *                this only restates that single-moment result in dollars.
- *   valueUsd   — what the position is worth right now. A plain current mark.
- *   feesUsd    — fees earned, valued today. Tokens you actually hold.
+ *   currentValue — active liquidity plus claimable amounts, marked now.
+ *   grossAdded   — every addition valued at its own block.
+ *   cashReturned — every collection valued at its own block.
+ *   pnl          — currentValue + cashReturned − grossAdded.
  *
- * What is deliberately NOT here is "dollars made since deposit", i.e.
- * value_now_usd − value_at_deposit_usd. That needs a USD mark at the deposit
- * block, and pricing the old basket at today's rate instead is exactly the
- * `token_delta × price_now` error this project exists to avoid.
+ * Historical collections are never marked today. Once value leaves an LP it
+ * stops accruing to that position; assuming it remains held double-counts it
+ * when the owner rebalances into another NFT.
  *
  * Marks come from DexScreener and are best-effort: an unpriced leg yields null,
  * never zero, because a missing price must not read as a worthless position.
@@ -519,7 +522,7 @@ export async function attachUsd(chainKey, p, opts = {}) {
   }
   // Chain-derived marks are preferred over DexScreener: they come from the
   // position's own pool plus the USD reference, so the current value and the
-  // cost basis are produced the same way. DexScreener only fills the gap for
+  // historical cash flows are produced the same way. DexScreener only fills the gap for
   // pairs with no leg in the reference token or the stablecoin.
   let chainPair = null;
   try {
@@ -538,18 +541,30 @@ export async function attachUsd(chainKey, p, opts = {}) {
     return (p0 ?? 0) * a0 + (p1 ?? 0) * a1;
   };
 
-  // True USD PnL: what everything is worth now, against what it cost at the
-  // deposit block. The cost basis comes from chain state at that block, not
-  // from today's price applied backwards.
+  // Strategy cash flows use event-time dollars on both sides. An addition is
+  // capital entering the LP; a Collect is capital leaving it. Once collected,
+  // tokens are no longer assumed to remain in the wallet forever — doing that
+  // double-counts them when they are re-used in a new NFT.
   let basis = null;
   try { basis = await costBasisUsd(chainKey, p, opts); } catch { basis = null; }
+  let proceeds = null;
+  try { proceeds = await collectedProceedsUsd(chainKey, p, opts); } catch { proceeds = null; }
 
-  const nowAll = p.collectable0 === null || p.collectable1 === null
+  // Decreased-but-uncollected principal lives in collectable, so a remove does
+  // not change return until the assets actually leave the position.
+  const currentNow = p.collectable0 === null || p.collectable1 === null
     ? null
     : mark(
-      (h.received0 ?? 0) + (p.amount0 || 0) + p.collectable0,
-      (h.received1 ?? 0) + (p.amount1 || 0) + p.collectable1,
+      (p.amount0 || 0) + p.collectable0,
+      (p.amount1 || 0) + p.collectable1,
     );
+  const ret = strategyReturn(basis, proceeds, currentNow);
+  let returnUnavailable = null;
+  if (!basis) returnUnavailable = 'gross additions unpriced';
+  else if (!basis.exact) returnUnavailable = 'gross additions are bounded';
+  else if (!proceeds) returnUnavailable = 'collected proceeds unpriced';
+  else if (!proceeds.exact) returnUnavailable = 'collected proceeds are bounded';
+  else if (currentNow === null) returnUnavailable = 'current collectable unavailable';
 
   return {
     ...p,
@@ -558,13 +573,23 @@ export async function attachUsd(chainKey, p, opts = {}) {
       price1: p1 ?? null,
       markSource: chainPair ? 'pool' : 'dexscreener',
       bridged: !!(CHAINS[chainKey] && CHAINS[chainKey].usdRef && CHAINS[chainKey].usdRef.via),
+      grossAdded: basis ? basis.basis : null,
+      grossAddedExact: basis ? basis.exact : null,
+      grossAddedBound: basis ? basis.bound : null,
+      collectedProceeds: proceeds ? proceeds.proceeds : null,
+      collectedProceedsExact: proceeds ? proceeds.exact : null,
+      netCashIn: basis && proceeds && basis.exact && proceeds.exact
+        ? basis.basis - proceeds.proceeds : null,
+      returnUnavailable,
+      pnl: ret.pnl,
+      pnlPct: ret.pnlPct,
+      currentValue: currentNow,
+      // Compatibility aliases for existing local harnesses and old consumers.
+      // UI copy no longer calls gross additions a cost basis.
       costBasis: basis ? basis.basis : null,
       costBasisExact: basis ? basis.exact : null,
       costBasisBound: basis ? basis.bound : null,
-      // Everything you hold or have taken out, valued now, minus what it cost.
-      pnl: basis && nowAll !== null ? nowAll - basis.basis : null,
-      pnlPct: basis && nowAll !== null ? (nowAll / basis.basis - 1) * 100 : null,
-      totalNow: nowAll,
+      totalNow: currentNow,
       // vsHodl.delta is denominated in token1, so it converts with p1 alone.
       vsHodl: v && p1 !== undefined ? v.delta * p1 : null,
       value: mark(p.amount0, p.amount1),
@@ -723,10 +748,31 @@ async function attachHistory(source, chain, p) {
   const deposits = h.events.filter((e) => e.kind === 'increase').map((e) => ({
     block: e.block,
     time: e.time,
+    transactionHash: e.transactionHash || null,
+    logIndex: e.logIndex ?? null,
     amount0: scale(Number(e.amount0), d0),
     amount1: scale(Number(e.amount1), d1),
     entry: priced(e),
   }));
+  const collections = h.events.filter((e) => e.kind === 'collect').map((e) => {
+    // A DecreaseLiquidity in the same transaction gives the exact pool price
+    // for a collect that mixes returned principal with fees. Fee-only collects
+    // have no such event; historical slot0 pricing gets a chance later.
+    const paired = e.transactionHash
+      ? [...h.events].reverse().find((candidate) => candidate.kind === 'decrease'
+        && candidate.transactionHash === e.transactionHash
+        && (candidate.logIndex ?? -1) < (e.logIndex ?? Number.MAX_SAFE_INTEGER))
+      : null;
+    return {
+      block: e.block,
+      time: e.time,
+      transactionHash: e.transactionHash || null,
+      logIndex: e.logIndex ?? null,
+      amount0: scale(Number(e.amount0), d0),
+      amount1: scale(Number(e.amount1), d1),
+      entry: paired ? priced(paired) : null,
+    };
+  });
   const fee0 = p.collectableRaw0 === null
     ? null : lifetimeFees(acct.received0, p.collectableRaw0, acct.withdrawn0);
   const fee1 = p.collectableRaw1 === null
@@ -754,6 +800,7 @@ async function attachHistory(source, chain, p) {
       // An exit price only exists once the position is actually closed.
       exit: p.liquidity === 0n && lastRemove ? priced(lastRemove) : null,
       deposits,
+      collections,
       deposited0: scale(Number(acct.deposited0), d0),
       deposited1: scale(Number(acct.deposited1), d1),
       received0: scale(Number(acct.received0), d0),

@@ -337,8 +337,8 @@ function totalsCard(positions) {
   if (!a.n) return '';
   return `<div class="card totals">
     <div class="tot-line"><span class="k">vs holding</span>${esc(a.vsLine.replace(/^vs holding\s*/, ''))}</div>
-    <div class="tot-line"><span class="k">total return</span>${esc(a.returnLine.replace(/^total return\s*/, ''))}</div>
-    <div class="tot-line"><span class="k">now</span>${esc(a.valueLine.replace(/^now\s*/, ''))}</div>
+    <div class="tot-line"><span class="k">LP return</span>${esc(a.returnLine.replace(/^LP return\s*/, ''))}</div>
+    <div class="tot-line"><span class="k">in positions</span>${esc(a.valueLine.replace(/^in positions\s*/, ''))}</div>
   </div>`;
 }
 

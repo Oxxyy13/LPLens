@@ -267,11 +267,11 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
    *
    * This block previously carried eight figures and two paragraphs of
    * explanation — vs-holding, its token delta, its dollar value, fees, IL, fee
-   * APR, total return, cost basis and worth-now. Every one of them was true and
+   * APR, LP return, gross additions and worth-now. Every one of them was true and
    * the aggregate was unreadable, which is its own kind of wrong: a number
    * nobody finds is not informing anyone. Detail moved behind a toggle.
    *
-   * Total return leads because it answers "did I make money". vs-holding sits
+   * LP return leads because it answers "did the LP strategy make money". vs-holding sits
    * directly under it because it answers "was LPing the reason", and those two
    * routinely disagree in sign.
    */
@@ -295,7 +295,7 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
       : hasTotal
         ? [cls(u.pnl), money(u.pnl, Math.abs(u.pnl) < 10 ? 2 : 0),
            `${u.pnlPct >= 0 ? '+' : ''}${u.pnlPct.toFixed(2)}%`]
-        : ['muted', '—', ''];
+        : ['muted', '—', u && u.returnUnavailable ? esc(u.returnUnavailable) : ''];
 
     return `<div class="stats">
       <div class="stat">
@@ -304,7 +304,7 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
         <span class="stat-n">${vsInner[2]}</span>
       </div>
       <div class="stat">
-        <span class="stat-l">total return</span>
+        <span class="stat-l">LP return</span>
         <span class="stat-v ${totInner[0]}">${totInner[1]}</span>
         <span class="stat-n">${totInner[2]}</span>
       </div>
@@ -362,9 +362,18 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
       rows.push(`<div class="kv"><span>fees earned</span><span class="num pos">+${v.feesPct.toFixed(3)}%</span></div>`);
       rows.push(`<div class="kv"><span>impermanent loss</span><span class="num ${v.il > 0 ? 'neg' : ''}">${v.il > 0 ? '−' : '+'}${Math.abs(v.ilPct).toFixed(3)}%</span></div>`);
     }
-    if (u && u.costBasis !== null && u.costBasis !== undefined
+    const grossAdded = u && u.grossAdded !== undefined ? u.grossAdded : u && u.costBasis;
+    const grossExact = u && u.grossAddedExact !== undefined
+      ? u.grossAddedExact : u && u.costBasisExact;
+    if (u && grossAdded !== null && grossAdded !== undefined
         && u.totalNow !== null && u.totalNow !== undefined) {
-      rows.push(`<div class="kv"><span>cost basis</span><span class="num">$${u.costBasis.toLocaleString('en-US', { maximumFractionDigits: 2 })}${u.costBasisExact ? '' : '*'}</span></div>`);
+      rows.push(`<div class="kv"><span>gross added</span><span class="num">$${grossAdded.toLocaleString('en-US', { maximumFractionDigits: 2 })}${grossExact ? '' : '*'}</span></div>`);
+      if (u.collectedProceeds !== null && u.collectedProceeds !== undefined) {
+        rows.push(`<div class="kv"><span>cash returned</span><span class="num">$${u.collectedProceeds.toLocaleString('en-US', { maximumFractionDigits: 2 })}${u.collectedProceedsExact ? '' : '*'}</span></div>`);
+      }
+      if (u.netCashIn !== null && u.netCashIn !== undefined) {
+        rows.push(`<div class="kv"><span>net cash in</span><span class="num">${u.netCashIn < 0 ? '−' : ''}$${Math.abs(u.netCashIn).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>`);
+      }
       rows.push(`<div class="kv"><span>worth now</span><span class="num">$${u.totalNow.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>`);
     }
 
@@ -412,7 +421,8 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     if (v && v.apr !== null && v.aprDays !== null && v.aprDays < 7) {
       caveats.push(`*APR extrapolated from ${humanSpan(v.aprDays)} — a ×${Math.round(365.25 / v.aprDays)} annualisation, so a direction not a rate.`);
     }
-    if (u && u.costBasis && !u.costBasisExact) caveats.push('*Cost basis is a bound: at least one liquidity addition was single-sided.');
+    if (u && grossAdded && !grossExact) caveats.push('*Gross added is a bound: at least one liquidity addition was single-sided and no exact archive price was available. LP return is withheld.');
+    if (u && u.collectedProceeds !== null && !u.collectedProceedsExact) caveats.push('*Cash returned is bounded because an exact collection-time pool price was unavailable. LP return is withheld.');
     if (h && h.currentUnavailable) caveats.push('Current collectable amounts could not be read, so return and fee figures are withheld.');
     if (u && u.bridged) caveats.push('USD priced via the bridge origin chain; assumes the wrapped token holds its peg.');
     if (h && h.unavailable) caveats.push(`History unavailable — ${esc(h.unavailable)}`);

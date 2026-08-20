@@ -286,7 +286,7 @@ function body(d) {
     const feeUsd = u && u.collectable !== null && u.collectable !== undefined
       ? `$${u.collectable.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
       : `${fmt(d.collectable0)} ${esc(s0)} + ${fmt(d.collectable1)} ${esc(s1)}`;
-    quick.push(`<div class="kv"><span>uncollected fees</span><span class="num">${feeUsd}</span></div>`);
+    quick.push(`<div class="kv"><span>claimable</span><span class="num">${feeUsd}</span></div>`);
   }
 
   const statusClass = ({ 'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed' }[d.status]) || '';
@@ -452,7 +452,7 @@ function gutterCard(row) {
 
   const lines = [];
   if (hasTotal) {
-    lines.push(`<span class="${tone(u.pnlPct)}">${u.pnlPct >= 0 ? '+' : ''}${u.pnlPct.toFixed(1)}%</span> total`);
+    lines.push(`<span class="${tone(u.pnlPct)}">${u.pnlPct >= 0 ? '+' : ''}${u.pnlPct.toFixed(1)}%</span> on gross added`);
   }
   if (v) {
     lines.push(`<span class="${tone(v.pct)}">${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}%</span> vs holding`);
@@ -462,7 +462,7 @@ function gutterCard(row) {
   }
 
   return `<div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${(d.fee / 10000).toFixed(2)}%</span></div>
-    <div class="gc-lbl">${hasTotal ? 'total return' : 'vs holding'}</div>
+    <div class="gc-lbl">${hasTotal ? 'LP return' : 'vs holding'}</div>
     <div class="gc-val ${headTone}">${headline}</div>
     ${lines.length ? `<div class="gc-sub">${lines.join('<br>')}</div>` : ''}
     ${bar}

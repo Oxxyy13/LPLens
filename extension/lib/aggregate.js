@@ -4,14 +4,14 @@
  * An aggregate is the easiest place in this product to silently lie. An
  * unpriced position treated as $0 under-reports and looks authoritative
  * doing it — the same defect as rendering $0 instead of an em-dash, one
- * level up. vs-holding and total return stay separate: they answer
+ * level up. vs-holding and LP return stay separate: they answer
  * different questions and collapsing them is the error this project exists
  * to avoid. Summing USD is legitimate only because both halves already
- * share one price source; nothing here multiplies a historical quantity
- * by today's price.
+ * share one price source; additions and collections are already valued at
+ * their event blocks, while current value is only what remains in the LP.
  *
- * A single-sided mint (cost basis is a bound, not a point) is excluded
- * from total return rather than summed as if it were exact.
+ * A single-sided flow (gross additions or proceeds are bounded) is excluded
+ * from LP return rather than summed as if it were exact.
  */
 
 function money(n, signed) {
@@ -44,13 +44,15 @@ export function classifyPosition(p) {
   const u = p && p.usd;
   const histGone = !!(h && h.unavailable);
 
-  const value = u && (u.totalNow !== null && u.totalNow !== undefined
-    ? u.totalNow
-    : u.value);
+  const value = u && (u.currentValue !== null && u.currentValue !== undefined
+    ? u.currentValue
+    : u.totalNow !== null && u.totalNow !== undefined ? u.totalNow : u.value);
   const hasValue = value !== null && value !== undefined && isFinite(value);
   const hasVs = !!(u && u.vsHodl !== null && u.vsHodl !== undefined && isFinite(u.vsHodl));
   const hasPnl = !!(u && u.pnl !== null && u.pnl !== undefined && isFinite(u.pnl));
-  const bound = !!(hasPnl && u.costBasisExact === false);
+  const bound = !!(u && (u.grossAddedExact === false
+    || u.collectedProceedsExact === false
+    || u.costBasisExact === false));
 
   return {
     histGone,
@@ -101,7 +103,7 @@ export function summarizeAggregate(positions) {
     vsHold,
     totalReturn,
     vsLine: bucketLine('vs holding', vsHold, n, true),
-    returnLine: bucketLine('total return', totalReturn, n, true),
-    valueLine: bucketLine('now', value, n, false),
+    returnLine: bucketLine('LP return', totalReturn, n, true),
+    valueLine: bucketLine('in positions', value, n, false),
   };
 }
