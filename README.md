@@ -8,7 +8,7 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.23.0 — invite-only beta
+## Status: 0.24.0 — invite-only beta
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -29,7 +29,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.23.0
+diff -r extension build/lplens-0.24.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it

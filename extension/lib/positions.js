@@ -42,6 +42,12 @@ export const ALL_CHAIN_CONCURRENCY = 2;
 const CHUNK = 10;
 const STOP_AFTER_CLOSED = 20;
 
+// DexScreener mark memo, keyed `chain:token`. In memory only — prices are live
+// numbers and must not survive into a later session from chrome.storage.
+const PRICE_MEMO = new Map();
+const PRICE_MEMO_TTL_MS = 60_000;
+const PRICE_MEMO_MAX = 500;
+
 function tagPosition(p, chainKey) {
   return { ...p, chainKey, version: p.version || 'v3' };
 }
@@ -60,9 +66,24 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   const count = Number(toUint(words(balHex)[0] || '0'));
 
   if (count === 0) {
+    // Zero v3 NFTs does NOT mean zero positions. v4 holdings live in a
+    // different contract and are found through Transfer logs, not through this
+    // balanceOf, so v4 must still be scanned. This used to return here with a
+    // hardcoded empty v4, which rendered a v4-only wallet as "no positions" —
+    // and with `unavailable: null` it asserted zero rather than admitting it
+    // had not looked. Silently claiming an empty result is the one failure
+    // this project does not accept.
+    const v4 = await scanV4(chainKey, owner, opts);
+    let positions = v4.positions.map((p) => tagPosition(p, chainKey));
+    if (opts.withUsd) {
+      positions = (await mapLimit(positions, 2, async (p) => {
+        try { return await attachUsd(chainKey, p, opts); }
+        catch { return p; }
+      })).filter((p) => p && !p.__error);
+    }
     return {
       chain: chainKey, count: 0, scanned: 0, truncated: false, stoppedEarly: false,
-      positions: [], v4: { positions: [], held: 0, shown: 0, unavailable: null },
+      positions, v4,
       enumSource: 'empty',
     };
   }
@@ -363,15 +384,32 @@ async function scanInterleaved(rpc, chain, owner, count, includeClosed) {
 export async function usdPrices(chainKey, addresses) {
   const chain = CHAINS[chainKey];
   const wantChain = chain && chain.dexscreener;
+  // In-memory dedupe across a scan. attachUsd runs once per position, so 20
+  // positions used to mean 20 DexScreener requests even though nearly all of
+  // them share WETH or a stablecoin. Scanning five chains for several wallets
+  // multiplies that, and DexScreener is the request budget most likely to be
+  // throttled. Short TTL because these are live marks; failures are never
+  // cached, so a throttled request retries rather than sticking as "unpriced".
+  const fresh = {};
+  const missing = [];
+  const nowMs = Date.now();
+  for (const a of new Set(addresses.map((x) => String(x).toLowerCase()))) {
+    const hit = PRICE_MEMO.get(`${chainKey}:${a}`);
+    if (hit && nowMs - hit.at < PRICE_MEMO_TTL_MS) fresh[a] = hit.usd;
+    else missing.push(a);
+  }
+  if (!missing.length) return fresh;
   const MIN_LIQUIDITY_USD = 5000;
   const MATERIAL_SHARE = 0.20;   // pools worth comparing against the deepest
   const MAX_DISPERSION = 0.25;   // beyond this, refuse to pick
 
   const out = {};
-  const unique = [...new Set(addresses.map((a) => a.toLowerCase()))];
+  // Only what the memo did not already have. 30 is DexScreener's documented
+  // per-request address limit.
+  const unique = missing;
 
-  for (let i = 0; i < unique.length; i += 8) {
-    const batch = unique.slice(i, i + 8);
+  for (let i = 0; i < unique.length; i += 30) {
+    const batch = unique.slice(i, i + 30);
     let json;
     try {
       const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`);
@@ -400,8 +438,19 @@ export async function usdPrices(chainKey, addresses) {
       if (worst > MAX_DISPERSION) continue;   // leave unpriced rather than guess
       out[token] = best.price;
     }
+
+    // Cache this batch. A token DexScreener answered for but did not price is
+    // memoised as undefined so it is not re-requested once per position; a
+    // batch that threw never reaches here, so a throttled request retries.
+    const at = Date.now();
+    for (const token of batch) PRICE_MEMO.set(`${chainKey}:${token}`, { usd: out[token], at });
+    if (PRICE_MEMO.size > PRICE_MEMO_MAX) {
+      for (const k of [...PRICE_MEMO.keys()].slice(0, PRICE_MEMO.size - PRICE_MEMO_MAX)) {
+        PRICE_MEMO.delete(k);
+      }
+    }
   }
-  return out;
+  return { ...fresh, ...out };
 }
 
 
