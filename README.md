@@ -8,7 +8,7 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.26.2 — invite-only beta
+## Status: 0.26.3 — invite-only beta
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -29,7 +29,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.26.2
+diff -r extension build/lplens-0.26.3
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -122,7 +122,9 @@ bridged from. Robinhood Chain's WETH trades against thirty memecoins and nothing
 dollar-denominated, so there is no local pool to read a dollar price from — but
 that WETH is bridged, so the price exists on Ethereum. The local block maps to
 its timestamp, the timestamp to an Ethereum block, and the reference pool is
-read there. Still no price API: a block-timestamp lookup is a chain fact.
+read there. The block lookup uses Etherscan when a configured key is available,
+then falls back to a keyless binary search over Ethereum block timestamps.
+Still no price API: both paths read chain facts.
 
 That path carries one assumption the same-chain path does not — that the bridged
 token holds its peg. Arbitrage makes it reliable, but it is an assumption rather

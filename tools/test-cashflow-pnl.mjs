@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
-  collectedProceedsUsd, strategyReturn, sumDepositBasis,
+  collectedProceedsUsd, findBlockAtOrBefore, strategyReturn, sumDepositBasis,
 } from '../extension/lib/histprice.js';
 import { classifyPosition, summarizeAggregate } from '../extension/lib/aggregate.js';
 import { CHAINS } from '../extension/lib/chains.js';
@@ -81,6 +81,17 @@ async function testEveryAddUsesItsOwnEventPrice() {
   assert.deepEqual(basis.legs.map((leg) => leg.value), [11, 31]);
 }
 
+async function testKeylessTimestampBlockSearch() {
+  const timestamps = new Map([
+    [100, 1000], [101, 1012], [102, 1024], [103, 1036], [104, 1048],
+  ]);
+  const headerAt = async (block) => ({ number: block, timestamp: timestamps.get(block) });
+  assert.equal(await findBlockAtOrBefore(1035, 100, 104, headerAt), 102,
+    'timestamp search must return the closest block before the target');
+  assert.equal(await findBlockAtOrBefore(1036, 100, 104, headerAt), 103,
+    'an exact timestamp must return its own block');
+}
+
 async function testCollectionAtEventPrice() {
   const p = {
     token0: '0x1111111111111111111111111111111111111111',
@@ -145,8 +156,9 @@ testReinvestedCapitalIsNotStillHeld();
 testBoundsFailClosed();
 await testExactPairCanResolveSingleSidedAdd();
 await testEveryAddUsesItsOwnEventPrice();
+await testKeylessTimestampBlockSearch();
 await testCollectionAtEventPrice();
 await testNoCollectedTokensInCurrentValue();
 await testOverlayKeepsDollarReturnAsHeadline();
 testAggregateLabelsAndExclusions();
-console.log('cash-flow pnl: 10 regression groups passed');
+console.log('cash-flow pnl: 11 regression groups passed');

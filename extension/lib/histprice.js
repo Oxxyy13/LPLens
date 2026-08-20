@@ -46,9 +46,11 @@ const poolCache = new Map();    // `${chain}` -> {pool, stableIsToken0, stableDe
 const priceCache = new Map();   // `${chain}:${block}` -> number | null
 const positionPriceCache = new Map(); // `${chain}:${pool}:${block}` -> pool price
 const timeBlockCache = new Map(); // `${chain}:${timestamp}` -> reference-chain block
+const blockHeaderCache = new Map(); // `${chain}:${block}` -> {number,timestamp}
 const LATEST_PRICE_TTL_MS = 60_000;
 const ETHERSCAN_LOOKUP_GAP_MS = 350;
 let etherscanLookupQueue = Promise.resolve();
+let onChainLookupQueue = Promise.resolve();
 let lastEtherscanLookupAt = 0;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -87,6 +89,88 @@ async function referenceBlockAtTime(target, timestamp, key) {
 
   const task = etherscanLookupQueue.then(lookup, lookup);
   etherscanLookupQueue = task.catch(() => null);
+  return task;
+}
+
+/**
+ * Highest block whose timestamp is <= target. The caller supplies a bracket
+ * and a header reader, which keeps the binary-search contract independently
+ * testable without network access.
+ */
+export async function findBlockAtOrBefore(timestamp, low, high, headerAt) {
+  let lo = low, hi = high;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const header = await headerAt(mid);
+    if (!header || !Number.isFinite(header.timestamp)) return null;
+    if (header.timestamp <= timestamp) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** Keyless timestamp -> block lookup using eth_getBlockByNumber only. */
+async function referenceBlockOnChain(chainKey, target, timestamp, opts = {}) {
+  const cacheKey = `${target.etherscanChainId || chainKey}:${timestamp}`;
+  if (timeBlockCache.has(cacheKey)) return timeBlockCache.get(cacheKey);
+
+  const lookup = async () => {
+    if (timeBlockCache.has(cacheKey)) return timeBlockCache.get(cacheKey);
+    const rpc = opts.rpcOverride || target.rpc;
+    if (!rpc) return null;
+
+    const headerAt = async (block) => {
+      const key = `${chainKey}:${block}`;
+      if (blockHeaderCache.has(key)) return blockHeaderCache.get(key);
+      try {
+        const raw = await rpcCall(rpc, 'eth_getBlockByNumber',
+          ['0x' + BigInt(block).toString(16), false]);
+        if (!raw?.number || !raw?.timestamp) return null;
+        const header = {
+          number: Number(BigInt(raw.number)),
+          timestamp: Number(BigInt(raw.timestamp)),
+        };
+        blockHeaderCache.set(key, header);
+        return header;
+      } catch { return null; }
+    };
+
+    let latestRaw;
+    try {
+      latestRaw = await rpcCall(rpc, 'eth_getBlockByNumber', ['latest', false]);
+    } catch { return null; }
+    if (!latestRaw?.number || !latestRaw?.timestamp) return null;
+    const latest = {
+      number: Number(BigInt(latestRaw.number)),
+      timestamp: Number(BigInt(latestRaw.timestamp)),
+    };
+    blockHeaderCache.set(`${chainKey}:${latest.number}`, latest);
+    if (timestamp >= latest.timestamp) return latest.number;
+
+    // Recent LP activity is the common case. Start with a generous ~7-hour
+    // Ethereum window, then expand exponentially for older positions. The
+    // bracket is verified by timestamp before binary search, so 12 seconds is
+    // only a performance estimate, never a correctness assumption.
+    const age = latest.timestamp - timestamp;
+    let span = Math.max(2048, Math.ceil(age / 12) * 4);
+    let low = Math.max(0, latest.number - span);
+    let lowHeader = await headerAt(low);
+    while (low > 0 && lowHeader && lowHeader.timestamp > timestamp) {
+      span *= 4;
+      low = Math.max(0, latest.number - span);
+      lowHeader = await headerAt(low);
+    }
+    if (!lowHeader || lowHeader.timestamp > timestamp) return null;
+
+    const block = await findBlockAtOrBefore(timestamp, low, latest.number, headerAt);
+    if (block !== null) timeBlockCache.set(cacheKey, block);
+    return block;
+  };
+
+  // Multiple cards can ask for bridged prices together. Serialize this small
+  // proof so public RPC rate limits do not turn concurrency into false gaps.
+  const task = onChainLookupQueue.then(lookup, lookup);
+  onChainLookupQueue = task.catch(() => null);
   return task;
 }
 
@@ -202,9 +286,11 @@ async function bridgedUsd(chainKey, block, opts = {}) {
   if (!timestamp) return null;
 
   const key = opts.etherscanKey || target.etherscanKey;
-  if (!key || !target.etherscanChainId) return null;
-
-  const targetBlock = await referenceBlockAtTime(target, timestamp, key);
+  let targetBlock = key && target.etherscanChainId
+    ? await referenceBlockAtTime(target, timestamp, key) : null;
+  if (!targetBlock) {
+    targetBlock = await referenceBlockOnChain(via, target, timestamp, viaOpts);
+  }
   if (!targetBlock) return null;
 
   return refUsdAtBlock(via, targetBlock, viaOpts);
