@@ -391,6 +391,13 @@ function placeGutterCards() {
     const onScreen = r.bottom > 0 && r.top < innerHeight && r.width > 0;
     row.el.style.display = onScreen ? 'block' : 'none';
     if (!onScreen) continue;
+    // Uniswap changed /positions from ~166px cards to 64px table rows in
+    // August 2026. A full gutter card beside every dense row overlaps the next
+    // one. Geometry chooses presentation; the route remains the semantic
+    // anchor, so no generated Uniswap class name enters this decision.
+    const dense = r.height < 92;
+    row.el.classList.toggle('dense', dense);
+    row.el.style.height = dense ? Math.floor(r.height) + 'px' : '';
     row.el.style.width = w + 'px';
     row.el.style.left = Math.round(r.left - w - GUTTER_GAP) + 'px';
     row.el.style.top = Math.round(r.top) + 'px';
@@ -455,22 +462,25 @@ function gutterCard(row) {
   const headTone = hasTotal ? tone(u.pnl) : '';
 
   const lines = [];
+  const denseLines = [];
   if (hasTotal) {
     lines.push(`<span class="${tone(u.pnlPct)}">${u.pnlPct >= 0 ? '+' : ''}${u.pnlPct.toFixed(1)}%</span> on gross added`);
+    denseLines.push(`<span class="${tone(u.pnlPct)}">${u.pnlPct >= 0 ? '+' : ''}${u.pnlPct.toFixed(1)}%</span> gross`);
   }
   if (v) {
     lines.push(`<span class="${tone(v.pct)}">${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}%</span> vs holding`);
+    denseLines.push(`<span class="${tone(v.pct)}">${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}%</span> hold`);
   }
   if (v && v.apr !== null && v.apr !== undefined) {
     lines.push(`<span class="muted">${v.apr.toFixed(0)}% APR${v.aprDays !== null && v.aprDays < 7 ? '*' : ''}</span>`);
   }
 
   return `<div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${(d.fee / 10000).toFixed(2)}%</span></div>
-    <div class="gc-lbl">LP return</div>
-    <div class="gc-val ${headTone}">${headline}</div>
-    ${lines.length ? `<div class="gc-sub">${lines.join('<br>')}</div>` : ''}
+    <div class="gc-main"><div class="gc-lbl">LP return</div><div class="gc-val ${headTone}">${headline}</div></div>
+    ${lines.length ? `<div class="gc-sub gc-metrics">${lines.join('<br>')}</div>` : ''}
+    ${denseLines.length ? `<div class="gc-sub gc-dense-metrics">${denseLines.join(' · ')}</div>` : ''}
     ${bar}
-    <div class="gc-sub">${esc([closed ? 'closed' : d.status, a ? a.dur : null].filter(Boolean).join(' · '))}</div>`;
+    <div class="gc-sub gc-status">${esc([closed ? 'closed' : d.status, a ? a.dur : null].filter(Boolean).join(' · '))}</div>`;
 }
 
 async function syncList() {

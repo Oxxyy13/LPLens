@@ -184,6 +184,7 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
 .grip.right::after { border-right: 2px solid var(--ink-3); }
 .gc {
     position: fixed; z-index: 2147482000; pointer-events: none;
+    box-sizing: border-box;
     overflow: hidden; background: linear-gradient(145deg, color-mix(in srgb, var(--panel-2) 28%, var(--panel)), var(--panel));
     border: 1px solid var(--line-strong); border-radius: 13px;
     padding: 11px 12px; font: 12px/1.45 var(--ui);
@@ -213,6 +214,17 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
 .gc-dot.in-range { background: var(--good); }
 .gc-dot.closed { background: var(--ink-3); }
 .gc-dot.below, .gc-dot.above { background: var(--warn); }
+.gc-dense-metrics { display: none; }
+.gc.dense { padding: 5px 8px; border-radius: 10px; }
+.gc.dense .gc-pair { font-size: 10.5px; line-height: 1.2; }
+.gc.dense .gc-main { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.gc.dense .gc-lbl { font-size: 8.5px; }
+.gc.dense .gc-val { font-size: 17px; line-height: 1.15; margin: 1px 0 0; }
+.gc.dense .gc-metrics, .gc.dense .gc-bar, .gc.dense .gc-status { display: none; }
+.gc.dense .gc-dense-metrics {
+  display: block; margin-top: 1px; font-size: 9.5px; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 `;
 
   const CSS = CSS_PANEL + CSS_COMPONENTS;

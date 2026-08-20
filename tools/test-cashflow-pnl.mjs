@@ -118,6 +118,11 @@ async function testOverlayKeepsDollarReturnAsHeadline() {
     'the compact headline must never substitute vs-holding percent for dollar LP return');
   assert.match(overlay, /<div class="gc-lbl">LP return<\/div>/,
     'the compact headline must always identify itself as LP return');
+  assert.match(overlay, /classList\.toggle\('dense', dense\)/,
+    'the gutter must adapt when Uniswap renders dense position rows');
+  const render = await readFile(new URL('../extension/render.js', import.meta.url), 'utf8');
+  assert.match(render, /box-sizing: border-box;/,
+    'declared gutter width must include padding so it cannot overlap the position row');
   assert.match(worker, /rpcOverrides: overrides/,
     'the overlay worker must forward origin-chain RPCs needed for bridged historical pricing');
 }
