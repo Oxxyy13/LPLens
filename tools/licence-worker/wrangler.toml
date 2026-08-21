@@ -1,6 +1,15 @@
 name = "lplens-beta"
 main = "worker.js"
 compatibility_date = "2026-08-19"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lplens-beta"
+database_id = "d71d0fbc-202b-4f64-af57-be562a58e80c"
+
+[secrets]
+required = ["BLOCKSCOUT_PRO_API_KEY"]
+
 # Free-tier workers.dev URL after deploy:
 #   https://lplens-beta.<your-subdomain>.workers.dev/
 # Paste that URL into extension/lib/license.js VALIDATE_URL and the matching

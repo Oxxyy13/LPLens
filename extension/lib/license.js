@@ -36,6 +36,8 @@ const GRACE_DAYS = 7;          // offline tolerance for a key already seen valid
 // Revocation should land in hours, not a day. Hitting a free Worker every
 // six hours is fine at beta scale (a handful of testers, one POST each).
 const RECHECK_HOURS = 6;
+const INSTALLATION_ID_KEY = 'lplensInstallationId';
+let installationIdPromise = null;
 
 export const GATING_ENABLED = true;
 
@@ -67,17 +69,40 @@ async function save(obj) {
 }
 
 /**
+ * Random per-browser-install identifier for soft seat counting.
+ *
+ * It is not a fingerprint and contains no machine facts. chrome.storage.local
+ * does not sync it to another browser; uninstalling or clearing extension data
+ * removes it. The Worker stores only SHA-256(installationId).
+ */
+export async function installationId() {
+  if (installationIdPromise) return installationIdPromise;
+  installationIdPromise = (async () => {
+    const existing = await store([INSTALLATION_ID_KEY]);
+    if (/^[0-9a-f]{32}$/.test(existing[INSTALLATION_ID_KEY] || '')) {
+      return existing[INSTALLATION_ID_KEY];
+    }
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    const id = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+    await save({ [INSTALLATION_ID_KEY]: id });
+    return id;
+  })();
+  return installationIdPromise;
+}
+
+/**
  * Ask the endpoint whether a key is good. Network failure is NOT a verdict —
  * it returns null so the caller can fall back to the cached answer.
  * A 200 with valid: false IS a verdict; the server's reason is passed through.
  */
-async function validateRemote(key) {
+async function validateRemote(key, installId) {
   if (!VALIDATE_URL || urlIsPlaceholder(VALIDATE_URL) || !key) return null;
   try {
     const res = await fetch(VALIDATE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ key, installationId: installId }),
     });
     if (!res.ok) return null;
     const body = await res.json();
@@ -86,6 +111,8 @@ async function validateRemote(key) {
       valid: body.valid,
       expires: body.expires || null,
       reason: body.reason || null,
+      installations: Number.isInteger(body.installations) ? body.installations : null,
+      installationLimit: Number.isInteger(body.installationLimit) ? body.installationLimit : null,
     };
   } catch {
     return null;
@@ -115,16 +142,19 @@ export async function entitlement() {
   const key = (s.licenseKey || '').trim();
 
   if (key) {
+    const installId = await installationId();
     const seen = s.licenseSeen && s.licenseSeen.key === key ? s.licenseSeen : null;
     const stale = !seen || (now - (seen.at || 0)) > RECHECK_HOURS * 3600_000;
 
     if (stale) {
-      const remote = await validateRemote(key);
+      const remote = await validateRemote(key, installId);
       if (remote) {
         await save({
           licenseSeen: {
             key, at: now, valid: remote.valid,
             expires: remote.expires, reason: remote.reason || null,
+            installations: remote.installations,
+            installationLimit: remote.installationLimit,
           },
         });
         if (remote.valid) {
@@ -181,6 +211,23 @@ export async function entitlement() {
     allowed: false,
     state: 'expired',
     reason: `Your ${TRIAL_DAYS}-day trial has ended.`,
+  };
+}
+
+/**
+ * Credentials for the authenticated history relay. Callers already perform an
+ * entitlement check; the Worker verifies the key and expiry again per relay
+ * request, so a patched caller cannot turn this into an unauthenticated proxy.
+ */
+export async function blockscoutRelayCredentials() {
+  if (!GATING_ENABLED || urlIsPlaceholder(VALIDATE_URL)) return null;
+  const s = await store(['licenseKey']);
+  const key = String(s.licenseKey || '').trim();
+  if (!key) return null;
+  return {
+    url: new URL('blockscout', VALIDATE_URL).href,
+    key,
+    installationId: await installationId(),
   };
 }
 

@@ -204,6 +204,8 @@ export async function enumerateV4(chainKey, owner, opts = {}) {
     rpc: opts.rpcOverride || chain.logsRpc || chain.rpc,
     etherscanKey: opts.etherscanKey || chain.etherscanKey,
     etherscanChainId: chain.etherscanChainId,
+    blockscoutRelay: opts.blockscoutRelay || null,
+    blockscoutChainId: chain.etherscanChainId || null,
     blockscout: chain.blockscout || null,
   });
   if (got.unavailable) {

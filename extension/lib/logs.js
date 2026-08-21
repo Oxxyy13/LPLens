@@ -22,10 +22,11 @@
  *     2026-08-19). Documented cap is 1,000 logs per query; page/offset is
  *     ignored, so we walk fromBlock instead of truncating.
  *
- * Source order: Etherscan (only when a key is configured) -> Blockscout
- * (when the chain has a URL) -> raw eth_getLogs. All three return the same
- * normalised shape, and fetchPositionLogs never throws — a missing history
- * must read as "unavailable", never as "no activity".
+ * Source order: Etherscan (only when a user key is configured) -> licensed
+ * Blockscout Pro relay -> public Blockscout (when the chain has a URL) ->
+ * raw eth_getLogs. All four return the same normalised shape, and
+ * fetchPositionLogs never throws — a missing history must read as
+ * "unavailable", never as "no activity".
  */
 import { rpcCall } from './rpc.js';
 
@@ -56,6 +57,7 @@ function blockscoutSlot() {
   blockscoutChain = wait;
   return wait;
 }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Blockscout getLogs hard-caps at 1,000 (docs + live WETH Transfer probe). */
 const BLOCKSCOUT_PAGE = 1000;
@@ -201,6 +203,101 @@ async function viaBlockscout(baseUrl, fields) {
   return (await viaBlockscoutRaw(baseUrl, fields)).map(normalise);
 }
 
+/**
+ * Authenticated Blockscout Pro relay. The access key proves beta entitlement;
+ * the Blockscout credential never enters this public extension. Retry only
+ * transient capacity failures, with jitter so several testers do not remain in
+ * lockstep against the shared five-request/second free allowance.
+ */
+async function blockscoutRelayPage(relay, chainId, fields) {
+  if (!relay || !relay.url || !relay.key || !relay.installationId || !chainId) {
+    throw new Error('blockscout-pro relay is not configured');
+  }
+
+  let last = 'unavailable';
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await blockscoutSlot();
+    let response;
+    try {
+      response = await fetch(relay.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key: relay.key,
+          installationId: relay.installationId,
+          chainId: String(chainId),
+          fields,
+        }),
+      });
+    } catch (err) {
+      last = err.message || String(err);
+      if (attempt < 3) {
+        await sleep(400 * (2 ** attempt) + Math.floor(Math.random() * 180));
+        continue;
+      }
+      break;
+    }
+
+    let body = null;
+    try { body = await response.json(); } catch { /* handled below */ }
+    if (response.ok) return parseExplorerLogs(body, 'blockscout-pro');
+
+    last = body && (body.error || body.reason)
+      ? String(body.error || body.reason)
+      : `HTTP ${response.status}`;
+    const dailyAllowance = response.status === 429 && /allowance/i.test(last);
+    if (dailyAllowance || ![429, 502, 503, 504].includes(response.status) || attempt === 3) {
+      break;
+    }
+    await sleep(400 * (2 ** attempt) + Math.floor(Math.random() * 180));
+  }
+  throw new Error(`blockscout-pro: ${last}`);
+}
+
+/**
+ * The unified Pro endpoint uses the same 1,000-row getLogs ceiling as the
+ * public Etherscan-compatible endpoint. Walk fromBlock with an overlapping
+ * boundary and de-duplicate, so a busy v4 owner is never silently truncated.
+ */
+async function viaBlockscoutRelayRaw(relay, chainId, fields) {
+  const collected = [];
+  const seen = new Set();
+  let fromBlock = Number(fields.fromBlock || 0);
+
+  for (let page = 0; page < BLOCKSCOUT_MAX_PAGES; page++) {
+    const rows = await blockscoutRelayPage(relay, chainId, {
+      ...fields,
+      fromBlock: String(fromBlock),
+      toBlock: 'latest',
+    });
+
+    let newest = fromBlock;
+    for (const row of rows) {
+      const key = `${row.transactionHash}:${row.logIndex}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      collected.push(row);
+      const block = Number(BigInt(row.blockNumber));
+      if (block > newest) newest = block;
+    }
+
+    if (rows.length < BLOCKSCOUT_PAGE) return collected;
+    const oldest = Number(BigInt(rows[0].blockNumber));
+    if (oldest === newest) {
+      throw new Error(
+        `blockscout-pro: ${BLOCKSCOUT_PAGE} logs in block ${newest}, `
+        + 'result cap would truncate');
+    }
+    fromBlock = newest;
+  }
+  throw new Error(
+    `blockscout-pro: exceeded ${BLOCKSCOUT_MAX_PAGES * BLOCKSCOUT_PAGE} log page cap`);
+}
+
+async function viaBlockscoutRelay(relay, chainId, fields) {
+  return (await viaBlockscoutRelayRaw(relay, chainId, fields)).map(normalise);
+}
+
 const TRANSFER_TOPIC =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
@@ -225,6 +322,7 @@ function transferFilter(topics) {
  */
 export async function fetchTransfers({
   contract, owner, rpc, etherscanKey, etherscanChainId, blockscout,
+  blockscoutRelay, blockscoutChainId,
 }) {
   const topicOwner = '0x' + String(owner).replace(/^0x/, '').toLowerCase().padStart(64, '0');
 
@@ -242,6 +340,19 @@ export async function fetchTransfers({
           apikey: etherscanKey,
           ...filter,
         }, etherscanSlot, 'etherscan');
+      } catch (err) {
+        errors.push(err.message || String(err));
+      }
+    }
+
+    if (blockscoutRelay && blockscoutChainId) {
+      try {
+        return await viaBlockscoutRelayRaw(blockscoutRelay, blockscoutChainId, {
+          address: contract,
+          fromBlock: '0',
+          toBlock: 'latest',
+          ...filter,
+        });
       } catch (err) {
         errors.push(err.message || String(err));
       }
@@ -292,7 +403,8 @@ export async function fetchTransfers({
  * Never throws: returns `{ unavailable }` so a single unreachable history
  * degrades one card instead of failing the whole load.
  *
- * Order: Etherscan (key required) -> Blockscout (per-chain URL) -> eth_getLogs.
+ * Order: Etherscan (user key) -> licensed Blockscout Pro relay -> public
+ * Blockscout per-chain URL -> eth_getLogs.
  * A source that refuses — including Etherscan's HTTP-200 paywall — falls
  * through. Zero logs also falls through: this is only called for a tokenId
  * whose positions() was just read, and a minted position always has at least
@@ -305,6 +417,7 @@ export async function fetchTransfers({
  */
 export async function fetchPositionLogs({
   nfpm, tokenId, rpc, etherscanKey, etherscanChainId, blockscout,
+  blockscoutRelay, blockscoutChainId,
 }) {
   const topic1 = '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
   const errors = [];
@@ -326,6 +439,16 @@ export async function fetchPositionLogs({
   if (etherscanKey && etherscanChainId) {
     const hit = await trySource('etherscan',
       () => viaEtherscan(etherscanChainId, etherscanKey, nfpm, topic1));
+    if (hit) return hit;
+  }
+  if (blockscoutRelay && blockscoutChainId) {
+    const hit = await trySource('blockscout-pro',
+      () => viaBlockscoutRelay(blockscoutRelay, blockscoutChainId, {
+        address: nfpm,
+        fromBlock: '0',
+        toBlock: 'latest',
+        topic1,
+      }));
     if (hit) return hit;
   }
 

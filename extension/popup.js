@@ -1,6 +1,9 @@
 import { loadSweep, valueUsd } from './lib/positions.js';
 import { CHAINS } from './lib/chains.js';
-import { entitlement, TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint } from './lib/license.js';
+import {
+  entitlement, blockscoutRelayCredentials,
+  TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint,
+} from './lib/license.js';
 import {
   loadBook, upsertWallet, removeWallet, MAX_SAVED_ADDRESSES, normalizeAddress,
   shortAddr, walletName,
@@ -237,10 +240,12 @@ async function startScan(owners, includeClosed) {
       statusEl.textContent = `Trial — ${ent.daysLeft} day${ent.daysLeft === 1 ? '' : 's'} left of ${TRIAL_LENGTH_DAYS} · reading chain…`;
     }
     const settings = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
+    const blockscoutRelay = await blockscoutRelayCredentials();
     await runSweep(owners, Object.keys(CHAINS), {
       includeClosed,
       rpcOverrides: settings.rpcOverrides || {},
       etherscanKey: settings.etherscanKey || null,
+      blockscoutRelay,
       withUsd: true,
     });
   } catch (err) {
