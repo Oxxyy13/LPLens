@@ -176,9 +176,9 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   // one eth_getLogs per visible card. An endpoint that refuses wide ranges
   // degrades to `history.unavailable`; it never fails the whole load.
   // Wide eth_getLogs needs a better endpoint than present-state reads do, so
-  // history gets its own source descriptor. Etherscan wins when a key exists;
-  // a refusal (including the HTTP-200 Base paywall) falls through to
-  // Blockscout when the chain has one, then to whichever RPC is in play.
+  // history gets its own source descriptor. Etherscan wins when a user key
+  // exists; a refusal (including the HTTP-200 Base paywall) falls through to
+  // the licensed Blockscout Pro relay, then public Blockscout, then RPC.
   const source = historySource(chain, rpc, opts);
   const withHistory = await mapLimit(rendered, 3, (p) => attachHistory(source, chain, p));
 
@@ -607,6 +607,8 @@ function historySource(chain, rpc, opts) {
     rpc: opts.rpcOverride || chain.logsRpc || rpc,
     etherscanKey: opts.etherscanKey || chain.etherscanKey || null,
     etherscanChainId: chain.etherscanChainId || null,
+    blockscoutRelay: opts.blockscoutRelay || null,
+    blockscoutChainId: chain.etherscanChainId || null,
     blockscout: chain.blockscout || null,
   };
 }

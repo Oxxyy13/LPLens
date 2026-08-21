@@ -8,18 +8,24 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.26.3 — invite-only beta
+## Status: 0.27.0 — invite-only beta with hosted history
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
 link on its own grants nothing. A key is validated against a Cloudflare Worker
-whose registry is `SHA-256 hash -> { label, expires }`. The source of that
-Worker is in this repo at `tools/licence-worker/worker.js`, so you can see for
-yourself that it stores hashes rather than keys, and that the only thing it ever
-receives is the key you were given. It is not told which addresses you look up.
+whose registry is `SHA-256 hash -> { label, expires }`. The same Worker provides
+an authenticated Blockscout Pro relay, so a tester supplies no RPC or explorer
+key: paste the LPLens access key, paste a wallet address, and scan. The source is
+in this repo at `tools/licence-worker/worker.js`. It stores hashes of access
+codes and random browser-installation identifiers plus aggregate request counts;
+it does not store wallet addresses, log filters, IP addresses or API responses.
+The relay necessarily processes each allowlisted log filter long enough to send
+it to Blockscout; v4 ownership filters can contain the public address being read.
 
 This is access control for a private beta, not a paywall. Everything LPLens
-computes, it computes locally on your machine.
+computes, it computes locally on your machine. The hosted component supplies a
+protected history input; it does not receive present-state RPC reads, USD marks,
+or finished portfolio figures.
 
 ## Verify this yourself
 
@@ -29,7 +35,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.26.3
+diff -r extension build/lplens-0.27.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -43,7 +49,8 @@ Two claims worth checking directly, because they are the ones that matter:
   `eth_call`, `eth_getLogs`, `eth_getBlockByNumber` — three reads. There is no
   code path that can issue `eth_sendTransaction` or `personal_sign`.
 - **The permissions** are in `extension/manifest.json`: `storage` and
-  `scripting`, plus network access to a named list of RPC and price hosts. No
+  `scripting`, plus network access to a named list of RPC, price, explorer, and
+  LPLens service hosts. No
   `tabs`, no `cookies`, no `webRequest`, no `<all_urls>`. Note that
   `app.uniswap.org` appears under `optional_host_permissions`, not
   `host_permissions` — LPLens ships with **no** access to Uniswap and cannot
@@ -60,7 +67,9 @@ Two claims worth checking directly, because they are the ones that matter:
   never `$0`**
 - Reconstructs **lifetime history** from NFPM events — `tokenId` is the first
   indexed parameter of `IncreaseLiquidity`/`DecreaseLiquidity`/`Collect`, so one
-  `eth_getLogs` per position returns its whole life with no subgraph and no key
+  indexed log query per position returns its whole life with no subgraph. A
+  licensed Blockscout Pro relay is built in; public Blockscout and RPC fallbacks
+  remain fail-closed
 - Refreshes a changed v3 history with the latest raw-RPC logs as well as the
   lifetime index, so an explorer that has not indexed a just-mined collect/add/
   remove cannot be cached as the new truth
@@ -155,7 +164,7 @@ No build step, no `npm install`, no bundler. After editing any file, hit the
 refresh icon on the extension card.
 
 Optional, in **Options → Advanced**: your own per-chain RPC URLs and an
-Etherscan API key. Both are optional — LPLens is keyless by default — and both
+Etherscan API key. Both are optional — no user-supplied provider key is required — and both
 are stored in `chrome.storage.local` inside your browser profile. Nothing is
 ever written back to this repo.
 
@@ -176,8 +185,9 @@ a document — it is a frozen allowlist in `lib/rpc.js` that every call is check
 against, and an unlisted method throws. Chrome also isolates extensions from
 each other, so LPLens cannot reach MetaMask's storage or keys even in principle.
 
-**Cannot see your browsing.** No `tabs`, no `activeTab`, no `cookies`, no
-`webRequest`, no `<all_urls>`.
+**Cannot see your general browsing.** No `tabs`, no `activeTab`, no `cookies`,
+no `webRequest`, no `<all_urls>`. The only page permission is the optional,
+user-granted Uniswap scope described below.
 
 **The Uniswap overlay is opt-in and off by default.** `app.uniswap.org` is in
 `optional_host_permissions`, not `host_permissions`, so a freshly installed
@@ -189,9 +199,12 @@ the service worker call `chrome.scripting.registerContentScripts` with
 Once granted, that is a real widening of the surface, and it is worth
 understanding rather than skimming:
 
-- The content script is **append-only**. It adds a single node and never reads,
-  moves, or rewrites anything Uniswap rendered, so it cannot change what you
-  are shown before you sign.
+- The content script is **write-isolated and append-only**. It reads the
+  position-page URL; on the positions list it reads semantic position links and
+  the first line of visible row text to discover and label positions. It never
+  reads balances, forms, connected-wallet state, or signing prompts. Its only
+  page write is adding its own closed-shadow-root panel; it never moves or
+  rewrites anything Uniswap rendered.
 - It runs in Chrome's **isolated world**, so `window.ethereum`, the page's
   JavaScript, and the wallet are unreachable from it by construction — not by
   good behaviour.
@@ -208,10 +221,11 @@ important, not less: the code runs on a page where transactions get approved.
 code, no build step. Most extension compromises arrive through a dependency or
 an auto-updating remote script; there is nothing here to compromise.
 
-**No credentials in this repo.** LPLens's only key store is
-`chrome.storage.local`, written by the options page, inside your browser
-profile. `tools/package.mjs` scans every packaged file for credential-shaped
-strings and aborts the build on a hit.
+**No credentials in this repo.** User-supplied RPC and Etherscan settings live
+in `chrome.storage.local`. The shared Blockscout Pro credential is an encrypted
+Cloudflare Worker secret and is never returned to the extension.
+`tools/package.mjs` scans every packaged file for credential-shaped strings and
+aborts the build on a hit.
 
 **Hostile token names are neutralized.** `symbol()` is attacker-controlled —
 any ERC-20 can name itself with an HTML payload, and position lists are rendered
@@ -221,8 +235,10 @@ constructed. Verified against five injection payloads. MV3's default CSP
 (`script-src 'self'`) blocks inline handlers as a second layer.
 
 **Privacy, not security:** the address you paste is sent to the RPC endpoint and
-to DexScreener, which learn that your IP is interested in that address. Point
-the options page at your own RPC to reduce that. Saved addresses are stored with
+to DexScreener, which learn that your IP is interested in that address. For v4
+ownership enumeration, an address-bearing log filter also passes through the
+LPLens Worker to Blockscout Pro; it is processed but not stored. Point the
+options page at your own RPC to reduce direct RPC exposure. Saved addresses are stored with
 `chrome.storage.local`, deliberately **not** `chrome.storage.sync`, so they are
 never carried into a Google account.
 
@@ -267,7 +283,15 @@ applies to any unpacked extension, not just this one.
   on-chain liquidity is actually zero. The Transfer-log route remains the
   keyless fallback.
 - Lifetime history needs a log source that will serve a full-range,
-  topic-filtered query. The measured landscape as of 2026-08-19:
+  topic-filtered query. The measured landscape as of 2026-08-21:
+  - **Licensed builds use the LPLens Blockscout Pro relay first unless the user
+    configured Etherscan.** The Pro credential is an encrypted Cloudflare
+    secret and never enters this repo or the extension. The relay accepts only
+    the configured Ethereum/Base/Arbitrum/Polygon v3 and v4 position-manager
+    contracts and log-filter fields, authenticates every request, and caps each
+    licence at 1,000 relayed queries per UTC day. The free Pro tier is currently
+    100,000 credits/day and 5 requests/second; clients serialize and retry
+    transient capacity responses.
   - **Robinhood Chain's public RPC serves it keylessly.** Nothing to configure.
   - **No public Ethereum RPC does.** Verified refusals from `eth.drpc.org`
     (10k blocks), `ethereum-rpc.publicnode.com` (archive needs a token),
@@ -288,13 +312,13 @@ applies to any unpacked extension, not just this one.
     by refusing and pointing at a paid plan. Measured 2026-08-19 against the v3
     NFPM with a topic1 filter: Ethereum (1), Arbitrum (42161) and Polygon (137)
     all return the full lifetime on a free key; Base does not.
-  - **Blockscout serves it keylessly, so no paid plan is needed.**
+  - **Public Blockscout remains the credential-free fallback.**
     `eth`/`base`/`arbitrum`/`polygon.blockscout.com` answer the same
     Etherscan-compatible full-range `topic1` query with no key at all. Verified
     against Etherscan on the same positions: Ethereum 961877 returns the
     identical 4 events from both. The Etherscan key is **optional everywhere**
-    — it is tried first when configured, because it is faster and more
-    complete, and Blockscout picks up when it is absent or refuses.
+    — it is tried first when configured, then the Pro relay, public Blockscout,
+    and finally the RPC.
   - **But an empty Blockscout answer cannot be trusted, and LPLens encodes
     that.** `polygon.blockscout.com` silently misses positions below roughly
     tokenId 1.2M — measured, Etherscan returns 3 events for tokenIds 100000 /
@@ -305,9 +329,10 @@ applies to any unpacked extension, not just this one.
     an empty result means an incomplete index, never an empty lifetime. It falls
     through to the next source and reports history unavailable if every source
     yields nothing. Empty results are never cached.
-  - Base's Blockscout instance rate-limits aggressively (HTTP 429, roughly 10
-    requests per window), so Base history can throttle on a large scan. It
-    degrades to "unavailable", never to a wrong number.
+  - Public Base Blockscout rate-limits aggressively, and Blockscout now marks
+    the per-instance API family for deprecation. Those are reasons for the Pro
+    relay, not reasons to delete the fallback: a relay or Pro-tier failure still
+    degrades to public sources and then "unavailable", never to a wrong number.
 - Tick ratios use `1.0001^(tick/2)` in doubles — display-grade. Swap in
   `@uniswap/v3-sdk` TickMath before this ever produces calldata.
 - `collect()` staticcall returns fees **plus** any principal pending after a
@@ -357,7 +382,7 @@ extension/
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync
   lib/aggregate.js   all-wallets totals, with explicit exclusion reporting
   lib/license.js     beta access gate
-  overlay.js         app.uniswap.org content script — append-only, URL-anchored
+  overlay.js         optional app.uniswap.org overlay — semantic-link anchored
   sw.js              service worker; holds all network access for the overlay
 tools/
   package.mjs        builds the distributable zip; refuses to ship a credential

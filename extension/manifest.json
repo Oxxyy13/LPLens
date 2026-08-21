@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LPLens \u2014 Uniswap v3 & v4 Position Reader",
-  "version": "0.26.3",
+  "version": "0.27.0",
   "description": "Read-only Uniswap v3 and v4 LP position inspector. Paste any address; nothing is signed and no wallet is connected.",
   "permissions": [
     "storage",

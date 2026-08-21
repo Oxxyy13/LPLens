@@ -16,6 +16,8 @@
  * Usage: node tools/package.mjs
  *        node tools/package.mjs --scan-only   (scan existing build/; used
  *                                              to prove the leak gate fires)
+ *        node tools/package.mjs --skip-live-probe  (deterministic CI build;
+ *                                                    local releases must not use it)
  */
 import {
   readFileSync, writeFileSync, mkdirSync, rmSync, cpSync, readdirSync,
@@ -92,6 +94,15 @@ export function envSecrets() {
   return vals;
 }
 
+/** Provider credentials use mixed case, so the uppercase shape rule misses them. */
+export function providerTokens(line) {
+  return line.match(/\b(?:alch_|proapi_)[A-Za-z0-9_-]{12,}/g) || [];
+}
+
+export function accessCodeTokens(line) {
+  return line.match(/\bLPL(?:-[A-Z0-9]{4}){8}\b/g) || [];
+}
+
 /**
  * Scan every file under dir. Any leftover key aborts.
  * Returns the number of files scanned (so a zero-file scan is visible).
@@ -127,9 +138,12 @@ export function scanForLeaks(dir) {
       }
       // Prefixed provider tokens. These are mixed-case, so the ALL-CAPS
       // key-shape rule below never sees them — they need their own pattern.
-      const tokens = line.match(/(?:alch_|proapi_)[A-Za-z0-9_-]+/g) || [];
+      const tokens = providerTokens(line);
       for (const tok of tokens) {
         hits.push(`${rel}:${n + 1}: provider token ${tok.slice(0, 16)}…`);
+      }
+      for (const tok of accessCodeTokens(line)) {
+        hits.push(`${rel}:${n + 1}: LPLens access code ${tok.slice(0, 12)}…`);
       }
       const re = /[A-Z0-9]{30,}/g;
       let m;
@@ -242,6 +256,7 @@ function listZip(zipPath) {
 
 async function main() {
   const scanOnly = process.argv.includes('--scan-only');
+  const skipLiveProbe = process.argv.includes('--skip-live-probe');
   assertNoFence(readFileSync(join(EXT, 'lib/chains.js'), 'utf8'));
   console.log('package: source chains.js carries no dev fence');
 
@@ -265,7 +280,11 @@ async function main() {
   scanForLeaks(dest);
   nodeCheckAll(dest);
   const CHAINS = await proveKeylessChains(dest);
-  await proveBlockscout(dest, CHAINS);
+  if (skipLiveProbe) {
+    console.log('package: live public Blockscout probe skipped by explicit CI flag');
+  } else {
+    await proveBlockscout(dest, CHAINS);
+  }
 
   const zipped = zipExtension(dest, zipPath);
   if (zipped) {

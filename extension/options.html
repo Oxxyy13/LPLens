@@ -19,7 +19,8 @@
         <div><h2 id="licenseHeading">Access key</h2><p>Manage access to invite-only builds.</p></div>
       </div>
       <p class="section-copy" id="licenseCopy">This LPLens build is invite-only. Paste the access key you were sent.
-         It is an opaque string &mdash; never a wallet, a signature, or a private key.</p>
+         It is an opaque string &mdash; never a wallet, a signature, or a private key.
+         A valid key is enough to load history; you do not need a Blockscout or Etherscan key.</p>
       <input id="licenseKey" type="text" placeholder="Access key">
       <div id="licenseState" class="inline-state"></div>
     </section>
@@ -29,10 +30,11 @@
         <span class="section-icon privacy" aria-hidden="true">✓</span>
         <div><h2>Privacy by construction</h2><p>The extension only asks for what it needs.</p></div>
       </div>
-      <p class="section-copy">Only the wallet address you type and public blockchain data are read. There is no wallet connection, private key, signing, page content, or browsing history access.</p>
+      <p class="section-copy">Your saved wallet addresses and settings stay in <code>chrome.storage.local</code>. When you scan, LPLens sends the address and public-chain query data to the named RPC, price, and history services needed to return results. The LPLens service processes allowlisted Blockscout log filters; it does not store wallet addresses, filters, or responses.</p>
+      <p class="section-copy">There is no wallet connection, private key, or signing access. The beta service stores hashes of the access code and a random browser-installation identifier, plus first/last seen and daily relay-request totals. It does not store IP addresses or fingerprint the browser. The optional Uniswap page access is off at install and disclosed immediately below.</p>
       <div class="privacy-grid">
         <span><b>Stored locally</b><small>Wallet addresses</small></span>
-        <span><b>Sent only to</b><small>RPC and price APIs</small></span>
+        <span><b>Sent only to</b><small>RPC, price &amp; history APIs</small></span>
         <span><b>Never requested</b><small>Wallet signatures</small></span>
       </div>
     </section>
@@ -42,7 +44,7 @@
         <span class="section-icon" aria-hidden="true">U</span>
         <div><h2>Uniswap overlay</h2><p>Bring position context onto the page where you use it.</p></div>
       </div>
-      <p class="section-copy">LPLens ships with <b>no ability to read or change any web page</b>. The overlay permission is limited to one site and can be revoked instantly.</p>
+      <p class="section-copy">LPLens has <b>no access to any web page when installed</b>. If you turn this on, it can run only on <code>app.uniswap.org/positions/*</code>. It reads the position-page URL; on the positions list it reads position links and the first line of visible row text to discover and label positions. It does not read balances, form fields, connected-wallet data, or signing prompts, and it only appends its own panel. Turning it off removes the permission and content script.</p>
       <label class="perm switch-row">
         <span><b>Show the position overlay</b><small>On <code>app.uniswap.org</code> position pages</small></span>
         <input type="checkbox" id="overlayPerm">
@@ -59,11 +61,12 @@
     </section>
 
     <details class="advanced settings-section">
-      <summary><span><b>Advanced connections</b><small>Custom RPC endpoints and optional Etherscan access</small></span></summary>
+      <summary><span><b>Advanced connections</b><small>Optional custom RPC and Etherscan access</small></span></summary>
       <p class="section-copy">Optional. Leave this closed unless you have a reason to
-      change endpoints or add a key. Blockscout already serves lifetime history on
-      Ethereum, Base, Arbitrum and Polygon with no key, so nothing here is
-    required. An Etherscan V2 key is faster, and it is the only way to get
+      change endpoints or add a key. Licensed builds include access to the
+      LPLens Blockscout Pro relay on Ethereum, Base, Arbitrum and Polygon, so
+      nothing here is required. An Etherscan V2 key is an optional direct
+      alternative, and it is still the only verified way to get
     complete Polygon history &mdash; <code>polygon.blockscout.com</code>
     silently misses positions below roughly tokenId 1.2M. Custom RPC URLs are
     for when a public endpoint rate-limits you.</p>

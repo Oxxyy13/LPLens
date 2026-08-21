@@ -12,7 +12,7 @@
  * exactly as the popup does.
  */
 import { loadPositionByVersion } from './lib/positions.js';
-import { entitlement } from './lib/license.js';
+import { entitlement, blockscoutRelayCredentials } from './lib/license.js';
 
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
 
@@ -42,52 +42,51 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // Coalesce only concurrently in-flight requests. Completed results are not
   // cached: after Increase/Decrease/Collect, reloading the Uniswap page must
   // read the just-mined state rather than replay a plausible 30-second-old one.
-  // Gate here rather than in the UI: the check then covers every surface at
-  // once, and a patched content script still gets nothing back.
-  const gated = (async () => {
-    const ent = await entitlement();
-    // GATING_ENABLED false => allowed:true. Invite-only: needs_key /
-    // misconfigured / invalid all have allowed:false and land here.
-    if (!ent.allowed) return { ok: false, gated: true, entitlement: ent };
-    return null;
-  })();
-
+  // Entitlement is checked inside the job, before any relay or RPC, so a
+  // patched content script still gets nothing back and an expired key cannot
+  // send address-bearing filters to the Worker.
   let job = inFlight.get(key);
   if (!job) {
     job = (async () => {
-      await slot();
       try {
-        const store = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
-        const overrides = store.rpcOverrides || {};
-        const data = await loadPositionByVersion(msg.chain, msg.version || 'v3', BigInt(msg.tokenId), {
-          rpcOverride: overrides[msg.chain] || undefined,
-          // Bridged USD pricing can need a second chain. Robinhood WETH, for
-          // example, maps the local event time to Ethereum and reads the
-          // historical USDC/WETH pool there. Passing only the local override
-          // made the popup exact while the on-page overlay silently lost its
-          // Ethereum archive endpoint and fell back to a vs-holding percent.
-          rpcOverrides: overrides,
-          etherscanKey: store.etherscanKey || undefined,
-        });
-        // BigInt does not survive structured clone to the content script.
-        const safe = JSON.parse(JSON.stringify(data, (_k, v) =>
-          typeof v === 'bigint' ? v.toString() : v));
-        return safe;
+        const ent = await entitlement();
+        // GATING_ENABLED false => allowed:true. Invite-only: needs_key /
+        // misconfigured / invalid all have allowed:false and land here.
+        if (!ent.allowed) return { ok: false, gated: true, entitlement: ent };
+        await slot();
+        try {
+          const store = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
+          const overrides = store.rpcOverrides || {};
+          const blockscoutRelay = await blockscoutRelayCredentials();
+          const data = await loadPositionByVersion(msg.chain, msg.version || 'v3', BigInt(msg.tokenId), {
+            rpcOverride: overrides[msg.chain] || undefined,
+            // Bridged USD pricing can need a second chain. Robinhood WETH, for
+            // example, maps the local event time to Ethereum and reads the
+            // historical USDC/WETH pool there. Passing only the local override
+            // made the popup exact while the on-page overlay silently lost its
+            // Ethereum archive endpoint and fell back to a vs-holding percent.
+            rpcOverrides: overrides,
+            etherscanKey: store.etherscanKey || undefined,
+            blockscoutRelay,
+          });
+          // BigInt does not survive structured clone to the content script.
+          const safe = JSON.parse(JSON.stringify(data, (_k, v) =>
+            typeof v === 'bigint' ? v.toString() : v));
+          return { ok: true, data: safe };
+        } finally {
+          release();
+        }
       } finally {
-        release();
         inFlight.delete(key);
       }
     })();
     inFlight.set(key, job);
   }
 
-  gated.then((block) => {
-    if (block) return sendResponse(block);
-    return job.then(
-      (data) => sendResponse({ ok: true, data }),
-      (err) => sendResponse({ ok: false, error: err.message || String(err) }),
-    );
-  });
+  job.then(
+    (result) => sendResponse(result),
+    (err) => sendResponse({ ok: false, error: err.message || String(err) }),
+  );
 
   return true; // keep the message channel open for the async reply
 });

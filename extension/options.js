@@ -25,7 +25,8 @@ if (GATING_ENABLED) {
   document.getElementById('licenseHeading').textContent = 'Access key';
   document.getElementById('licenseCopy').innerHTML =
     `This LPLens build is invite-only. Paste the access key you were sent.
-     It is an opaque string &mdash; never a wallet, a signature, or a private key.`;
+     It is an opaque string &mdash; never a wallet, a signature, or a private key.
+     A valid key is enough to load history; you do not need a Blockscout or Etherscan key.`;
 } else {
   licenseSection.hidden = true;
 }
