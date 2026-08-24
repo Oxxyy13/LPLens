@@ -1,12 +1,30 @@
 # LPLens
 
-Read-only Uniswap v3 and v4 LP position inspector, built as a Manifest V3
-Chrome extension. Paste any address; it reads positions straight off-chain.
+Read-only Uniswap v3/v4 and ProjectX concentrated-liquidity position inspector,
+built as a Manifest V3 Chrome extension. Paste any address; it reads positions
+straight off-chain.
 
 **Nothing is signed and no wallet is connected.** LPLens has no signing code and
 no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
+
+**Official distribution:** [Chrome Web Store](https://chromewebstore.google.com/detail/fkddococbokkhmkagkljibomgpckgdkl)
+· [immutable releases](https://github.com/Oxxyy13/LPLens/releases)
+· extension ID `fkddococbokkhmkagkljibomgpckgdkl`
+
+## Publicly auditable, source-available
+
+The exact extension source is public so users can inspect every permission,
+network request, and read-only RPC method, then reproduce the Store package.
+LPLens is **source-available, not open source**. It uses the standardized
+[PolyForm Shield License 1.0.0](LICENSE.md): inspection, testing, modification,
+and sharing are allowed for noncompeting purposes, but the code may not be used
+to provide a free or paid product or service that competes with LPLens.
+
+See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
+boundary, reproducible-build steps, and private vulnerability-reporting route.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
 ## Status: 0.28.0 — invite-only beta release
 
