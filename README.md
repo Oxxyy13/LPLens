@@ -8,18 +8,25 @@ no wallet capability of any kind. It never asks for a seed phrase, a private
 key, or a wallet connection, and it cannot move a token even if you wanted it
 to. See [Security](#security) for how that is enforced rather than promised.
 
-## Status: 0.26.3 — invite-only beta
+## Status: 0.28.0 — invite-only beta release
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
 link on its own grants nothing. A key is validated against a Cloudflare Worker
-whose registry is `SHA-256 hash -> { label, expires }`. The source of that
-Worker is in this repo at `tools/licence-worker/worker.js`, so you can see for
-yourself that it stores hashes rather than keys, and that the only thing it ever
-receives is the key you were given. It is not told which addresses you look up.
+whose registry is `SHA-256 hash -> { label, expires }`. The same Worker provides
+an authenticated history relay backed by Blockscout Pro and Etherscan, so a
+tester supplies no RPC or explorer key: paste the LPLens access key, paste a
+wallet address, and scan. The source is
+in this repo at `tools/licence-worker/worker.js`. It stores hashes of access
+codes and random browser-installation identifiers plus aggregate request counts;
+it does not store wallet addresses, log filters, IP addresses or API responses.
+The relay necessarily processes each allowlisted log filter long enough to send
+it to Blockscout; v4 ownership filters can contain the public address being read.
 
 This is access control for a private beta, not a paywall. Everything LPLens
-computes, it computes locally on your machine.
+computes, it computes locally on your machine. The hosted component supplies a
+protected history input; it does not receive present-state RPC reads, USD marks,
+or finished portfolio figures.
 
 ## Verify this yourself
 
@@ -29,7 +36,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.26.3
+diff -r extension build/lplens-0.28.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -40,14 +47,17 @@ Two claims worth checking directly, because they are the ones that matter:
 
 - **The complete set of JSON-RPC methods** is declared in `extension/lib/rpc.js`
   as a frozen allowlist, and `rpcCall()` throws on anything not in it. It is
-  `eth_call`, `eth_getLogs`, `eth_getBlockByNumber` — three reads. There is no
+  `eth_call`, `eth_getLogs`, `eth_getBlockByNumber`,
+  `eth_getTransactionReceipt` — four reads. There is no
   code path that can issue `eth_sendTransaction` or `personal_sign`.
 - **The permissions** are in `extension/manifest.json`: `storage` and
-  `scripting`, plus network access to a named list of RPC and price hosts. No
+  `scripting`, plus network access to a named list of RPC, price, explorer, and
+  LPLens service hosts. No
   `tabs`, no `cookies`, no `webRequest`, no `<all_urls>`. Note that
-  `app.uniswap.org` appears under `optional_host_permissions`, not
-  `host_permissions` — LPLens ships with **no** access to Uniswap and cannot
-  read that site unless you explicitly grant it.
+  `app.uniswap.org` and `www.prjx.com` appear under
+  `optional_host_permissions`, not `host_permissions` — LPLens ships with
+  **no** access to either site and cannot run there unless you explicitly grant
+  each one.
 
 ## What it does
 
@@ -60,18 +70,33 @@ Two claims worth checking directly, because they are the ones that matter:
   never `$0`**
 - Reconstructs **lifetime history** from NFPM events — `tokenId` is the first
   indexed parameter of `IncreaseLiquidity`/`DecreaseLiquidity`/`Collect`, so one
-  `eth_getLogs` per position returns its whole life with no subgraph and no key
+  indexed log query per position returns its whole life with no subgraph. A
+  licensed Blockscout Pro relay is built in; public Blockscout and RPC fallbacks
+  remain fail-closed
 - Refreshes a changed v3 history with the latest raw-RPC logs as well as the
   lifetime index, so an explorer that has not indexed a just-mined collect/add/
   remove cannot be cached as the new truth
+- Reconstructs exact v4 entry, vs-holding, and LP return for an untouched mint
+  and for multiple isolated, hookless additions. The proof matches PoolManager
+  `ModifyLiquidity` salt to the token id, checks every receipt, and reads
+  Blockscout's execution trace for later adds so principal and previously earned
+  fees are separated before PositionManager nets them. Removes, fee-only pokes,
+  hooks, and bundled actions remain unavailable rather than approximated
 - Values **every liquidity addition at its own block and pool price**. A second
   add is not silently priced at the original mint anymore
+- Shows each token's exact USD move in the shared popup/overlay details. A
+  one-add position says `since opened`; a supported v3 or v4 multi-add history
+  shows both `since first add` and `since latest add`. A capital-addition timeline
+  keeps every contribution's date, token quantities, and historical USD value.
+  It does not invent one weighted-average entry price that answers neither
+  question
 - Values every **Collect** when it left the LP. Claiming, partially removing,
   and then reusing those tokens in another NFT no longer counts them as both
   still held and newly deposited
 - Solves **entry and exit price** from the event amounts plus the tick range,
   with no archive node, cross-checked by two independent derivations
-- Scans Ethereum, Base, Arbitrum, Polygon and Robinhood Chain (4663) together;
+- Scans Ethereum, Base, Arbitrum, Polygon, HyperEVM and Robinhood Chain (4663)
+  together; HyperEVM positions are read through ProjectX;
   every card names its chain, and its wallet when several are saved
 - Saves multiple addresses locally with optional labels, and can total them.
   Saved addresses live in `chrome.storage.local` and never leave the machine
@@ -109,11 +134,19 @@ is a new negative cash flow, so the two flows offset at portfolio level. The old
 formula marked every historical collection at today's price as though it were
 still held, which double-counted recycled capital.
 
-Historical dollars come from chain state, not from applying today's rate
-backwards. A USDC/WETH pool's `slot0` at a historical block supplies the dollar
-price of ETH; the position event or its own historical `slot0` supplies the pair
-price. A collection paired with DecreaseLiquidity in one transaction uses that
-decrease's exact price. Fee-only collections fall back to archival `slot0`.
+Historical dollars come from the chain at that block, not from applying today's
+rate backwards. A USDC/WETH pool's price then supplies the dollar price of ETH;
+the position event or its own pool price supplies the pair price. A collection
+paired with DecreaseLiquidity in one transaction uses that decrease's exact
+price. Fee-only collections fall back to the pool's historical price.
+
+Those historical pool prices are read from each pool's own **`Swap` events**,
+not from a historical `eth_call`. Only a swap moves `sqrtPriceX96`, so the
+last `Swap` at or before a block is exactly that block's price — and log
+indexes outlive pruned state, so no archive node is needed on any chain. The
+`eth_call` form was removed on 2026-08-23 after one chain's public RPC was
+found answering historical calls with *present-day* state instead of refusing,
+which produced a confidently wrong basis.
 When an exact required price is unavailable, LP return is withheld rather than
 turning a bound into a point-looking percentage.
 
@@ -123,8 +156,10 @@ dollar-denominated, so there is no local pool to read a dollar price from — bu
 that WETH is bridged, so the price exists on Ethereum. The local block maps to
 its timestamp, the timestamp to an Ethereum block, and the reference pool is
 read there. The block lookup uses Etherscan when a configured key is available,
-then falls back to a keyless binary search over Ethereum block timestamps.
-Still no price API: both paths read chain facts.
+then public Blockscout's keyless timestamp index, with the on-chain binary
+search retained only as a final fallback. The reference pool price is likewise
+read from Blockscout's indexed `Swap` logs before raw RPC logs are attempted.
+Still no price API: every path reads chain facts.
 
 That path carries one assumption the same-chain path does not — that the bridged
 token holds its peg. Arbitrage makes it reliable, but it is an assumption rather
@@ -138,8 +173,9 @@ each solve for the same square-root price, so the pair is a self-check rather
 than one unverified number — measured agreement is 0.000000% across six
 positions, and any disagreement is printed as a band instead of being averaged
 away. A single-sided mint is underdetermined from its event alone. A direct WETH
-or stablecoin leg, or an archival position-pool read, can still make its dollar
-flow exact. Otherwise it renders as a bound and LP return is withheld.
+or stablecoin leg, or an exact historical position-pool `Swap` event, can still
+make its dollar flow exact. Otherwise it renders as a bound and LP return is
+withheld.
 
 ## Install
 
@@ -155,7 +191,7 @@ No build step, no `npm install`, no bundler. After editing any file, hit the
 refresh icon on the extension card.
 
 Optional, in **Options → Advanced**: your own per-chain RPC URLs and an
-Etherscan API key. Both are optional — LPLens is keyless by default — and both
+Etherscan API key. Both are optional — no user-supplied provider key is required — and both
 are stored in `chrome.storage.local` inside your browser profile. Nothing is
 ever written back to this repo.
 
@@ -170,28 +206,36 @@ Two addresses with live mainnet positions, useful for a smoke test:
 **Cannot touch your wallet.** There is no signing code and no wallet capability
 of any kind — no `eth_sendTransaction`, no `personal_sign`, no
 `eth_requestAccounts`, no `window.ethereum`. Every JSON-RPC method it issues is
-a read: `eth_call`, `eth_getLogs`, and `eth_getBlockByNumber` (used once, to map
-a block to its timestamp for cross-chain pricing). That list is not a promise in
+a read: `eth_call`, `eth_getLogs`, `eth_getBlockByNumber`, and
+`eth_getTransactionReceipt` (used to prove token flow for a narrow v4 mint
+case). That list is not a promise in
 a document — it is a frozen allowlist in `lib/rpc.js` that every call is checked
 against, and an unlisted method throws. Chrome also isolates extensions from
 each other, so LPLens cannot reach MetaMask's storage or keys even in principle.
 
-**Cannot see your browsing.** No `tabs`, no `activeTab`, no `cookies`, no
-`webRequest`, no `<all_urls>`.
+**Cannot see your general browsing.** No `tabs`, no `activeTab`, no `cookies`,
+no `webRequest`, no `<all_urls>`. The only page permission is the optional,
+user-granted Uniswap scope described below.
 
-**The Uniswap overlay is opt-in and off by default.** `app.uniswap.org` is in
-`optional_host_permissions`, not `host_permissions`, so a freshly installed
-LPLens has no access to that site at all. Only if you turn the overlay on does
-the service worker call `chrome.scripting.registerContentScripts` with
-`matches: ['https://app.uniswap.org/positions/*']` — see
-`extension/sw.js` — and turning it off unregisters it again.
+**Both on-page overlays are independently opt-in and off by default.**
+`app.uniswap.org` and `www.prjx.com` are in `optional_host_permissions`, not
+`host_permissions`, so a freshly installed LPLens has no access to either site.
+The Uniswap toggle registers only the exact
+`https://app.uniswap.org/positions` list and its `/positions/*` descendants.
+The ProjectX toggle registers only `https://www.prjx.com/portfolio` and its
+descendants. Turning either one off unregisters only that site's content script.
 
 Once granted, that is a real widening of the surface, and it is worth
 understanding rather than skimming:
 
-- The content script is **append-only**. It adds a single node and never reads,
-  moves, or rewrites anything Uniswap rendered, so it cannot change what you
-  are shown before you sign.
+- The content script is **write-isolated and append-only**. On Uniswap it reads
+  the position-page URL; on the positions list it reads semantic position links
+  and the first line of visible row text to discover and label positions. On
+  ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
+  the panel uses only the last address explicitly loaded in LPLens. It never
+  reads balances, forms, connected-wallet state, wallet-provider objects, or
+  signing prompts. Its only page write is adding its own closed-shadow-root
+  panel; it never moves or rewrites anything either site rendered.
 - It runs in Chrome's **isolated world**, so `window.ethereum`, the page's
   JavaScript, and the wallet are unreachable from it by construction — not by
   good behaviour.
@@ -208,10 +252,11 @@ important, not less: the code runs on a page where transactions get approved.
 code, no build step. Most extension compromises arrive through a dependency or
 an auto-updating remote script; there is nothing here to compromise.
 
-**No credentials in this repo.** LPLens's only key store is
-`chrome.storage.local`, written by the options page, inside your browser
-profile. `tools/package.mjs` scans every packaged file for credential-shaped
-strings and aborts the build on a hit.
+**No credentials in this repo.** User-supplied RPC and Etherscan settings live
+in `chrome.storage.local`. The shared Blockscout Pro credential is an encrypted
+Cloudflare Worker secret and is never returned to the extension.
+`tools/package.mjs` scans every packaged file for credential-shaped strings and
+aborts the build on a hit.
 
 **Hostile token names are neutralized.** `symbol()` is attacker-controlled —
 any ERC-20 can name itself with an HTML payload, and position lists are rendered
@@ -221,8 +266,14 @@ constructed. Verified against five injection payloads. MV3's default CSP
 (`script-src 'self'`) blocks inline handlers as a second layer.
 
 **Privacy, not security:** the address you paste is sent to the RPC endpoint and
-to DexScreener, which learn that your IP is interested in that address. Point
-the options page at your own RPC to reduce that. Saved addresses are stored with
+to DexScreener, which learn that your IP is interested in that address. For v4
+ownership enumeration, an address-bearing log filter also passes through the
+LPLens Worker to Blockscout Pro; it is processed but not stored. Point the
+options page at your own RPC to reduce direct RPC exposure. If a v4 NFT has
+later additions, its public transaction hashes are sent directly to that
+chain's public Blockscout trace endpoint; this is what makes the principal/fee
+split exact without sending wallet credentials or requesting a signature.
+Saved addresses are stored with
 `chrome.storage.local`, deliberately **not** `chrome.storage.sync`, so they are
 never carried into a Google account.
 
@@ -267,7 +318,15 @@ applies to any unpacked extension, not just this one.
   on-chain liquidity is actually zero. The Transfer-log route remains the
   keyless fallback.
 - Lifetime history needs a log source that will serve a full-range,
-  topic-filtered query. The measured landscape as of 2026-08-19:
+  topic-filtered query. The measured landscape as of 2026-08-21:
+  - **Licensed builds use the LPLens Blockscout Pro relay first unless the user
+    configured Etherscan.** The Pro credential is an encrypted Cloudflare
+    secret and never enters this repo or the extension. The relay accepts only
+    the configured Ethereum/Base/Arbitrum/Polygon v3 and v4 position-manager
+    contracts and log-filter fields, authenticates every request, and caps each
+    licence at 1,000 relayed queries per UTC day. The free Pro tier is currently
+    100,000 credits/day and 5 requests/second; clients serialize and retry
+    transient capacity responses.
   - **Robinhood Chain's public RPC serves it keylessly.** Nothing to configure.
   - **No public Ethereum RPC does.** Verified refusals from `eth.drpc.org`
     (10k blocks), `ethereum-rpc.publicnode.com` (archive needs a token),
@@ -277,8 +336,9 @@ applies to any unpacked extension, not just this one.
     Alchemy key does *not* enable lifetime history — 25M blocks at 10 per
     request is a different order of magnitude, not a rate-limit problem. PAYG
     lifts it.
-    Alchemy free *does* serve archive `eth_call`, which is a usable general RPC,
-    and the NFT ownership endpoint enables verified v4 enumeration.
+    LPLens does not require archive `eth_call`; historical pool prices come
+    from indexed `Swap` logs. The Alchemy NFT ownership endpoint still enables
+    verified v4 enumeration when a user configures Alchemy.
   - **Etherscan's V2 API serves it on the free tier for most chains**, 100k
     calls/day, and `topic1`-only filtering is accepted — so one call returns a
     position's whole lifetime. Put a key from etherscan.io/apis in the options
@@ -288,13 +348,16 @@ applies to any unpacked extension, not just this one.
     by refusing and pointing at a paid plan. Measured 2026-08-19 against the v3
     NFPM with a topic1 filter: Ethereum (1), Arbitrum (42161) and Polygon (137)
     all return the full lifetime on a free key; Base does not.
-  - **Blockscout serves it keylessly, so no paid plan is needed.**
+  - **Public Blockscout remains the credential-free fallback.**
     `eth`/`base`/`arbitrum`/`polygon.blockscout.com` answer the same
     Etherscan-compatible full-range `topic1` query with no key at all. Verified
     against Etherscan on the same positions: Ethereum 961877 returns the
     identical 4 events from both. The Etherscan key is **optional everywhere**
-    — it is tried first when configured, because it is faster and more
-    complete, and Blockscout picks up when it is absent or refuses.
+    — it is tried first when configured, then the Pro relay, public Blockscout,
+    and finally the RPC. The same public index supplies timestamp-to-block
+    mapping and historical reference-pool `Swap` events for keyless Robinhood
+    dollar returns. This avoids the burst of Ethereum block-header requests
+    that previously exhausted an anonymous RPC window on a multi-card overlay.
   - **But an empty Blockscout answer cannot be trusted, and LPLens encodes
     that.** `polygon.blockscout.com` silently misses positions below roughly
     tokenId 1.2M — measured, Etherscan returns 3 events for tokenIds 100000 /
@@ -305,9 +368,10 @@ applies to any unpacked extension, not just this one.
     an empty result means an incomplete index, never an empty lifetime. It falls
     through to the next source and reports history unavailable if every source
     yields nothing. Empty results are never cached.
-  - Base's Blockscout instance rate-limits aggressively (HTTP 429, roughly 10
-    requests per window), so Base history can throttle on a large scan. It
-    degrades to "unavailable", never to a wrong number.
+  - Public Base Blockscout rate-limits aggressively, and Blockscout now marks
+    the per-instance API family for deprecation. Those are reasons for the Pro
+    relay, not reasons to delete the fallback: a relay or Pro-tier failure still
+    degrades to public sources and then "unavailable", never to a wrong number.
 - Tick ratios use `1.0001^(tick/2)` in doubles — display-grade. Swap in
   `@uniswap/v3-sdk` TickMath before this ever produces calldata.
 - `collect()` staticcall returns fees **plus** any principal pending after a
@@ -323,14 +387,13 @@ applies to any unpacked extension, not just this one.
   marked WETH at `$0.0000122` instead of `$1,932.99` was a live defect until
   0.12.0. A token whose materially liquid pools disagree by more than 25% is
   left unpriced rather than marked at a number nobody can stand behind.
-- **v4 lifetime history is not implemented.** Current v4 ownership, liquidity,
-  composition and collectable fees refresh from chain state, but adds/removes/
-  claims are not reconstructed as lifetime token flows. v4 emits
-  `ModifyLiquidity` from the PoolManager keyed by poolId and salt, not per
-  tokenId, so the
-  one-query-per-position approach that makes v3 history cheap does not carry
-  over. v4 positions report history as unavailable rather than showing a
-  partial one.
+- **v4 lifetime return is deliberately narrow.** `ModifyLiquidity` identifies
+  an NFT through `poolId + PositionManager + salt == tokenId`, but does not emit
+  token amounts. LPLens 0.28 supports an untouched mint plus multiple positive
+  additions only when the pool is hookless, every transaction isolates this NFT,
+  and Blockscout exposes PoolManager's returned principal and fee deltas. A
+  remove, fee-only action, hook, bundled action, missing trace, or ambiguous
+  receipt reports a specific unavailable reason instead of partial cash flow.
 - A custom RPC URL only works if that endpoint sends permissive CORS headers.
   Alchemy/Infura/dRPC do; a bare self-hosted node will fail with an opaque fetch
   error. Built-in endpoints are covered by `host_permissions` and are unaffected.
@@ -351,13 +414,13 @@ extension/
   lib/keccak.js      Keccak-256 (v4 poolId); vector-verified, not SHA3
   lib/positions.js   orchestration and valuation
   lib/history.js     lifetime events, entry/exit solve, token-denominated PnL
-  lib/histprice.js   USD at any block, from a reference pool via archive eth_call
+  lib/histprice.js   USD at any block, from a reference pool's Swap events
   lib/logs.js        log retrieval; Etherscan V2, Blockscout, or eth_getLogs
   lib/cache.js       bounded persistent caches
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync
   lib/aggregate.js   all-wallets totals, with explicit exclusion reporting
   lib/license.js     beta access gate
-  overlay.js         app.uniswap.org content script — append-only, URL-anchored
+  overlay.js         optional Uniswap and ProjectX overlays
   sw.js              service worker; holds all network access for the overlay
 tools/
   package.mjs        builds the distributable zip; refuses to ship a credential

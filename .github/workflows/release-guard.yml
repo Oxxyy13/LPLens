@@ -1,0 +1,42 @@
+name: Release guard
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Scan the public tree for credentials
+        run: node tools/check-repo-secrets.mjs
+      - name: Prove the credential matchers
+        run: |
+          node tools/check-repo-secrets.mjs --self-test
+          node tools/test-package-guard.mjs
+      - name: Run relay and accounting regressions
+        run: |
+          node tools/test-privacy-disclosure.mjs
+          node tools/test-overlay-list.mjs
+          node tools/test-projectx-overlay.mjs
+          node tools/test-projectx-config.mjs
+          node tools/test-blockscout-relay.mjs
+          node tools/test-rpc-retry.mjs
+          node tools/test-histprice-archive.mjs
+          node tools/test-histprice-blockscout.mjs
+          node tools/test-v4-history.mjs
+          node tools/test-mutation-refresh.mjs
+          node tools/test-cashflow-pnl.mjs
+      - name: Build the byte-identical extension tree
+        run: |
+          node tools/package.mjs --skip-live-probe
+          version=$(node -p "require('./extension/manifest.json').version")
+          diff -r extension "build/lplens-$version"

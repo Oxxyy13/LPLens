@@ -18,6 +18,52 @@ import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
 
+/**
+ * Exact USD token-price moves from the first liquidity addition to now.
+ *
+ * This is intentionally separate from the pool-ratio move shown in details:
+ * both tokens can rise or fall together in dollars while their ratio barely
+ * moves. Only an exact historical leg is eligible; a bound must not become a
+ * confident-looking percentage.
+ */
+export function tokenPriceChangesSinceFirstAdd(basis, current0, current1, adds = 1) {
+  const legs = basis && Array.isArray(basis.legs) ? basis.legs : [];
+  const first = legs.reduce((best, leg) => (
+    !best || Number(leg.block) < Number(best.block) ? leg : best
+  ), null);
+  if (!first || first.exact === false) return null;
+  const change = (from, to) => {
+    if (!(from > 0) || !(to > 0) || !Number.isFinite(from) || !Number.isFinite(to)) {
+      return null;
+    }
+    return { from, to, pct: (to / from - 1) * 100 };
+  };
+  const token0 = change(first.usd0, current0);
+  const token1 = change(first.usd1, current1);
+  if (!token0 && !token1) return null;
+  return { label: Number(adds) > 1 ? 'first add' : 'opened', token0, token1 };
+}
+
+/** Exact USD token-price moves from the most recent addition to now. */
+export function tokenPriceChangesSinceLatestAdd(basis, current0, current1, adds = 1) {
+  if (Number(adds) < 2) return null;
+  const legs = basis && Array.isArray(basis.legs) ? basis.legs : [];
+  const latest = legs.reduce((best, leg) => (
+    !best || Number(leg.block) > Number(best.block) ? leg : best
+  ), null);
+  if (!latest || latest.exact === false) return null;
+  const change = (from, to) => {
+    if (!(from > 0) || !(to > 0) || !Number.isFinite(from) || !Number.isFinite(to)) {
+      return null;
+    }
+    return { from, to, pct: (to / from - 1) * 100 };
+  };
+  const token0 = change(latest.usd0, current0);
+  const token1 = change(latest.usd1, current1);
+  if (!token0 && !token1) return null;
+  return { label: 'latest add', token0, token1 };
+}
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function retryRead(fn, attempts = 3) {
   let last;
@@ -103,7 +149,8 @@ const PRICE_MEMO_TTL_MS = 60_000;
 const PRICE_MEMO_MAX = 500;
 
 function tagPosition(p, chainKey) {
-  return { ...p, chainKey, version: p.version || 'v3' };
+  const protocol = CHAINS[chainKey] && CHAINS[chainKey].protocol;
+  return { ...p, chainKey, version: p.version || 'v3', protocol: p.protocol || protocol || null };
 }
 
 /**
@@ -176,9 +223,9 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   // one eth_getLogs per visible card. An endpoint that refuses wide ranges
   // degrades to `history.unavailable`; it never fails the whole load.
   // Wide eth_getLogs needs a better endpoint than present-state reads do, so
-  // history gets its own source descriptor. Etherscan wins when a key exists;
-  // a refusal (including the HTTP-200 Base paywall) falls through to
-  // Blockscout when the chain has one, then to whichever RPC is in play.
+  // history gets its own source descriptor. Etherscan wins when a user key
+  // exists; a refusal (including the HTTP-200 Base paywall) falls through to
+  // the licensed Blockscout Pro relay, then public Blockscout, then RPC.
   const source = historySource(chain, rpc, opts);
   const withHistory = await mapLimit(rendered, 3, (p) => attachHistory(source, chain, p));
 
@@ -559,6 +606,14 @@ export async function attachUsd(chainKey, p, opts = {}) {
       (p.amount1 || 0) + p.collectable1,
     );
   const ret = strategyReturn(basis, proceeds, currentNow);
+  const tokenPriceChange = tokenPriceChangesSinceFirstAdd(
+    basis, p0, p1, h.adds || (h.deposits && h.deposits.length) || 1);
+  const latestAddPriceChange = tokenPriceChangesSinceLatestAdd(
+    basis, p0, p1, h.adds || (h.deposits && h.deposits.length) || 1);
+  const capitalEvents = basis && Array.isArray(basis.legs) ? basis.legs.map((leg, index) => ({
+    ...leg,
+    kind: index === 0 ? 'opened' : 'added',
+  })) : [];
   let returnUnavailable = null;
   if (!basis) returnUnavailable = 'gross additions unpriced';
   else if (!basis.exact) returnUnavailable = 'gross additions are bounded';
@@ -571,6 +626,9 @@ export async function attachUsd(chainKey, p, opts = {}) {
     usd: {
       price0: p0 ?? null,
       price1: p1 ?? null,
+      tokenPriceChange,
+      latestAddPriceChange,
+      capitalEvents,
       markSource: chainPair ? 'pool' : 'dexscreener',
       bridged: !!(CHAINS[chainKey] && CHAINS[chainKey].usdRef && CHAINS[chainKey].usdRef.via),
       grossAdded: basis ? basis.basis : null,
@@ -607,6 +665,8 @@ function historySource(chain, rpc, opts) {
     rpc: opts.rpcOverride || chain.logsRpc || rpc,
     etherscanKey: opts.etherscanKey || chain.etherscanKey || null,
     etherscanChainId: chain.etherscanChainId || null,
+    historyRelay: opts.historyRelay || opts.blockscoutRelay || null,
+    historyRelayChainId: chain.etherscanChainId || null,
     blockscout: chain.blockscout || null,
   };
 }
@@ -934,5 +994,5 @@ export async function loadPosition(chainKey, tokenId, opts = {}) {
   if (enriched.error) return { ...enriched, owner };
   const full = await attachHistory(historySource(chain, rpc, opts), chain, enriched);
   const priced = opts.withUsd === false ? full : await attachUsd(chainKey, full, opts);
-  return { ...priced, owner, version: 'v3' };
+  return { ...priced, owner, version: 'v3', protocol: chain.protocol || null };
 }

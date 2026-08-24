@@ -1,5 +1,6 @@
 /**
- * On-page overlay for app.uniswap.org position pages.
+ * On-page overlay for app.uniswap.org position pages and the ProjectX
+ * portfolio at www.prjx.com.
  *
  * SECURITY POSTURE — read this before changing anything here.
  *
@@ -48,6 +49,7 @@ const HOST_ID = 'lplens-overlay-host';
 const LIST_HOST_ID = 'lplens-list-host';
 // The list route is /positions with no position id after it.
 const LIST_ROUTE = /^\/positions\/?$/;
+const PROJECTX_ROUTE = /^\/portfolio\/?$/;
 let lastKey = null;
 
 
@@ -193,7 +195,12 @@ function placePanel(panel) {
   const roomLeft = Math.floor(left - GAP * 2);
   const roomRight = Math.floor(innerWidth - right - GAP * 2);
 
-  const useRight = roomRight > roomLeft;
+  // ProjectX keeps a floating Support control in the bottom-right corner. Its
+  // layout can leave more apparent room on that side, but docking there puts
+  // our collapse/expand button underneath the site's control. Keep ProjectX
+  // on the browser's left edge; Uniswap retains adaptive gutter placement.
+  const forceLeft = PROJECTX_ROUTE.test(location.pathname);
+  const useRight = !forceLeft && roomRight > roomLeft;
   const room = useRight ? roomRight : roomLeft;
   const width = Math.min(MAX, room);
 
@@ -209,21 +216,23 @@ function placePanel(panel) {
     panel.style.right = useRight ? GAP + 'px' : '';
     panel.dataset.overlapping = '';
   } else {
-    // No usable gutter: sit bottom-right over the page, but start tucked away.
-    panel.style.left = '';
-    panel.style.right = GAP + 'px';
+    // No usable gutter: overlap from the selected edge. ProjectX still stays
+    // left so its toggle cannot collide with the site's Support control.
+    panel.style.left = useRight ? '' : GAP + 'px';
+    panel.style.right = useRight ? GAP + 'px' : '';
     panel.dataset.overlapping = '1';
   }
   return width >= MIN;
 }
 
-function render(html) {
+function render(html, openWhenOverlapping = false) {
   const shadow = mount();
   const panel = shadow.querySelector('.panel');
   panel.innerHTML = html;
   const fits = placePanel(panel);
   attachGrip(panel, !panel.style.left);
-  panel.classList.toggle('collapsed', collapsed || (!fits && !userExpanded));
+  const startsCollapsed = collapsed || (!fits && !userExpanded && !openWhenOverlapping);
+  panel.classList.toggle('collapsed', startsCollapsed);
   const more = panel.querySelector('#lplens-more');
   if (more) {
     panel.classList.toggle('showmore', showDetails);
@@ -237,10 +246,10 @@ function render(html) {
   }
   const btn = panel.querySelector('#lplens-toggle');
   if (btn) {
-    btn.textContent = collapsed ? '+' : '−';
-    btn.title = collapsed ? 'expand' : 'collapse';
+    btn.textContent = startsCollapsed ? '+' : '−';
+    btn.title = startsCollapsed ? 'expand' : 'collapse';
     btn.onclick = () => {
-      collapsed = !collapsed;
+      collapsed = !panel.classList.contains('collapsed');
       if (!collapsed) userExpanded = true;
       panel.classList.toggle('collapsed', collapsed);
       btn.textContent = collapsed ? '+' : '−';
@@ -483,6 +492,69 @@ function gutterCard(row) {
     <div class="gc-sub gc-status">${esc([closed ? 'closed' : d.status, a ? a.dur : null].filter(Boolean).join(' · '))}</div>`;
 }
 
+function portfolioCard(position) {
+  return `<div class="portfolio-card">${gutterCard({ data: position })}</div>`;
+}
+
+/**
+ * ProjectX portfolio (/portfolio)
+ *
+ * ProjectX renders its position actions inline and does not put NFT ids in
+ * stable semantic links. Reading the connected wallet would violate LPLens's
+ * no-wallet boundary, so this panel instead asks the service worker for the
+ * last address the user explicitly loaded in LPLens. No ProjectX page content
+ * is needed or sent anywhere.
+ */
+let projectxBusy = false;
+async function syncProjectXPortfolio() {
+  const key = 'projectx:portfolio';
+  if (projectxBusy || lastKey === key) return;
+  projectxBusy = true;
+  lastKey = key;
+  teardownList();
+  render(head('<span class="pill">ProjectX</span>') +
+    '<div class="bd"><div class="note">Reading the last address loaded in LPLens…</div></div>', true);
+
+  try {
+    if (!contextAlive()) return shutdownOrphan();
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({ type: 'LPLENS_PROJECTX_PORTFOLIO' });
+    } catch (err) {
+      if (isOrphanError(err)) return shutdownOrphan();
+      res = { ok: false, error: err.message || String(err) };
+    }
+    if (lastKey !== key) return;
+
+    if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+      const e = res.entitlement || {};
+      render(head('<span class="pill">ProjectX</span>') + `<div class="bd">
+        <div class="note">${esc(e.reason || 'LPLens access is required.')} Check Options or ask Dan.</div>
+      </div>`, true);
+      return;
+    }
+    if (!res || !res.ok) {
+      render(head('<span class="pill">ProjectX</span>') + `<div class="bd">
+        <div class="err note">${esc(res && res.error || 'no response')}</div>
+      </div>`, true);
+      return;
+    }
+
+    const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
+    const address = String(res.data && res.data.address || '');
+    const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+    const content = positions.length
+      ? positions.map(portfolioCard).join('')
+      : '<div class="note">No open ProjectX positions found for this address.</div>';
+    render(head(`<span class="pill">ProjectX · ${positions.length}</span>`) + `<div class="bd">
+      <div class="note">Last LPLens address: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
+      ${content}
+    </div>`, true);
+  } finally {
+    projectxBusy = false;
+  }
+}
+
 async function syncList() {
   if (listBusy) return;
   const anchors = [...document.querySelectorAll('a[href*="/positions/v"]')];
@@ -508,7 +580,7 @@ async function syncList() {
       rows.push({
         href, anchor,
         label: (anchor.innerText || '').split('\n')[0].slice(0, 18),
-        v4: m[1].toLowerCase() !== 'v3',
+        version: m[1].toLowerCase(),
         chain,
         tokenId: m[3],
         // An unreadable row still gets a card saying why; a silently absent one
@@ -545,7 +617,8 @@ async function syncList() {
       if (innerWidth < 1500) panel.classList.add('collapsed');
       paint = () => {
         panel.innerHTML = head(`<span class="pill">${rows.length}</span>`) +
-          `<div class="bd" style="padding:8px 10px">${rows.map(listCard).join('')}</div>`;
+          `<div class="bd">${rows.map((row) =>
+            `<div class="portfolio-card">${gutterCard(row)}</div>`).join('')}</div>`;
         const btn = panel.querySelector('#lplens-toggle');
         if (btn) btn.onclick = () => panel.classList.toggle('collapsed');
       };
@@ -553,11 +626,12 @@ async function syncList() {
     }
 
     for (const row of rows) {
-      if (row.v4 || !row.chain || row.data) continue;
+      if (!row.chain || row.data) continue;
       if (!contextAlive()) return shutdownOrphan('list');
       try {
         const res = await chrome.runtime.sendMessage({
           type: 'LPLENS_POSITION', chain: row.chain, tokenId: row.tokenId,
+          version: row.version,
         });
         row.data = res && res.ok ? res.data : { error: (res && res.error) || 'no response' };
       } catch (err) {
@@ -645,6 +719,9 @@ function shutdownOrphan(target) {
 }
 
 async function sync() {
+  if (PROJECTX_ROUTE.test(location.pathname)) {
+    return syncProjectXPortfolio();
+  }
   if (LIST_ROUTE.test(location.pathname)) {
     teardown();
     return syncList();
@@ -733,5 +810,15 @@ window.addEventListener('popstate', () => {
   lastHref = location.href;
   setTimeout(sync, 50);
 });
+
+// If the user loads another address in the popup while ProjectX is open, the
+// panel follows that explicit choice without reading the site's wallet state.
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.address || !PROJECTX_ROUTE.test(location.pathname)) return;
+    lastKey = null;
+    sync();
+  });
+} catch { /* orphaned context */ }
 
 sync();

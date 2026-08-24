@@ -12,33 +12,104 @@ export const RPC_METHODS = Object.freeze([
   'eth_call',
   'eth_getLogs',
   'eth_getBlockByNumber',
+  'eth_getTransactionReceipt',
 ]);
 
-export class RpcError extends Error {}
+export class RpcError extends Error {
+  constructor(message, { status = null, retryable = false } = {}) {
+    super(message);
+    this.name = 'RpcError';
+    this.status = status;
+    this.retryable = retryable;
+  }
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const RETRYABLE_HTTP = new Set([429, 502, 503, 504]);
+const RPC_ATTEMPTS = 3;
+const cooldownUntil = new Map();
+
+function rpcOrigin(url) {
+  try { return new URL(url).origin; }
+  catch { return String(url); }
+}
+
+async function waitForCooldown(url) {
+  const remaining = (cooldownUntil.get(rpcOrigin(url)) || 0) - Date.now();
+  if (remaining > 0) await wait(remaining);
+}
+
+function retryDelay(res, attempt) {
+  const header = res?.headers?.get?.('retry-after');
+  if (header !== null && header !== undefined && header !== '') {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) return Math.max(0, at - Date.now());
+  }
+  return 750 * (2 ** attempt);
+}
+
+function extendCooldown(url, ms) {
+  const origin = rpcOrigin(url);
+  cooldownUntil.set(origin, Math.max(cooldownUntil.get(origin) || 0, Date.now() + ms));
+}
+
+const rateLimitMessage = (message) =>
+  /rate.?limit|too many requests|public endpoint limit|capacity/i.test(String(message || ''));
 
 export async function rpcCall(url, method, params) {
   if (!RPC_METHODS.includes(method)) {
     throw new RpcError(`${method}: not an issued JSON-RPC method`);
   }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
-  });
-  if (!res.ok) {
-    // The diagnosis is almost always in the body, not the status line: tier
-    // limits, block-range caps and entitlement errors all arrive as a normal
-    // JSON-RPC error alongside a 4xx. Throwing the bare status discards it.
-    let detail = '';
+  const payload = JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params });
+  let last = null;
+  for (let attempt = 0; attempt < RPC_ATTEMPTS; attempt++) {
+    await waitForCooldown(url);
+    let res;
     try {
-      const body = await res.json();
-      if (body && body.error && body.error.message) detail = ` — ${body.error.message}`;
-    } catch { /* non-JSON body; the status is all we have */ }
-    throw new RpcError(`${method}: HTTP ${res.status}${detail}`);
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+    } catch (err) {
+      last = new RpcError(`${method}: ${err.message || String(err)}`, { retryable: true });
+      if (attempt + 1 >= RPC_ATTEMPTS) throw last;
+      extendCooldown(url, 750 * (2 ** attempt));
+      continue;
+    }
+
+    let json = null;
+    try { json = await res.json(); }
+    catch { /* a non-JSON error still carries the HTTP status */ }
+
+    if (!res.ok) {
+      // The diagnosis is almost always in the body, not the status line: tier
+      // limits, block-range caps and entitlement errors all arrive alongside a
+      // 4xx. Preserve it while retrying only transient capacity responses.
+      const detail = json?.error?.message ? ` — ${json.error.message}` : '';
+      const retryable = RETRYABLE_HTTP.has(res.status);
+      last = new RpcError(`${method}: HTTP ${res.status}${detail}`, {
+        status: res.status, retryable,
+      });
+      if (!retryable || attempt + 1 >= RPC_ATTEMPTS) throw last;
+      extendCooldown(url, retryDelay(res, attempt));
+      continue;
+    }
+
+    if (!json) throw new RpcError(`${method}: malformed JSON response`);
+    if (json.error) {
+      const message = json.error.message || 'unknown JSON-RPC error';
+      const retryable = rateLimitMessage(message);
+      last = new RpcError(`${method}: ${message}`, { retryable });
+      if (!retryable || attempt + 1 >= RPC_ATTEMPTS) throw last;
+      extendCooldown(url, 750 * (2 ** attempt));
+      continue;
+    }
+    return json.result;
   }
-  const json = await res.json();
-  if (json.error) throw new RpcError(`${method}: ${json.error.message}`);
-  return json.result;
+  throw last || new RpcError(`${method}: unavailable`);
 }
 
 /**
@@ -74,9 +145,10 @@ export async function rpcBatch(url, requests) {
 }
 
 /**
- * eth_call. `from` matters for the collect() staticcall; `block` enables
- * archive reads, which is how historical USD prices are derived from a
- * reference pool's past state.
+ * eth_call. `from` matters for the collect() staticcall. An explicit `block`
+ * remains supported for callers that need exact state, but historical USD
+ * prices deliberately use Swap events: some RPCs silently answer an old-block
+ * eth_call with latest state.
  */
 export function ethCall(url, to, data, from, block = 'latest') {
   const tx = { to, data: data.startsWith('0x') ? data : '0x' + data };

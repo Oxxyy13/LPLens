@@ -25,7 +25,8 @@ if (GATING_ENABLED) {
   document.getElementById('licenseHeading').textContent = 'Access key';
   document.getElementById('licenseCopy').innerHTML =
     `This LPLens build is invite-only. Paste the access key you were sent.
-     It is an opaque string &mdash; never a wallet, a signature, or a private key.`;
+     It is an opaque string &mdash; never a wallet, a signature, or a private key.
+     A valid key is enough to load history; you do not need a Blockscout or Etherscan key.`;
 } else {
   licenseSection.hidden = true;
 }
@@ -80,7 +81,9 @@ document.getElementById('save').addEventListener('click', () => {
  * ------------------------------------------------------------------------- */
 
 const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
+const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
 const permBox = document.getElementById('overlayPerm');
+const projectxPermBox = document.getElementById('projectxOverlayPerm');
 const report = document.getElementById('permReport');
 
 /** Oxford-comma join of RPC method names as <code> tags. Driven by RPC_METHODS. */
@@ -93,13 +96,21 @@ function rpcMethodList(methods) {
 
 async function paintPermissions() {
   const mf = chrome.runtime.getManifest();
-  const granted = await chrome.permissions.contains({ origins: [OVERLAY_ORIGIN] });
+  const [granted, projectxGranted] = await Promise.all([
+    chrome.permissions.contains({ origins: [OVERLAY_ORIGIN] }),
+    chrome.permissions.contains({ origins: [PROJECTX_OVERLAY_ORIGIN] }),
+  ]);
   permBox.checked = granted;
+  projectxPermBox.checked = projectxGranted;
 
-  const pageAccess = granted
-    ? `<li class="yes"><b>app.uniswap.org/positions/*</b> — can read and add to
-         this page only. Nothing else on the web.</li>`
-    : `<li class="no"><b>No web page at all.</b> The overlay is off, so no
+  const pageRows = [];
+  if (granted) pageRows.push(`<li class="yes"><b>app.uniswap.org position pages</b> — can read and add
+    to the positions list and individual position pages only.</li>`);
+  if (projectxGranted) pageRows.push(`<li class="yes"><b>www.prjx.com/portfolio</b> — can add the
+    ProjectX panel. It uses the last address loaded in LPLens and does not read
+    the connected wallet or ProjectX page content.</li>`);
+  const pageAccess = pageRows.length ? pageRows.join('')
+    : `<li class="no"><b>No web page at all.</b> Both overlays are off, so no
          content script is registered anywhere.</li>`;
 
   const hosts = (mf.host_permissions || []).map((h) =>
@@ -123,7 +134,7 @@ async function paintPermissions() {
       <li>No <code>tabs</code>, <code>activeTab</code>, <code>cookies</code>,
           <code>webRequest</code> or <code>&lt;all_urls&gt;</code> — so it cannot
           see your browsing, and cannot reach any exchange or wallet site.</li>
-      <li>The overlay only appends its own panel. It never rewrites Uniswap's
+      <li>An overlay only appends its own panel. It never rewrites the site's
           markup, so it cannot alter an address or amount shown to you.</li>
     </ul>`;
 }
@@ -134,6 +145,16 @@ permBox.addEventListener('change', async () => {
     if (!ok) permBox.checked = false;
   } else {
     await chrome.permissions.remove({ origins: [OVERLAY_ORIGIN] });
+  }
+  paintPermissions();
+});
+
+projectxPermBox.addEventListener('change', async () => {
+  if (projectxPermBox.checked) {
+    const ok = await chrome.permissions.request({ origins: [PROJECTX_OVERLAY_ORIGIN] });
+    if (!ok) projectxPermBox.checked = false;
+  } else {
+    await chrome.permissions.remove({ origins: [PROJECTX_OVERLAY_ORIGIN] });
   }
   paintPermissions();
 });

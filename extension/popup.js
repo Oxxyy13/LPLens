@@ -1,6 +1,9 @@
 import { loadSweep, valueUsd } from './lib/positions.js';
 import { CHAINS } from './lib/chains.js';
-import { entitlement, TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint } from './lib/license.js';
+import {
+  entitlement, historyRelayCredentials,
+  TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint,
+} from './lib/license.js';
 import {
   loadBook, upsertWallet, removeWallet, MAX_SAVED_ADDRESSES, normalizeAddress,
   shortAddr, walletName,
@@ -46,7 +49,7 @@ function paintScanHint() {
   const closed = $('includeClosed').checked;
   hint.hidden = false;
   const bits = [
-    'Always scans Ethereum, Base, Arbitrum, Polygon and Robinhood.',
+    'Always scans Ethereum, Base, Arbitrum, Polygon, HyperEVM and Robinhood.',
     'Empty is “nothing”; a failure is named.',
   ];
   if (closed) bits.push('Include closed walks up to 60 per chain — this can take a while.');
@@ -237,10 +240,12 @@ async function startScan(owners, includeClosed) {
       statusEl.textContent = `Trial — ${ent.daysLeft} day${ent.daysLeft === 1 ? '' : 's'} left of ${TRIAL_LENGTH_DAYS} · reading chain…`;
     }
     const settings = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
+    const historyRelay = await historyRelayCredentials();
     await runSweep(owners, Object.keys(CHAINS), {
       includeClosed,
       rpcOverrides: settings.rpcOverrides || {},
       etherscanKey: settings.etherscanKey || null,
+      historyRelay,
       withUsd: true,
     });
   } catch (err) {
@@ -470,7 +475,7 @@ function card(p, prices) {
         <div class="kv"><span>current price</span><span class="num">${fmt(p.price, 8)}</span></div>
         <div class="kv"><span>range</span><span class="num">${fmt(lo, 8)} – ${fmt(hi, 8)}</span></div>
         <div class="kv"><span>holds</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>
-        <div class="meta">#${p.tokenId}${p.version ? ' · ' + esc(p.version) : ''}</div>
+        <div class="meta">#${p.tokenId}${p.protocol || p.version ? ' · ' : ''}${p.protocol ? esc(p.protocol) + ' ' : ''}${p.version ? esc(p.version) : ''}</div>
         ${details(p, h, s0, s1)}
       </div>
     </div>`;
