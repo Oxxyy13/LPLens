@@ -8,11 +8,12 @@
  * the content script only ever receives finished data.
  *
  * This worker holds no wallet capability. It issues the methods in
- * RPC_METHODS (eth_call, eth_getLogs, eth_getBlockByNumber), all reads,
+ * RPC_METHODS (eth_call, eth_getLogs, eth_getBlockByNumber,
+ * eth_getTransactionReceipt), all reads,
  * exactly as the popup does.
  */
-import { loadPositionByVersion } from './lib/positions.js';
-import { entitlement, blockscoutRelayCredentials } from './lib/license.js';
+import { loadPositionByVersion, loadPositions } from './lib/positions.js';
+import { entitlement, historyRelayCredentials } from './lib/license.js';
 
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
 
@@ -57,7 +58,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         try {
           const store = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
           const overrides = store.rpcOverrides || {};
-          const blockscoutRelay = await blockscoutRelayCredentials();
+          const historyRelay = await historyRelayCredentials();
           const data = await loadPositionByVersion(msg.chain, msg.version || 'v3', BigInt(msg.tokenId), {
             rpcOverride: overrides[msg.chain] || undefined,
             // Bridged USD pricing can need a second chain. Robinhood WETH, for
@@ -67,7 +68,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             // Ethereum archive endpoint and fell back to a vs-holding percent.
             rpcOverrides: overrides,
             etherscanKey: store.etherscanKey || undefined,
-            blockscoutRelay,
+            historyRelay,
           });
           // BigInt does not survive structured clone to the content script.
           const safe = JSON.parse(JSON.stringify(data, (_k, v) =>
@@ -91,6 +92,54 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true; // keep the message channel open for the async reply
 });
 
+// ProjectX does not expose position NFT ids in stable portfolio links. Its
+// overlay therefore scans only the last address the user explicitly loaded in
+// LPLens; it never reads ProjectX's connected wallet or accepts an address from
+// page content.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || msg.type !== 'LPLENS_PROJECTX_PORTFOLIO') return false;
+
+  (async () => {
+    const ent = await entitlement();
+    if (!ent.allowed) return { ok: false, gated: true, entitlement: ent };
+
+    const store = await chrome.storage.local.get([
+      'address', 'rpcOverrides', 'etherscanKey',
+    ]);
+    const address = String(store.address || '').trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) {
+      return { ok: false, error: 'Open LPLens and load an address first.' };
+    }
+
+    await slot();
+    try {
+      const overrides = store.rpcOverrides || {};
+      const historyRelay = await historyRelayCredentials();
+      const result = await loadPositions('hyperevm', address, {
+        includeClosed: false,
+        withUsd: true,
+        rpcOverride: overrides.hyperevm || undefined,
+        rpcOverrides: overrides,
+        etherscanKey: store.etherscanKey || undefined,
+        historyRelay,
+      });
+      const safe = JSON.parse(JSON.stringify({
+        address,
+        positions: result.positions || [],
+        unavailable: result.v4 && result.v4.unavailable || null,
+      }, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+      return { ok: true, data: safe };
+    } finally {
+      release();
+    }
+  })().then(
+    (result) => sendResponse(result),
+    (err) => sendResponse({ ok: false, error: err.message || String(err) }),
+  );
+
+  return true;
+});
+
 
 /* ---------------------------------------------------------------------------
  * On-page overlay registration.
@@ -109,30 +158,69 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 const OVERLAY_ID = 'lplens-overlay';
 const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
+const PROJECTX_OVERLAY_ID = 'lplens-projectx-overlay';
+const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
+// `/positions/*` does not match the bare `/positions` list route. Keep the
+// exact list URL and its detail descendants explicit so the optional content
+// script never widens beyond Uniswap's position surfaces.
+const OVERLAY_MATCHES = Object.freeze([
+  'https://app.uniswap.org/positions',
+  'https://app.uniswap.org/positions/*',
+]);
+const OVERLAY_JS = Object.freeze(['render.js', 'overlay.js']);
+const PROJECTX_OVERLAY_MATCHES = Object.freeze([
+  'https://www.prjx.com/portfolio',
+  'https://www.prjx.com/portfolio/*',
+]);
 
-async function overlayRegistered() {
+async function overlayRegistration(id) {
   try {
-    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [OVERLAY_ID] });
-    return existing.length > 0;
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
+    return existing[0] || null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+const sameStrings = (actual, expected) =>
+  Array.isArray(actual) && actual.length === expected.length
+  && expected.every((value, index) => actual[index] === value);
+
+function currentOverlayRegistration(script, matches) {
+  return !!script
+    && sameStrings(script.matches, matches)
+    && sameStrings(script.js, OVERLAY_JS)
+    && script.runAt === 'document_idle';
+}
+
+async function syncOneOverlay({ id, origin, matches }) {
+  const granted = await chrome.permissions.contains({ origins: [origin] });
+  const registered = await overlayRegistration(id);
+  const definition = {
+    id,
+    matches: [...matches],
+    js: [...OVERLAY_JS],
+    runAt: 'document_idle',
+  };
+
+  if (granted && !registered) {
+    await chrome.scripting.registerContentScripts([definition]);
+  } else if (granted && !currentOverlayRegistration(registered, matches)) {
+    // Dynamic registrations persist across extension updates. Reconcile the
+    // old 0.27 definition or the new list-page match would never take effect.
+    await chrome.scripting.updateContentScripts([definition]);
+  } else if (!granted && registered) {
+    await chrome.scripting.unregisterContentScripts({ ids: [id] });
   }
 }
 
 async function syncOverlayRegistration() {
-  const granted = await chrome.permissions.contains({ origins: [OVERLAY_ORIGIN] });
-  const registered = await overlayRegistered();
-
-  if (granted && !registered) {
-    await chrome.scripting.registerContentScripts([{
-      id: OVERLAY_ID,
-      matches: ['https://app.uniswap.org/positions/*'],
-      js: ['render.js', 'overlay.js'],
-      runAt: 'document_idle',
-    }]);
-  } else if (!granted && registered) {
-    await chrome.scripting.unregisterContentScripts({ ids: [OVERLAY_ID] });
-  }
+  await syncOneOverlay({ id: OVERLAY_ID, origin: OVERLAY_ORIGIN, matches: OVERLAY_MATCHES });
+  await syncOneOverlay({
+    id: PROJECTX_OVERLAY_ID,
+    origin: PROJECTX_OVERLAY_ORIGIN,
+    matches: PROJECTX_OVERLAY_MATCHES,
+  });
 }
 
 chrome.runtime.onInstalled.addListener(syncOverlayRegistration);

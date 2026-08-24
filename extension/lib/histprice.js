@@ -5,9 +5,15 @@
  * because it needs a dollar mark at the moment each deposit happened, and no
  * keyless source provides one — pricing an old basket at today's rate is the
  * `token_delta × price_now` error. That was true of price *APIs*. It is not
- * true of the chain: a USDC/WETH pool's `slot0` read at a historical block is
- * the dollar price of ETH at that block, exactly, and archive `eth_call` serves
- * it. Verified on Alchemy's free tier down to block 12,500,000 (May 2021).
+ * true of the chain: a USDC/WETH pool's price at a historical block is the
+ * dollar price of ETH at that block, exactly.
+ *
+ * HOW that price is read changed on 2026-08-23. It used to be `slot0` at a
+ * historical block, which needs an archive node. It is now the pool's own
+ * `Swap` event at or before that block, which needs only a log index — see
+ * `poolSqrtAtBlock` for why the two are equivalent and why the `eth_call`
+ * form had to go. Historical `eth_call` is no longer used for pricing on any
+ * chain, and an archive RPC is no longer required for any of this.
  *
  * No CoinGecko, no additional DexScreener call, no new key. The reference pool
  * itself is derived from the v3 factory rather than hardcoded, and all four
@@ -35,12 +41,55 @@
  */
 import { ethCall, rpcCall } from './rpc.js';
 import {
-  words, toUint, toAddress, encAddress, encUint, SELECTOR, decodeSlot0,
+  words, toUint, toAddress, encAddress, encUint, SELECTOR,
 } from './abi.js';
 import { CHAINS } from './chains.js';
+import { fetchLastLogBefore } from './logs.js';
 import { humanPrice } from './v3.js';
 
 const SEL_TOKEN0 = '0x0dfe1681';   // token0(), derived with keccak256
+
+// Swap(address,address,int256,int256,uint160,uint128,int24), derived with
+// keccak256 via lib/keccak.js on 2026-08-23 — never recalled.
+const SWAP_TOPIC = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67';
+
+/**
+ * A v3 pool's price at a historical block, read as an EVENT rather than as
+ * state.
+ *
+ * Only a swap moves `sqrtPriceX96` — mints and burns do not — so the last
+ * `Swap` at or before a block carries exactly the `slot0` price at that
+ * block. That equivalence is what makes this a derivation and not an
+ * approximation, and it holds on a pruned node, because logs outlive state.
+ *
+ * This is now the ONLY historical price path. A historical `eth_call` was
+ * retired for this purpose on 2026-08-23: `rpc.hyperliquid.xyz/evm` answers
+ * one with LATEST state instead of refusing, so `slot0` at a mint block
+ * returned today's price and the resulting USD basis was wrong by the whole
+ * size of the move while still labelled exact. A silent wrong answer is worse
+ * than none, and no cheap check distinguishes a lying node from an honest one
+ * using only the methods `lib/rpc.js` permits. Reading the event instead
+ * removes the question rather than guarding it.
+ *
+ * Returns null when no swap is found in range. Callers must fail closed.
+ */
+async function poolSqrtAtBlock(chainKey, pool, block, opts = {}) {
+  const chain = CHAINS[chainKey];
+  if (!chain || !pool || block === null || block === undefined || block === 'latest') return null;
+  const log = await fetchLastLogBefore({
+    contract: pool,
+    topics: [SWAP_TOPIC],
+    block,
+    rpc: opts.rpcOverride || chain.rpc,
+    etherscanKey: opts.etherscanKey,
+    etherscanChainId: chain.etherscanChainId,
+    blockscout: chain.blockscout,
+  });
+  const w = log ? words(log.data) : [];
+  if (w.length < 5) return null;              // sqrtPriceX96 is word 2 of five
+  const sqrt = toUint(w[2]);
+  return sqrt > 0n ? sqrt : null;
+}
 
 const poolCache = new Map();    // `${chain}` -> {pool, stableIsToken0, stableDecimals}
 const priceCache = new Map();   // `${chain}:${block}` -> number | null
@@ -49,9 +98,12 @@ const timeBlockCache = new Map(); // `${chain}:${timestamp}` -> reference-chain 
 const blockHeaderCache = new Map(); // `${chain}:${block}` -> {number,timestamp}
 const LATEST_PRICE_TTL_MS = 60_000;
 const ETHERSCAN_LOOKUP_GAP_MS = 350;
+const BLOCKSCOUT_LOOKUP_GAP_MS = 250;
 let etherscanLookupQueue = Promise.resolve();
+let blockscoutLookupQueue = Promise.resolve();
 let onChainLookupQueue = Promise.resolve();
 let lastEtherscanLookupAt = 0;
+let lastBlockscoutLookupAt = 0;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -89,6 +141,53 @@ async function referenceBlockAtTime(target, timestamp, key) {
 
   const task = etherscanLookupQueue.then(lookup, lookup);
   etherscanLookupQueue = task.catch(() => null);
+  return task;
+}
+
+/**
+ * Keyless timestamp -> block lookup through the chain's public Blockscout.
+ *
+ * This is one indexed request. The former keyless-first path immediately ran
+ * a ~25-read binary search against Ethereum dRPC for every historical cash-flow
+ * time. A four-card Robinhood overlay exhausted dRPC's public-endpoint window,
+ * withholding every dollar return and sometimes 429ing the final card. Keep
+ * the exact on-chain search below as a fallback, not as the common path.
+ */
+export async function referenceBlockAtTimeBlockscout(target, timestamp) {
+  if (!target?.blockscout || !Number.isFinite(Number(timestamp))) return null;
+  const cacheKey = `${target.etherscanChainId || target.blockscout}:${timestamp}`;
+  if (timeBlockCache.has(cacheKey)) return timeBlockCache.get(cacheKey);
+
+  const lookup = async () => {
+    if (timeBlockCache.has(cacheKey)) return timeBlockCache.get(cacheKey);
+    const gap = Date.now() - lastBlockscoutLookupAt;
+    if (gap < BLOCKSCOUT_LOOKUP_GAP_MS) {
+      await wait(BLOCKSCOUT_LOOKUP_GAP_MS - gap);
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      lastBlockscoutLookupAt = Date.now();
+      try {
+        const url = new URL(target.blockscout);
+        url.searchParams.set('module', 'block');
+        url.searchParams.set('action', 'getblocknobytime');
+        url.searchParams.set('timestamp', String(timestamp));
+        url.searchParams.set('closest', 'before');
+        const res = await fetch(url);
+        const body = await res.json();
+        const raw = body?.result?.blockNumber ?? body?.result;
+        const block = Number(raw);
+        if (res.ok && body?.status === '1' && Number.isInteger(block) && block > 0) {
+          timeBlockCache.set(cacheKey, block);
+          return block;
+        }
+      } catch { /* retry below */ }
+      if (attempt < 2) await wait(500 * (attempt + 1));
+    }
+    return null;
+  };
+
+  const task = blockscoutLookupQueue.then(lookup, lookup);
+  blockscoutLookupQueue = task.catch(() => null);
   return task;
 }
 
@@ -239,19 +338,29 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
   const ref = await referencePool(chainKey, rpc);
   if (!ref) return remember(null);
 
-  let price = null;
+  // Latest is state every node serves; anything historical is read as a Swap
+  // event, because a historical eth_call cannot be trusted (see
+  // poolSqrtAtBlock).
+  let sqrtX96 = null;
   try {
-    const hex = await ethCall(rpc, ref.pool, SELECTOR.slot0, undefined,
-      block === 'latest' ? 'latest' : '0x' + BigInt(block).toString(16));
-    const sqrtP = Number(toUint(words(hex)[0])) / 2 ** 96;
-    const raw = sqrtP * sqrtP;                       // raw token1 per token0
-    const scale = 10 ** (18 - ref.stableDecimals);   // WETH is 18dp
-    // Orientation depends on which side the stablecoin sorted to.
-    price = ref.stableIsToken0 ? scale / raw : raw * scale;
-    if (!Number.isFinite(price) || price <= 0) price = null;
+    if (block === 'latest') {
+      const hex = await ethCall(rpc, ref.pool, SELECTOR.slot0, undefined, 'latest');
+      sqrtX96 = toUint(words(hex)[0]);
+    } else {
+      sqrtX96 = await poolSqrtAtBlock(chainKey, ref.pool, block, opts);
+    }
   } catch {
-    price = null;   // no archive access, or the pool did not exist yet
+    sqrtX96 = null;
   }
+  if (!sqrtX96) return remember(null);
+
+  let price = null;
+  const sqrtP = Number(sqrtX96) / 2 ** 96;
+  const raw = sqrtP * sqrtP;                       // raw token1 per token0
+  const scale = 10 ** (18 - ref.stableDecimals);   // WETH is 18dp
+  // Orientation depends on which side the stablecoin sorted to.
+  price = ref.stableIsToken0 ? scale / raw : raw * scale;
+  if (!Number.isFinite(price) || price <= 0) price = null;
   return remember(price);
 }
 
@@ -259,9 +368,10 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
  * Price a bridged asset using the chain it was bridged from.
  *
  * Local block -> its timestamp (an RPC call, a chain fact) -> the reference
- * chain's block at that time (Etherscan's block lookup, also a chain fact, not
- * a price) -> the reference pool read there. No price API is involved at any
- * step; the dollar figure still comes out of a Uniswap pool.
+ * chain's block at that time (Etherscan when configured, otherwise public
+ * Blockscout, with an on-chain binary search last) -> the reference pool read
+ * there. These mapping services supply a block number, not a price; the dollar
+ * figure still comes out of a Uniswap pool.
  */
 async function bridgedUsd(chainKey, block, opts = {}) {
   const chain = CHAINS[chainKey];
@@ -289,6 +399,9 @@ async function bridgedUsd(chainKey, block, opts = {}) {
   let targetBlock = key && target.etherscanChainId
     ? await referenceBlockAtTime(target, timestamp, key) : null;
   if (!targetBlock) {
+    targetBlock = await referenceBlockAtTimeBlockscout(target, timestamp);
+  }
+  if (!targetBlock) {
     targetBlock = await referenceBlockOnChain(via, target, timestamp, viaOpts);
   }
   if (!targetBlock) return null;
@@ -314,9 +427,18 @@ export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts
   const ref = chain && chain.usdRef;
   if (!ref || !(poolPrice > 0)) return null;
 
-  const t0 = String(token0).toLowerCase();
-  const t1 = String(token1).toLowerCase();
   const weth = (ref.weth || '').toLowerCase();
+  const normaliseToken = (token) => {
+    const address = String(token).toLowerCase();
+    // v4 represents the native coin as address(0). On chains whose USD
+    // reference explicitly marks wrapped-native equivalence, ETH and WETH
+    // (or HYPE and WHYPE) have the same unit price. Polygon deliberately does
+    // not set this flag: its native POL is not the configured WETH reference.
+    if (ref.nativeEquivalent && /^0x0{40}$/.test(address)) return weth;
+    return address;
+  };
+  const t0 = normaliseToken(token0);
+  const t1 = normaliseToken(token1);
   // Bridged chains have no local stablecoin at all; absent, not empty.
   const stable = (ref.stable || '').toLowerCase();
 
@@ -332,25 +454,26 @@ export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts
   return null;
 }
 
-/** Exact position-pool price at a historical block, when the RPC is archival. */
+/** Exact position-pool price at a historical block, read as a `Swap` event. */
 async function positionPoolPrice(chainKey, p, block, opts = {}) {
   if (!p.pool || block === null || block === undefined) return null;
   const key = `${chainKey}:${String(p.pool).toLowerCase()}:${block}`;
   if (positionPriceCache.has(key)) return positionPriceCache.get(key);
   const chain = CHAINS[chainKey];
-  const rpc = opts.rpcOverride || (chain && chain.rpc);
-  if (!rpc) return null;
+  if (!chain) return null;
   try {
-    const hex = await ethCall(rpc, p.pool, SELECTOR.slot0, undefined,
-      '0x' + BigInt(block).toString(16));
-    const slot = decodeSlot0(hex);
+    // Was a historical eth_call, which carried the same silent-latest-state
+    // defect as the reference read and would have stamped a single-sided add
+    // or fee-only collect exact on a present-day price.
+    const sqrtX96 = await poolSqrtAtBlock(chainKey, p.pool, block, opts);
+    if (!sqrtX96) return null;
     const price = humanPrice(
-      slot.sqrtPriceX96, p.token0Meta.decimals, p.token1Meta.decimals);
+      sqrtX96, p.token0Meta.decimals, p.token1Meta.decimals);
     if (!(price > 0) || !Number.isFinite(price)) return null;
     positionPriceCache.set(key, price);
     return price;
   } catch {
-    // Do not cache failure: a later configured archive endpoint may succeed.
+    // Do not cache failure: a transient index refusal is not a chain fact.
     return null;
   }
 }
@@ -364,9 +487,12 @@ async function directPairAt(chainKey, p, flow, opts = {}) {
   const chain = CHAINS[chainKey];
   const ref = chain && chain.usdRef;
   if (!ref) return null;
-  const tokens = [String(p.token0).toLowerCase(), String(p.token1).toLowerCase()];
-  const amounts = [flow.amount0, flow.amount1];
   const weth = String(ref.weth || '').toLowerCase();
+  const tokens = [p.token0, p.token1].map((token) => {
+    const address = String(token).toLowerCase();
+    return ref.nativeEquivalent && /^0x0{40}$/.test(address) ? weth : address;
+  });
+  const amounts = [flow.amount0, flow.amount1];
   const stable = String(ref.stable || '').toLowerCase();
   let wethUsd;
   const out = [];
@@ -385,9 +511,9 @@ async function directPairAt(chainKey, p, flow, opts = {}) {
 /**
  * Historical USD pair for one Increase/Collect cash flow.
  *
- * Exact event math is cheapest and needs no archive node. Direct reference
- * tokens come next. A historical slot0 read resolves otherwise-underdetermined
- * single-sided adds and fee-only collects when an archive RPC is configured.
+ * Exact event math is cheapest and needs no network call at all. Direct
+ * reference tokens come next. The pool's own historical `Swap` price then
+ * resolves otherwise-underdetermined single-sided adds and fee-only collects.
  * The event's range bound is the final fallback and stays explicitly inexact.
  */
 async function historicalPairAt(chainKey, p, flow, opts = {}) {
@@ -404,7 +530,7 @@ async function historicalPairAt(chainKey, p, flow, opts = {}) {
   if (poolPrice) {
     const pair = await usdPairAt(
       chainKey, p.token0, p.token1, poolPrice, flow.block, opts);
-    if (pair) return { ...pair, exact: true, source: 'archive-slot0' };
+    if (pair) return { ...pair, exact: true, source: 'pool-swap-event' };
   }
 
   if (flow.entry && flow.entry.price > 0) {
@@ -455,6 +581,11 @@ export async function sumDepositBasis(deposits, priceAt) {
     legs.push({
       block: deposit.block, value, usd0: pair.usd0, usd1: pair.usd1,
       exact: pair.exact !== false, source: pair.source || null,
+      time: deposit.time || null,
+      transactionHash: deposit.transactionHash || null,
+      amount0: deposit.amount0,
+      amount1: deposit.amount1,
+      poolPrice: deposit.entry && deposit.entry.price > 0 ? deposit.entry.price : null,
     });
   }
   if (!(basis > 0)) return null;

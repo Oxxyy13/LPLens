@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "LPLens \u2014 Uniswap v3 & v4 Position Reader",
-  "version": "0.27.0",
-  "description": "Read-only Uniswap v3 and v4 LP position inspector. Paste any address; nothing is signed and no wallet is connected.",
+  "name": "LPLens \u2014 Concentrated LP Position Reader",
+  "version": "0.28.0",
+  "description": "Read-only Uniswap and ProjectX LP position inspector. Paste any address; nothing is signed and no wallet is connected.",
   "permissions": [
     "storage",
     "scripting"
@@ -12,6 +12,7 @@
     "https://base.drpc.org/*",
     "https://1rpc.io/*",
     "https://polygon.drpc.org/*",
+    "https://rpc.hyperliquid.xyz/*",
     "https://rpc.mainnet.chain.robinhood.com/*",
     "https://*.g.alchemy.com/*",
     "https://ethereum-rpc.publicnode.com/*",
@@ -22,6 +23,7 @@
     "https://base.blockscout.com/*",
     "https://arbitrum.blockscout.com/*",
     "https://polygon.blockscout.com/*",
+    "https://robinhoodchain.blockscout.com/*",
     "https://lplens-beta.licence-worker.workers.dev/*"
   ],
   "icons": {
@@ -44,6 +46,7 @@
     "type": "module"
   },
   "optional_host_permissions": [
-    "https://app.uniswap.org/*"
+    "https://app.uniswap.org/*",
+    "https://www.prjx.com/*"
   ]
 }

@@ -6,6 +6,9 @@ import {
 } from '../extension/lib/histprice.js';
 import { classifyPosition, summarizeAggregate } from '../extension/lib/aggregate.js';
 import { CHAINS } from '../extension/lib/chains.js';
+import {
+  tokenPriceChangesSinceFirstAdd, tokenPriceChangesSinceLatestAdd,
+} from '../extension/lib/positions.js';
 
 function testClaimDoesNotMoveReturn() {
   const gross = { basis: 100, exact: true };
@@ -68,8 +71,10 @@ async function testExactPairCanResolveSingleSidedAdd() {
 
 async function testEveryAddUsesItsOwnEventPrice() {
   const deposits = [
-    { block: 10, amount0: 2, amount1: 1, entry: { price: 1, exact: true } },
-    { block: 20, amount0: 3, amount1: 4, entry: { price: 2, exact: true } },
+    { block: 10, time: 1000, transactionHash: '0x01',
+      amount0: 2, amount1: 1, entry: { price: 1, exact: true } },
+    { block: 20, time: 2000, transactionHash: '0x02',
+      amount0: 3, amount1: 4, entry: { price: 2, exact: true } },
   ];
   const basis = await sumDepositBasis(deposits, async (deposit) => (
     deposit.block === 10
@@ -79,6 +84,9 @@ async function testEveryAddUsesItsOwnEventPrice() {
   assert.equal(basis.basis, 42,
     'gross added must sum all additions at their own prices, not reuse the latest buy');
   assert.deepEqual(basis.legs.map((leg) => leg.value), [11, 31]);
+  assert.deepEqual(basis.legs.map((leg) => [leg.time, leg.amount0, leg.poolPrice]), [
+    [1000, 2, 1], [2000, 3, 2],
+  ], 'capital-event metadata must survive historical pricing for the UI timeline');
 }
 
 async function testKeylessTimestampBlockSearch() {
@@ -150,6 +158,35 @@ function testAggregateLabelsAndExclusions() {
   assert.match(got.valueLine, /^in positions \$90\.00/);
 }
 
+function testTokenPriceChangesAreExactAndClearlyAnchored() {
+  const oneAdd = tokenPriceChangesSinceFirstAdd({ legs: [{
+    block: 20, exact: true, usd0: 2000, usd1: 0.02,
+  }] }, 2100, 0.018, 1);
+  assert.equal(oneAdd.label, 'opened');
+  assert.ok(Math.abs(oneAdd.token0.pct - 5) < 1e-12);
+  assert.ok(Math.abs(oneAdd.token1.pct + 10) < 1e-12);
+
+  const multi = tokenPriceChangesSinceFirstAdd({ legs: [
+    { block: 30, exact: true, usd0: 2200, usd1: 0.018 },
+    { block: 10, exact: true, usd0: 2000, usd1: 0.02 },
+  ] }, 2100, 0.018, 2);
+  assert.equal(multi.label, 'first add');
+  assert.equal(multi.token0.from, 2000, 'the earliest exact addition anchors the move');
+  const latest = tokenPriceChangesSinceLatestAdd({ legs: [
+    { block: 30, exact: true, usd0: 2200, usd1: 0.018 },
+    { block: 10, exact: true, usd0: 2000, usd1: 0.02 },
+  ] }, 2420, 0.0198, 2);
+  assert.equal(latest.label, 'latest add');
+  assert.ok(Math.abs(latest.token0.pct - 10) < 1e-12);
+  assert.ok(Math.abs(latest.token1.pct - 10) < 1e-12);
+  assert.equal(tokenPriceChangesSinceLatestAdd({ legs: [{
+    block: 10, exact: true, usd0: 2000, usd1: 0.02,
+  }] }, 2100, 0.018, 1), null, 'one-add positions must not duplicate the opened move');
+  assert.equal(tokenPriceChangesSinceFirstAdd({
+    legs: [{ block: 10, exact: false, usd0: 2000, usd1: 0.02 }],
+  }, 2100, 0.018), null, 'a bounded historical price must stay unavailable');
+}
+
 testClaimDoesNotMoveReturn();
 testPartialRemoveDoesNotMoveReturn();
 testReinvestedCapitalIsNotStillHeld();
@@ -161,4 +198,5 @@ await testCollectionAtEventPrice();
 await testNoCollectedTokensInCurrentValue();
 await testOverlayKeepsDollarReturnAsHeadline();
 testAggregateLabelsAndExclusions();
-console.log('cash-flow pnl: 11 regression groups passed');
+testTokenPriceChangesAreExactAndClearlyAnchored();
+console.log('cash-flow pnl: 12 regression groups passed');

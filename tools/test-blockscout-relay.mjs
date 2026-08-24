@@ -69,17 +69,30 @@ const envFile = LIVE ? Object.fromEntries(
       return [line.slice(0, at), line.slice(at + 1).replace(/^['"]|['"]$/g, '')];
     }),
 ) : {};
-const TEST_SECRET = LIVE ? envFile.BLOCKSCOUT_PRO_API_KEY : 'test-blockscout-secret';
-if (!TEST_SECRET) throw new Error('BLOCKSCOUT_PRO_API_KEY missing for --live test');
+const TEST_BLOCKSCOUT_SECRET = LIVE
+  ? envFile.BLOCKSCOUT_PRO_API_KEY : 'test-blockscout-secret';
+const TEST_ETHERSCAN_SECRET = LIVE
+  ? envFile.ETHERSCAN_KEY : 'test-etherscan-secret';
+if (!TEST_BLOCKSCOUT_SECRET) {
+  throw new Error('BLOCKSCOUT_PRO_API_KEY missing for --live test');
+}
+if (!TEST_ETHERSCAN_SECRET) throw new Error('ETHERSCAN_KEY missing for --live test');
 const keyHash = await sha256Hex(TEST_KEY);
 KEYS[keyHash] = { label: 'test-fixture', expires: '2099-12-31' };
 
 const db = new FakeD1();
-const env = { DB: db, BLOCKSCOUT_PRO_API_KEY: TEST_SECRET };
+const env = {
+  DB: db,
+  BLOCKSCOUT_PRO_API_KEY: TEST_BLOCKSCOUT_SECRET,
+  ETHERSCAN_API_KEY: TEST_ETHERSCAN_SECRET,
+};
 const originalFetch = globalThis.fetch;
-let upstreamCalls = 0;
-let upstreamSawSecret = false;
+let blockscoutCalls = 0;
+let etherscanCalls = 0;
+let blockscoutSawSecret = false;
+let etherscanSawSecret = false;
 let pagedMode = false;
+const upstreamCallCount = () => blockscoutCalls + etherscanCalls;
 
 const LOG = {
   address: '0xC36442b4a4522E871399CD717aBDD847Ab11FE88',
@@ -94,6 +107,19 @@ const LOG = {
   transactionHash: '0x' + '2'.repeat(64),
 };
 
+const PROJECTX_LOG = {
+  ...LOG,
+  address: CHAINS.hyperevm.nfpm,
+  blockNumber: '43779436',
+  logIndex: '1',
+  timeStamp: '1787317843',
+  topics: [
+    LOG.topics[0],
+    '0x' + (533076n).toString(16).padStart(64, '0'),
+  ],
+  transactionHash: '0x' + '3'.repeat(64),
+};
+
 globalThis.fetch = async (input, init = {}) => {
   const url = input instanceof URL
     ? input
@@ -102,8 +128,8 @@ globalThis.fetch = async (input, init = {}) => {
     return worker.fetch(new Request(url, init), env);
   }
   if (url.hostname === 'api.blockscout.com') {
-    upstreamCalls++;
-    upstreamSawSecret = url.searchParams.get('apikey') === TEST_SECRET;
+    blockscoutCalls++;
+    blockscoutSawSecret = url.searchParams.get('apikey') === TEST_BLOCKSCOUT_SECRET;
     assert.equal(url.searchParams.get('chain_id'), '1');
     assert.equal(url.searchParams.get('module'), 'logs');
     assert.equal(url.searchParams.get('action'), 'getLogs');
@@ -123,6 +149,19 @@ globalThis.fetch = async (input, init = {}) => {
           ];
     }
     return new Response(JSON.stringify({ status: '1', message: 'OK', result }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  if (url.hostname === 'api.etherscan.io') {
+    etherscanCalls++;
+    etherscanSawSecret = url.searchParams.get('apikey') === TEST_ETHERSCAN_SECRET;
+    assert.equal(url.searchParams.get('chainid'), '999');
+    assert.equal(url.searchParams.get('module'), 'logs');
+    assert.equal(url.searchParams.get('action'), 'getLogs');
+    assert.equal(url.searchParams.get('address'), CHAINS.hyperevm.nfpm.toLowerCase());
+    if (LIVE) return originalFetch(input, init);
+    return new Response(JSON.stringify({ status: '1', message: 'OK', result: [PROJECTX_LOG] }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -157,20 +196,43 @@ try {
       assert.throws(() => relayQuery({
         chainId: 4663,
         fields: { address: chain.nfpm, topic1: LOG.topics[1] },
-      }), /unsupported Blockscout request/);
+      }), /unsupported history request/);
       continue;
     }
-    for (const address of [chain.nfpm, chain.v4PositionManager]) {
+    for (const address of [chain.nfpm, chain.v4PositionManager].filter(Boolean)) {
       const allowed = relayQuery({
         chainId: chain.etherscanChainId,
         fields: { address, fromBlock: '0', toBlock: 'latest', topic1: LOG.topics[1] },
       });
       assert.equal(allowed.fields.address, address.toLowerCase());
     }
+    if (chain.v4PoolManager) {
+      const managerTopic = '0x'
+        + chain.v4PositionManager.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+      const allowed = relayQuery({
+        chainId: chain.etherscanChainId,
+        fields: {
+          address: chain.v4PoolManager,
+          fromBlock: '0',
+          toBlock: 'latest',
+          topic0: '0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec',
+          topic1: '0x' + '8'.repeat(64),
+          topic2: managerTopic,
+          topic0_1_opr: 'and',
+          topic0_2_opr: 'and',
+          topic1_2_opr: 'and',
+        },
+      });
+      assert.equal(allowed.fields.address, chain.v4PoolManager.toLowerCase());
+      assert.throws(() => relayQuery({
+        chainId: chain.etherscanChainId,
+        fields: { address: chain.v4PoolManager, topic1: LOG.topics[1] },
+      }), /exact LPLens history filter/);
+    }
   }
   assert.equal(
-    new URL('blockscout', VALIDATE_URL).href,
-    'https://lplens-beta.licence-worker.workers.dev/blockscout',
+    new URL('history', VALIDATE_URL).href,
+    'https://lplens-beta.licence-worker.workers.dev/history',
   );
 
   // The validation endpoint tracks only hashes and returns the soft seat count.
@@ -191,7 +253,9 @@ try {
   assert.ok(!JSON.stringify([...db.boundValues]).includes(TEST_KEY));
   assert.ok(!JSON.stringify([...db.boundValues]).includes(TEST_INSTALL));
   assert.equal(
-    [...db.boundValues].some((args) => args.some((value) => String(value).includes(TEST_SECRET))),
+    [...db.boundValues].some((args) => args.some((value) =>
+      String(value).includes(TEST_BLOCKSCOUT_SECRET)
+        || String(value).includes(TEST_ETHERSCAN_SECRET))),
     false,
   );
 
@@ -231,7 +295,7 @@ try {
   const licence = await import(`../extension/lib/license.js?relay-test=${Date.now()}`);
   const entitlement = await licence.entitlement();
   assert.equal(entitlement.allowed, true);
-  const relayCredentials = await licence.blockscoutRelayCredentials();
+  const relayCredentials = await licence.historyRelayCredentials();
   assert.match(relayCredentials.installationId, /^[0-9a-f]{32}$/);
   assert.equal(await licence.installationId(), relayCredentials.installationId);
 
@@ -242,16 +306,32 @@ try {
     rpc: 'https://rpc.invalid.example',
     etherscanKey: null,
     etherscanChainId: 1,
-    blockscoutRelay: relayCredentials,
-    blockscoutChainId: 1,
+    historyRelay: relayCredentials,
+    historyRelayChainId: 1,
     blockscout: null,
   });
   assert.equal(got.source, 'blockscout-pro', JSON.stringify(got));
   assert.equal(got.logs.length, LIVE ? 4 : 1);
   if (!LIVE) assert.equal(got.logs[0].block, 16);
-  assert.equal(upstreamCalls, 1);
-  assert.equal(upstreamSawSecret, true);
+  assert.equal(blockscoutCalls, 1);
+  assert.equal(blockscoutSawSecret, true);
   assert.equal(db.usage.values().next().value.requests, 1);
+
+  const projectx = await fetchPositionLogs({
+    nfpm: CHAINS.hyperevm.nfpm,
+    tokenId: 533076n,
+    rpc: 'https://rpc.invalid.example',
+    etherscanKey: null,
+    etherscanChainId: 999,
+    historyRelay: relayCredentials,
+    historyRelayChainId: 999,
+    blockscout: null,
+  });
+  assert.equal(projectx.source, 'etherscan-hosted', JSON.stringify(projectx));
+  assert.equal(projectx.logs.length, 1);
+  assert.equal(etherscanCalls, 1);
+  assert.equal(etherscanSawSecret, true);
+  assert.equal(db.usage.values().next().value.requests, 2);
 
   if (!LIVE) {
     pagedMode = true;
@@ -261,15 +341,16 @@ try {
       rpc: 'https://rpc.invalid.example',
       etherscanKey: null,
       etherscanChainId: 1,
-      blockscoutRelay: relayCredentials,
-      blockscoutChainId: 1,
+      historyRelay: relayCredentials,
+      historyRelayChainId: 1,
       blockscout: null,
     });
     pagedMode = false;
     assert.equal(paged.source, 'blockscout-pro');
     assert.equal(paged.logs.length, 1001);
-    assert.equal(upstreamCalls, 3);
-    assert.equal(db.usage.values().next().value.requests, 3);
+    assert.equal(blockscoutCalls, 3);
+    assert.equal(etherscanCalls, 1);
+    assert.equal(db.usage.values().next().value.requests, 4);
   }
 
   // A valid code cannot turn the relay into a general Blockscout proxy.
@@ -287,9 +368,9 @@ try {
     },
   ), env);
   assert.equal(refused.status, 400);
-  assert.equal(upstreamCalls, LIVE ? 1 : 3);
+  assert.equal(upstreamCallCount(), LIVE ? 2 : 4);
 
-  const afterSuccess = upstreamCalls;
+  const afterSuccess = upstreamCallCount();
   const unknownRelay = await worker.fetch(new Request(
     'https://lplens-beta.licence-worker.workers.dev/blockscout',
     {
@@ -304,7 +385,7 @@ try {
     },
   ), env);
   assert.equal(unknownRelay.status, 403);
-  assert.equal(upstreamCalls, afterSuccess);
+  assert.equal(upstreamCallCount(), afterSuccess);
 
   const expiredKey = 'expired-access-key-with-enough-entropy';
   const expiredHash = await sha256Hex(expiredKey);
@@ -362,7 +443,7 @@ try {
   assert.equal(overQuota.status, 429);
   const overQuotaBody = await overQuota.json();
   assert.match(overQuotaBody.error || '', /daily history allowance/i);
-  assert.equal(upstreamCalls, afterSuccess);
+  assert.equal(upstreamCallCount(), afterSuccess);
 
   const privacy = await worker.fetch(new Request(
     'https://lplens-beta.licence-worker.workers.dev/privacy',
@@ -370,23 +451,26 @@ try {
   assert.equal(privacy.status, 200);
   const privacyHtml = await privacy.text();
   assert.match(privacyHtml, /Blockscout Pro/);
+  assert.match(privacyHtml, /Etherscan V2/);
+  assert.match(privacyHtml, /ProjectX/);
   assert.match(privacyHtml, /installation identifier/i);
   assert.match(privacyHtml, /position links/i);
   assert.match(privacyHtml, /first line of visible row text/i);
   assert.doesNotMatch(privacyHtml, /does not read Uniswap(?:’|')s page HTML/i);
-  assert.equal(privacyHtml.includes(TEST_SECRET), false);
+  assert.equal(privacyHtml.includes(TEST_BLOCKSCOUT_SECRET), false);
+  assert.equal(privacyHtml.includes(TEST_ETHERSCAN_SECRET), false);
 
   const getRoot = await worker.fetch(new Request(
     'https://lplens-beta.licence-worker.workers.dev/',
   ), env);
   assert.equal(getRoot.status, 405);
   const preflight = await worker.fetch(new Request(
-    'https://lplens-beta.licence-worker.workers.dev/blockscout',
+    'https://lplens-beta.licence-worker.workers.dev/history',
     { method: 'OPTIONS' },
   ), env);
   assert.equal(preflight.status, 204);
 
-  console.log(`blockscout relay: allowlist, hashed install tracking, quota and extension path pass${LIVE ? ' (live Pro API)' : ''}`);
+  console.log(`history relay: allowlist, hashed install tracking, quota and extension path pass${LIVE ? ' (live Blockscout Pro + Etherscan)' : ''}`);
 } finally {
   globalThis.fetch = originalFetch;
   delete globalThis.chrome;

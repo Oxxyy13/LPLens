@@ -219,17 +219,20 @@ export async function entitlement() {
  * entitlement check; the Worker verifies the key and expiry again per relay
  * request, so a patched caller cannot turn this into an unauthenticated proxy.
  */
-export async function blockscoutRelayCredentials() {
+export async function historyRelayCredentials() {
   if (!GATING_ENABLED || urlIsPlaceholder(VALIDATE_URL)) return null;
   const s = await store(['licenseKey']);
   const key = String(s.licenseKey || '').trim();
   if (!key) return null;
   return {
-    url: new URL('blockscout', VALIDATE_URL).href,
+    url: new URL('history', VALIDATE_URL).href,
     key,
     installationId: await installationId(),
   };
 }
+
+/** Compatibility for 0.27 callers and local test harnesses. */
+export const blockscoutRelayCredentials = historyRelayCredentials;
 
 /** Trial length, exported so the UI never hardcodes a second copy. */
 export const TRIAL_LENGTH_DAYS = TRIAL_DAYS;

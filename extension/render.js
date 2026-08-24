@@ -225,6 +225,13 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
   display: block; margin-top: 1px; font-size: 9.5px; line-height: 1.2;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.portfolio-card {
+  position: relative; overflow: hidden; margin: 8px 10px; padding: 10px 11px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--panel-2) 28%, var(--panel)), var(--panel));
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-sm);
+}
+.portfolio-card::after { content: ""; position: absolute; inset: 0 auto 0 0;
+  width: 2px; background: var(--signal); opacity: .72; }
 `;
 
   const CSS = CSS_PANEL + CSS_COMPONENTS;
@@ -381,12 +388,28 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
         && u.totalNow !== null && u.totalNow !== undefined) {
       rows.push(`<div class="kv"><span>gross added</span><span class="num">$${grossAdded.toLocaleString('en-US', { maximumFractionDigits: 2 })}${grossExact ? '' : '*'}</span></div>`);
       if (u.collectedProceeds !== null && u.collectedProceeds !== undefined) {
-        rows.push(`<div class="kv"><span>cash returned</span><span class="num">$${u.collectedProceeds.toLocaleString('en-US', { maximumFractionDigits: 2 })}${u.collectedProceedsExact ? '' : '*'}</span></div>`);
+        const returnedLabel = h && h.feeCreditsOnAdd ? 'fees credited on adds' : 'cash returned';
+        rows.push(`<div class="kv"><span>${returnedLabel}</span><span class="num">$${u.collectedProceeds.toLocaleString('en-US', { maximumFractionDigits: 2 })}${u.collectedProceedsExact ? '' : '*'}</span></div>`);
       }
       if (u.netCashIn !== null && u.netCashIn !== undefined) {
         rows.push(`<div class="kv"><span>net cash in</span><span class="num">${u.netCashIn < 0 ? '−' : ''}$${Math.abs(u.netCashIn).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>`);
       }
       rows.push(`<div class="kv"><span>worth now</span><span class="num">$${u.totalNow.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></div>`);
+    }
+
+    const capitalEvents = u && Array.isArray(u.capitalEvents) ? u.capitalEvents : [];
+    if (capitalEvents.length > 1) {
+      const when = (leg) => leg.time
+        ? new Date(leg.time * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : `block ${Number(leg.block).toLocaleString('en-US')}`;
+      rows.push('<div class="sep"></div>');
+      rows.push('<div class="herolbl" style="margin-bottom:4px">capital additions</div>');
+      for (const leg of capitalEvents) {
+        const amounts = `${fmt(leg.amount0)} ${esc(s0)} + ${fmt(leg.amount1)} ${esc(s1)}`;
+        rows.push(`<div class="kv"><span>${esc(leg.kind)}<br><span class="unit">${esc(when(leg))}</span></span>`
+          + `<span class="num">$${leg.value.toLocaleString('en-US', { maximumFractionDigits: 2 })}${leg.exact ? '' : '*'}<br><span class="unit">${amounts}</span></span></div>`);
+      }
+      rows.push('<div class="note" style="margin-top:2px">Each addition keeps its own date and historical USD price; LP return uses the full cash-flow ledger.</div>');
     }
 
     if (h && !h.unavailable) {
@@ -412,9 +435,28 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
         rows.push(`<div class="kv"><span>price ${closed ? 'entry to exit' : 'since entry'}</span><span class="num ${cls(drift)}">${esc(qual)}${drift > 0 ? '+' : ''}${drift.toFixed(2)}%<br><span class="unit">${unit}</span></span></div>`);
         rows.push(`<div class="note" style="margin-top:2px">i.e. ${winner}</div>`);
       }
+      const priceGroups = d.status === 'closed' || !u ? [] : [
+        u.tokenPriceChange,
+        u.latestAddPriceChange,
+      ].filter(Boolean);
+      if (priceGroups.length) rows.push('<div class="sep"></div>');
+      const usdPrice = (n) => `$${fmt(n, n < 1 ? 8 : 2)}`;
+      for (const group of priceGroups) {
+        const tokenMoves = [
+          [s0, group.token0], [s1, group.token1],
+        ].filter(([, move]) => move && Number.isFinite(move.pct));
+        if (!tokenMoves.length) continue;
+        rows.push(`<div class="herolbl" style="margin-bottom:4px${group === priceGroups[0] ? '' : ';margin-top:8px'}">token prices since ${esc(group.label)}</div>`);
+        for (const [symbol, move] of tokenMoves) {
+          rows.push(`<div class="kv"><span>${esc(symbol)} price</span><span class="num ${cls(move.pct)}">${move.pct > 0 ? '+' : ''}${move.pct.toFixed(2)}%<br><span class="unit">${usdPrice(move.from)} → ${usdPrice(move.to)}</span></span></div>`);
+        }
+      }
+      if (u && u.tokenPriceChange && u.tokenPriceChange.label === 'first add') {
+        rows.push('<div class="note" style="margin-top:2px">Since-opened market context stays anchored to the first add. LP return values each addition separately at its own block.</div>');
+      }
       rows.push('<div class="sep"></div>');
       rows.push(`<div class="kv"><span>deposited</span><span class="num">${fmt(h.deposited0)} ${esc(s0)}<br>${fmt(h.deposited1)} ${esc(s1)}</span></div>`);
-      rows.push(`<div class="kv"><span>collected</span><span class="num">${fmt(h.received0)} ${esc(s0)}<br>${fmt(h.received1)} ${esc(s1)}</span></div>`);
+      rows.push(`<div class="kv"><span>${h.feeCreditsOnAdd ? 'fees credited' : 'collected'}</span><span class="num">${fmt(h.received0)} ${esc(s0)}<br>${fmt(h.received1)} ${esc(s1)}</span></div>`);
       const r = rebalance(d, h);
       if (r) {
         const usd = (n) => (n === null ? '' : `<span class="unit">${n < 0 ? '−' : '+'}$${Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>`);

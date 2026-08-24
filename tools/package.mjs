@@ -178,7 +178,7 @@ function nodeCheckAll(dir) {
 async function proveKeylessChains(dest) {
   const url = pathToFileURL(join(dest, 'lib/chains.js')).href + '?t=' + Date.now();
   const { CHAINS } = await import(url);
-  const want = ['ethereum', 'base', 'arbitrum', 'polygon', 'robinhood'];
+  const want = ['ethereum', 'base', 'arbitrum', 'polygon', 'hyperevm', 'robinhood'];
   for (const k of want) {
     if (!CHAINS[k]) abort('stripped CHAINS missing ' + k);
     if (/alchemy/i.test(CHAINS[k].rpc || '')) abort(k + ' rpc still points at Alchemy');

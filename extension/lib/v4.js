@@ -22,20 +22,27 @@
  * must equal the PositionManager's. Either mismatching means the poolId, the
  * ticks or the salt is wrong, and both would otherwise fail silently as zeros.
  *
- * NOT IMPLEMENTED: v4 lifetime history. Deposits and fee collection are emitted
- * by the PoolManager as `ModifyLiquidity`, keyed by poolId and salt rather than
- * by tokenId, so the v3 approach of one topic-filtered query per position does
- * not carry over. Positions report history as unavailable rather than showing a
- * partial or invented lifetime.
+ * v4 lifetime history is intentionally narrower than v3. PoolManager
+ * `ModifyLiquidity` identifies an NFT with poolId + PositionManager +
+ * `salt == bytes32(tokenId)`, but does not emit token amounts. For a mint the
+ * receipt proves the principal directly. For later, simple additions LPLens
+ * reads Blockscout's execution trace: PoolManager's exact return separates the
+ * principal delta from fees accrued before PositionManager nets them together.
+ * Removes, hooks and bundled actions remain fail-closed instead of turning
+ * settlement transfers into invented proceeds.
  */
-import { ethCall, ethCallBatch, mapLimit } from './rpc.js';
+import { ethCall, ethCallBatch, mapLimit, rpcCall } from './rpc.js';
 import {
   words, toUint, toInt, toAddress, padWord, encAddress, encUint, dataOwnerOf,
 } from './abi.js';
 import { keccak256Hex } from './keccak.js';
-import { positionAmounts, humanPrice, tickToPrice, scale } from './v3.js';
+import {
+  positionAmounts, humanPrice, tickToPrice, scale, sqrtRatioAtTick,
+} from './v3.js';
 import { CHAINS } from './chains.js';
-import { fetchTransfers } from './logs.js';
+import {
+  fetchFilteredLogs, fetchRecentFilteredLogs, fetchTransfers,
+} from './logs.js';
 
 // Selectors derived with keccak256 and cross-checked against the in-production
 // `PortfolioManager/scripts/robinhood_chain_lp.py`, which pins the same values.
@@ -48,8 +55,20 @@ export const V4 = {
   balanceOf: '0x70a08231',
 };
 
+export const V4_TOPIC = Object.freeze({
+  modifyLiquidity: '0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec',
+  modifyPosition: '0x54e5dca345d804c4bcfd2d92dae077325838444a21d118beb4d25ec99a5788e5',
+  transfer: '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+});
+
 const Q128 = 1n << 128n;
 const MAX256 = 1n << 256n;
+const V4_POOL_LOG_TTL_MS = 10_000;
+const v4PoolLogCache = new Map();
+const v4TraceCache = new Map();
+const V4_TRACE_CACHE_MAX = 200;
+const MAX_SIMPLE_V4_ADDS = 20;
+const MODIFY_LIQUIDITY_SELECTOR = '0x5a6bcfda';
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function retryRead(fn, attempts = 4) {
   let last;
@@ -105,6 +124,567 @@ export function poolIdOf(poolKeyWords) {
 
 /** Native currency is address(0) and has no ERC-20 to interrogate. */
 const isNative = (addr) => /^0x0{40}$/i.test(addr);
+
+const dataWord = (data, index) => {
+  const body = String(data || '').replace(/^0x/, '');
+  const word = body.slice(index * 64, (index + 1) * 64);
+  return word.length === 64 ? BigInt('0x' + word) : null;
+};
+const signed256 = (value) => value >= (1n << 255n) ? value - (1n << 256n) : value;
+const addressTopic = (address) =>
+  '0x' + String(address).replace(/^0x/, '').toLowerCase().padStart(64, '0');
+const logId = (log) => `${String(log.transactionHash || '').toLowerCase()}:${log.logIndex}`;
+
+/** Decode and select the PoolManager events whose non-indexed salt is tokenId. */
+export function decodeV4LiquidityLogs(logs, {
+  poolId, positionManager, tokenId, tickLower, tickUpper,
+}) {
+  const wantPool = String(poolId).toLowerCase();
+  const wantManager = addressTopic(positionManager);
+  const wantToken = BigInt(tokenId);
+  const events = [];
+  for (const log of logs || []) {
+    if (String(log.topics?.[0] || '').toLowerCase() !== V4_TOPIC.modifyLiquidity) continue;
+    if (String(log.topics?.[1] || '').toLowerCase() !== wantPool) continue;
+    if (String(log.topics?.[2] || '').toLowerCase() !== wantManager) continue;
+    const lowerWord = dataWord(log.data, 0);
+    const upperWord = dataWord(log.data, 1);
+    const deltaWord = dataWord(log.data, 2);
+    const salt = dataWord(log.data, 3);
+    if ([lowerWord, upperWord, deltaWord, salt].some((value) => value === null)) continue;
+    if (salt !== wantToken) continue;
+    const lower = Number(signed256(lowerWord));
+    const upper = Number(signed256(upperWord));
+    if (lower !== tickLower || upper !== tickUpper) continue;
+    events.push({
+      block: log.block,
+      time: log.time,
+      transactionHash: log.transactionHash || null,
+      logIndex: log.logIndex ?? null,
+      poolId: wantPool,
+      positionManager: String(positionManager).toLowerCase(),
+      tickLower: lower,
+      tickUpper: upper,
+      liquidityDelta: signed256(deltaWord),
+      tokenId: salt,
+    });
+  }
+  return events.sort((a, b) =>
+    (a.block - b.block) || ((a.logIndex ?? 0) - (b.logIndex ?? 0)));
+}
+
+const callDataWord = (input, index) => {
+  const body = String(input || '').replace(/^0x/, '');
+  const word = body.slice(8 + index * 64, 8 + (index + 1) * 64);
+  return word.length === 64 ? BigInt('0x' + word) : null;
+};
+
+const signed128 = (value) => value >= (1n << 127n) ? value - (1n << 128n) : value;
+const decodeBalanceDelta = (word) => ({
+  amount0: signed128(word >> 128n),
+  amount1: signed128(word & ((1n << 128n) - 1n)),
+});
+
+function proveAmounts({ liquidity, raw0, raw1, tickLower, tickUpper, decimals0, decimals1 }) {
+  const fail = (unavailable) => ({ unavailable });
+  const L = Number(liquidity);
+  const sqrtA = sqrtRatioAtTick(tickLower);
+  const sqrtB = sqrtRatioAtTick(tickUpper);
+  let sqrtP;
+
+  if (raw0 === null) {
+    if (!(raw1 > 0)) return fail('the native mint amount cannot be isolated');
+    sqrtP = sqrtA + raw1 / L;
+    raw0 = L * (sqrtB - sqrtP) / (sqrtP * sqrtB);
+  } else if (raw1 === null) {
+    if (!(raw0 > 0)) return fail('the native mint amount cannot be isolated');
+    sqrtP = 1 / (1 / sqrtB + raw0 / L);
+    raw1 = L * (sqrtP - sqrtA);
+  } else if (raw0 > 0 && raw1 > 0) {
+    const from1 = sqrtA + raw1 / L;
+    const from0 = 1 / (1 / sqrtB + raw0 / L);
+    const spread = Math.abs(from1 - from0) / from1;
+    if (spread > 1e-6) return fail('the settlement transfers do not match the liquidity delta');
+    sqrtP = (from0 + from1) / 2;
+  } else if (raw0 === 0 && raw1 > 0) {
+    sqrtP = sqrtB;
+  } else if (raw1 === 0 && raw0 > 0) {
+    sqrtP = sqrtA;
+  } else {
+    return fail('the mint receipt contains no token settlement');
+  }
+
+  const epsilon = 1e-9;
+  if (!Number.isFinite(sqrtP) || sqrtP < sqrtA * (1 - epsilon)
+      || sqrtP > sqrtB * (1 + epsilon) || raw0 < 0 || raw1 < 0) {
+    return fail('the proved mint amounts fall outside the position range');
+  }
+  const exactPrice = raw0 > 0 && raw1 > 0;
+  return {
+    amount0: scale(raw0, decimals0),
+    amount1: scale(raw1, decimals1),
+    entry: {
+      sqrtP,
+      price: sqrtP * sqrtP * Math.pow(10, decimals0 - decimals1),
+      exact: exactPrice,
+      ...(exactPrice ? {} : { bound: raw0 === 0 ? 'at or above' : 'at or below' }),
+    },
+  };
+}
+
+/**
+ * Prove that a receipt contains only one simple action for this v4 NFT.
+ *
+ * Newer PositionManagers mirror PoolManager's event as `ModifyPosition`; older
+ * deployments do not. Both shapes are accepted, but every emitted action and
+ * currency transfer must still belong to this exact pool and token id.
+ */
+export function validateSimpleV4Receipt({
+  event, receipt, poolManager, positionManager, token0, token1, expectMint,
+}) {
+  const fail = (unavailable) => ({ unavailable });
+  if (!event || !event.transactionHash || event.liquidityDelta <= 0n) {
+    return fail('the v4 addition event is invalid');
+  }
+  if (!receipt || String(receipt.status || '0x1') === '0x0' || !Array.isArray(receipt.logs)) {
+    return fail('the v4 addition receipt is unavailable');
+  }
+
+  const pm = String(positionManager).toLowerCase();
+  const manager = String(poolManager).toLowerCase();
+  const managerTopic = addressTopic(manager);
+  const tokenIdTopic = '0x' + BigInt(event.tokenId).toString(16).padStart(64, '0');
+  const zeroTopic = '0x' + '0'.repeat(64);
+  let mintCount = 0, modifyCount = 0, mirrorCount = 0;
+  const tokenAddresses = [token0, token1].map((token) => String(token).toLowerCase());
+  const incoming = [0n, 0n];
+
+  for (const log of receipt.logs) {
+    const address = String(log.address || '').toLowerCase();
+    const topic0 = String(log.topics?.[0] || '').toLowerCase();
+    if (address === manager && topic0 === V4_TOPIC.modifyLiquidity) {
+      modifyCount++;
+      const lower = dataWord(log.data, 0), upper = dataWord(log.data, 1);
+      const delta = dataWord(log.data, 2), salt = dataWord(log.data, 3);
+      if (String(log.transactionHash || receipt.transactionHash || '').toLowerCase()
+            !== String(event.transactionHash).toLowerCase()
+          || String(log.topics?.[1] || '').toLowerCase() !== event.poolId
+          || String(log.topics?.[2] || '').toLowerCase() !== addressTopic(positionManager)
+          || lower === null || Number(signed256(lower)) !== event.tickLower
+          || upper === null || Number(signed256(upper)) !== event.tickUpper
+          || delta === null || signed256(delta) !== event.liquidityDelta
+          || salt !== BigInt(event.tokenId)) {
+        return fail('the transaction modified another v4 position');
+      }
+      continue;
+    }
+    if (address === pm && topic0 === V4_TOPIC.modifyPosition) {
+      mirrorCount++;
+      const lower = dataWord(log.data, 0), upper = dataWord(log.data, 1);
+      const delta = dataWord(log.data, 2), salt = dataWord(log.data, 3);
+      if (String(log.topics?.[1] || '').toLowerCase() !== event.poolId
+          || lower === null || Number(signed256(lower)) !== event.tickLower
+          || upper === null || Number(signed256(upper)) !== event.tickUpper
+          || delta === null || signed256(delta) !== event.liquidityDelta
+          || salt !== BigInt(event.tokenId)) {
+        return fail('the PositionManager mirrored another v4 action');
+      }
+      continue;
+    }
+    if (address === pm && topic0 === V4_TOPIC.transfer
+        && String(log.topics?.[1] || '').toLowerCase() === zeroTopic
+        && String(log.topics?.[3] || '').toLowerCase() === tokenIdTopic) {
+      mintCount++;
+      continue;
+    }
+    const side = tokenAddresses.findIndex((token) => token === address && !isNative(token));
+    if (side >= 0 && topic0 === V4_TOPIC.transfer) {
+      const to = String(log.topics?.[2] || '').toLowerCase();
+      const from = String(log.topics?.[1] || '').toLowerCase();
+      const amount = dataWord(log.data, 0);
+      if (amount === null || (to !== managerTopic && from !== managerTopic) || to === from) {
+        return fail('the receipt contains a non-settlement token transfer');
+      }
+      if (to === managerTopic) incoming[side] += amount;
+      continue;
+    }
+    return fail('the v4 addition receipt contains additional actions');
+  }
+  if (modifyCount !== 1 || mirrorCount > 1 || mintCount !== (expectMint ? 1 : 0)) {
+    return fail(expectMint
+      ? 'the receipt does not prove one NFT mint and one liquidity addition'
+      : 'the receipt does not prove one isolated liquidity addition');
+  }
+  return { incoming };
+}
+
+/** Prove the untouched one-add mint without relying on an explorer trace. */
+export function inferSimpleV4Mint({
+  event, receipt, poolManager, positionManager, token0, token1, hooks,
+  liquidity, tickLower, tickUpper, decimals0, decimals1,
+}) {
+  const fail = (unavailable) => ({ unavailable });
+  if (!event || event.liquidityDelta !== BigInt(liquidity)) {
+    return fail('the mint liquidity does not reconcile with the current position');
+  }
+  if (!isNative(hooks)) return fail('hooked v4 pools can change settlement amounts');
+  const checked = validateSimpleV4Receipt({
+    event, receipt, poolManager, positionManager, token0, token1, expectMint: true,
+  });
+  if (checked.unavailable) return checked;
+  const proved = proveAmounts({
+    liquidity: event.liquidityDelta,
+    raw0: isNative(token0) ? null : Number(checked.incoming[0]),
+    raw1: isNative(token1) ? null : Number(checked.incoming[1]),
+    tickLower, tickUpper, decimals0, decimals1,
+  });
+  return proved.unavailable ? proved : { ...proved, fees0: 0, fees1: 0,
+    proof: 'single-mint receipt + liquidity math' };
+}
+
+function matchingTraceCalls(trace, event, poolManager, positionManager) {
+  const matches = [];
+  const walk = (call) => {
+    if (!call || typeof call !== 'object') return;
+    const input = String(call.input || '').toLowerCase();
+    if (String(call.from || '').toLowerCase() === String(positionManager).toLowerCase()
+        && String(call.to || '').toLowerCase() === String(poolManager).toLowerCase()
+        && input.startsWith(MODIFY_LIQUIDITY_SELECTOR)) {
+      const lower = callDataWord(input, 5), upper = callDataWord(input, 6);
+      const delta = callDataWord(input, 7), salt = callDataWord(input, 8);
+      if (lower !== null && Number(signed256(lower)) === event.tickLower
+          && upper !== null && Number(signed256(upper)) === event.tickUpper
+          && delta !== null && signed256(delta) === event.liquidityDelta
+          && salt === BigInt(event.tokenId)) matches.push(call);
+    }
+    for (const child of call.calls || []) walk(child);
+  };
+  walk(trace);
+  return matches;
+}
+
+/**
+ * Exact principal and already-earned fees from PoolManager's trace return.
+ * `callerDelta = principalDelta + feesAccrued`, so the two returned words make
+ * the later addition a pair of honest same-block flows instead of a weighted
+ * average or a guessed net transfer.
+ */
+export function inferSimpleV4TraceAddition({
+  event, trace, poolManager, positionManager, hooks,
+  tickLower, tickUpper, decimals0, decimals1,
+}) {
+  const fail = (unavailable) => ({ unavailable });
+  if (!event || event.liquidityDelta <= 0n) return fail('the v4 addition event is invalid');
+  if (!isNative(hooks)) return fail('hooked v4 pools can change settlement amounts');
+  const matches = matchingTraceCalls(trace, event, poolManager, positionManager);
+  if (matches.length !== 1) {
+    return fail('the execution trace does not isolate one matching v4 addition');
+  }
+  const callerWord = dataWord(matches[0].output, 0);
+  const feesWord = dataWord(matches[0].output, 1);
+  if (callerWord === null || feesWord === null) {
+    return fail('the v4 trace is missing PoolManager balance deltas');
+  }
+  const caller = decodeBalanceDelta(callerWord);
+  const fees = decodeBalanceDelta(feesWord);
+  const principal0 = caller.amount0 - fees.amount0;
+  const principal1 = caller.amount1 - fees.amount1;
+  if (principal0 > 0n || principal1 > 0n || fees.amount0 < 0n || fees.amount1 < 0n
+      || (principal0 === 0n && principal1 === 0n)) {
+    return fail('the traced balance deltas are not a simple liquidity addition');
+  }
+  const proved = proveAmounts({
+    liquidity: event.liquidityDelta,
+    raw0: Number(-principal0), raw1: Number(-principal1),
+    tickLower, tickUpper, decimals0, decimals1,
+  });
+  if (proved.unavailable) return proved;
+  return {
+    ...proved,
+    fees0: scale(Number(fees.amount0), decimals0),
+    fees1: scale(Number(fees.amount1), decimals1),
+    proof: 'Blockscout trace balance deltas',
+  };
+}
+
+function blockscoutV2(chain) {
+  if (chain.blockscoutV2) return String(chain.blockscoutV2).replace(/\/$/, '');
+  if (!chain.blockscout) return null;
+  try { return new URL('/api/v2', chain.blockscout).href.replace(/\/$/, ''); }
+  catch { return null; }
+}
+
+export async function fetchV4Trace(chain, transactionHash) {
+  const base = blockscoutV2(chain);
+  if (!base) throw new Error('Blockscout transaction traces are not configured');
+  const key = `${base}:${String(transactionHash).toLowerCase()}`;
+  if (v4TraceCache.has(key)) return v4TraceCache.get(key);
+  const task = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(`${base}/transactions/${transactionHash}/raw-trace`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`Blockscout trace HTTP ${response.status}`);
+      const body = await response.json();
+      if (!body || typeof body !== 'object' || body.error) {
+        throw new Error(`Blockscout trace: ${body && body.error || 'malformed response'}`);
+      }
+      return body;
+    } finally { clearTimeout(timer); }
+  })();
+  v4TraceCache.set(key, task);
+  task.catch(() => v4TraceCache.delete(key));
+  if (v4TraceCache.size > V4_TRACE_CACHE_MAX) {
+    for (const old of [...v4TraceCache.keys()].slice(0, v4TraceCache.size - V4_TRACE_CACHE_MAX)) {
+      v4TraceCache.delete(old);
+    }
+  }
+  return task;
+}
+
+function v4VsHodl(position, history) {
+  const price = position.price;
+  if (!(price > 0) || position.collectable0 === null || position.collectable1 === null) {
+    return null;
+  }
+  const hodl = history.deposited0 * price + history.deposited1;
+  if (!(hodl > 0)) return null;
+  // A later add crystallises the old position's fees in PoolManager's return
+  // and normally nets them into the new principal. Model that as a same-block
+  // fee credit plus gross addition: the two flows cancel for external cash,
+  // while preserving a correct lifetime fee and vs-holding decomposition.
+  const have = (history.received0 + position.amount0 + position.collectable0) * price
+    + history.received1 + position.amount1 + position.collectable1;
+  const fees = (history.received0 + position.collectable0) * price
+    + history.received1 + position.collectable1;
+  const delta = have - hodl;
+  let apr = null, aprDays = null;
+  if (history.adds === 1 && history.firstTime && Date.now() / 1000 > history.firstTime) {
+    const years = (Date.now() / 1000 - history.firstTime) / 31557600;
+    apr = fees / hodl / years * 100;
+    aprDays = years * 365.25;
+  }
+  return {
+    delta,
+    pct: (have / hodl - 1) * 100,
+    fees,
+    feesPct: fees / hodl * 100,
+    il: fees - delta,
+    ilPct: (fees - delta) / hodl * 100,
+    apr,
+    aprDays,
+    price,
+    pricedAt: 'spot',
+  };
+}
+
+async function v4History(rpc, chain, position, opts) {
+  if (!chain.v4PoolManager) return { unavailable: 'v4 PoolManager is not configured' };
+  const topics = [
+    V4_TOPIC.modifyLiquidity,
+    position.poolId,
+    addressTopic(chain.v4PositionManager),
+  ];
+  const source = {
+    contract: chain.v4PoolManager,
+    topics,
+    rpc: opts.rpcOverride || chain.logsRpc || rpc,
+    etherscanKey: opts.etherscanKey || chain.etherscanKey || null,
+    etherscanChainId: chain.etherscanChainId || null,
+    historyRelay: opts.historyRelay || opts.blockscoutRelay || null,
+    historyRelayChainId: chain.etherscanChainId || null,
+    blockscout: chain.blockscout || null,
+  };
+  // Several NFTs commonly share one pool. The PoolManager filter returns that
+  // pool's PositionManager events and salt is matched locally, so three cards
+  // asking at once must share the same network request rather than download the
+  // same log set three times. Ten seconds covers one scan without making a
+  // just-mined action stale on the next deliberate refresh.
+  const cacheKey = [
+    chain.v4PoolManager.toLowerCase(), position.poolId.toLowerCase(),
+    source.etherscanKey ? 'e' : '-', source.historyRelay ? 'h' : '-',
+    source.blockscout ? 'b' : '-',
+  ].join(':');
+  const now = Date.now();
+  let cached = v4PoolLogCache.get(cacheKey);
+  if (!cached || now - cached.at > V4_POOL_LOG_TTL_MS) {
+    cached = {
+      at: now,
+      task: Promise.all([
+        fetchFilteredLogs(source),
+        fetchRecentFilteredLogs({
+          contract: chain.v4PoolManager,
+          topics,
+          rpc: opts.rpcOverride || chain.logsRpc || rpc,
+        }),
+      ]),
+    };
+    v4PoolLogCache.set(cacheKey, cached);
+    if (v4PoolLogCache.size > 100) {
+      for (const key of [...v4PoolLogCache.keys()].slice(0, v4PoolLogCache.size - 100)) {
+        v4PoolLogCache.delete(key);
+      }
+    }
+  }
+  const [full, recent] = await cached.task;
+  if (full.unavailable) return { unavailable: full.unavailable };
+
+  const merged = new Map();
+  for (const log of [...(full.logs || []), ...(recent.logs || [])]) merged.set(logId(log), log);
+  const events = decodeV4LiquidityLogs([...merged.values()], {
+    poolId: position.poolId,
+    positionManager: chain.v4PositionManager,
+    tokenId: position.tokenId,
+    tickLower: position.tickLower,
+    tickUpper: position.tickUpper,
+  });
+  if (!events.length) {
+    return { unavailable: 'zero matching v4 lifetime events — history is incomplete' };
+  }
+  const net = events.reduce((sum, event) => sum + event.liquidityDelta, 0n);
+  if (net !== position.liquidity) {
+    return { unavailable: 'v4 event history does not reconcile with current liquidity' };
+  }
+  if (events.some((event) => event.liquidityDelta <= 0n)) {
+    return {
+      unavailable: `v4 lifecycle verified (${events.length} actions), but exact return currently `
+        + 'supports additions only; removes and fee-only actions remain unavailable',
+    };
+  }
+  if (events.length > MAX_SIMPLE_V4_ADDS) {
+    return { unavailable: `v4 lifecycle has ${events.length} additions; the safe trace limit is `
+      + MAX_SIMPLE_V4_ADDS };
+  }
+  if (new Set(events.map((event) => String(event.transactionHash).toLowerCase())).size
+      !== events.length) {
+    return { unavailable: 'multiple v4 additions in one transaction cannot be isolated safely' };
+  }
+
+  const receipts = [];
+  try {
+    for (const event of events) {
+      receipts.push(await rpcCall(rpc, 'eth_getTransactionReceipt', [event.transactionHash]));
+    }
+  } catch (err) {
+    return { unavailable: `v4 addition receipt unavailable — ${err.message || String(err)}` };
+  }
+
+  const proofs = [];
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i], receipt = receipts[i];
+    if (i === 0) {
+      const mint = inferSimpleV4Mint({
+        event, receipt,
+        poolManager: chain.v4PoolManager,
+        positionManager: chain.v4PositionManager,
+        token0: position.token0,
+        token1: position.token1,
+        hooks: position.hooks,
+        // The first delta is the mint's liquidity; current liquidity includes
+        // every later addition and is reconciled independently above.
+        liquidity: event.liquidityDelta,
+        tickLower: position.tickLower,
+        tickUpper: position.tickUpper,
+        decimals0: position.token0Meta.decimals,
+        decimals1: position.token1Meta.decimals,
+      });
+      if (mint.unavailable) return { unavailable: mint.unavailable };
+      proofs.push(mint);
+      continue;
+    }
+
+    const checked = validateSimpleV4Receipt({
+      event, receipt,
+      poolManager: chain.v4PoolManager,
+      positionManager: chain.v4PositionManager,
+      token0: position.token0,
+      token1: position.token1,
+      expectMint: false,
+    });
+    if (checked.unavailable) return { unavailable: checked.unavailable };
+    let trace;
+    try { trace = await fetchV4Trace(chain, event.transactionHash); }
+    catch (err) {
+      return { unavailable: `v4 addition trace unavailable — ${err.message || String(err)}` };
+    }
+    const added = inferSimpleV4TraceAddition({
+      event, trace,
+      poolManager: chain.v4PoolManager,
+      positionManager: chain.v4PositionManager,
+      hooks: position.hooks,
+      tickLower: position.tickLower,
+      tickUpper: position.tickUpper,
+      decimals0: position.token0Meta.decimals,
+      decimals1: position.token1Meta.decimals,
+    });
+    if (added.unavailable) return { unavailable: added.unavailable };
+    proofs.push(added);
+  }
+
+  const blocks = new Map();
+  await Promise.all(events.filter((event) => !event.time).map(async (event) => {
+    if (blocks.has(event.block)) return;
+    blocks.set(event.block, null);
+    try {
+      const block = await rpcCall(rpc, 'eth_getBlockByNumber', [
+        '0x' + BigInt(event.block).toString(16), false,
+      ]);
+      if (block?.timestamp) blocks.set(event.block, Number(BigInt(block.timestamp)));
+    } catch { /* a missing timestamp never becomes an invented date */ }
+  }));
+
+  const deposits = events.map((event, i) => ({
+    block: event.block,
+    time: event.time || blocks.get(event.block) || null,
+    transactionHash: event.transactionHash,
+    logIndex: event.logIndex,
+    amount0: proofs[i].amount0,
+    amount1: proofs[i].amount1,
+    entry: proofs[i].entry,
+  }));
+  const collections = events.flatMap((event, i) => (
+    proofs[i].fees0 > 0 || proofs[i].fees1 > 0 ? [{
+      block: event.block,
+      time: event.time || blocks.get(event.block) || null,
+      transactionHash: event.transactionHash,
+      logIndex: event.logIndex,
+      amount0: proofs[i].fees0,
+      amount1: proofs[i].fees1,
+      entry: proofs[i].entry,
+      kind: 'fees-credited-on-add',
+    }] : []
+  ));
+  const total = (key, rows) => rows.reduce((sum, row) => sum + row[key], 0);
+  const deposited0 = total('amount0', deposits), deposited1 = total('amount1', deposits);
+  const received0 = total('amount0', collections), received1 = total('amount1', collections);
+  const currentUnavailable = position.collectable0 === null || position.collectable1 === null;
+  const history = {
+    entry: proofs[0].entry,
+    exit: null,
+    deposits,
+    collections,
+    deposited0,
+    deposited1,
+    received0,
+    received1,
+    fees0: currentUnavailable ? null : received0 + position.collectable0,
+    fees1: currentUnavailable ? null : received1 + position.collectable1,
+    adds: events.length,
+    firstBlock: events[0].block,
+    firstTime: deposits[0].time,
+    lastTime: deposits[deposits.length - 1].time,
+    currentUnavailable,
+    feeCreditsOnAdd: collections.length > 0,
+    proof: events.length === 1 ? proofs[0].proof
+      : `${events.length} isolated addition receipts + Blockscout trace balance deltas`,
+    source: [full.source, recent && !recent.unavailable ? recent.source : null]
+      .filter(Boolean).join('+') + (events.length > 1 ? '+blockscout-trace' : ''),
+  };
+  history.vsHodl = v4VsHodl(position, history);
+  return history;
+}
 
 async function currencyMeta(rpc, chain, address, tokenMeta) {
   if (isNative(address)) {
@@ -204,8 +784,8 @@ export async function enumerateV4(chainKey, owner, opts = {}) {
     rpc: opts.rpcOverride || chain.logsRpc || chain.rpc,
     etherscanKey: opts.etherscanKey || chain.etherscanKey,
     etherscanChainId: chain.etherscanChainId,
-    blockscoutRelay: opts.blockscoutRelay || null,
-    blockscoutChainId: chain.etherscanChainId || null,
+    historyRelay: opts.historyRelay || opts.blockscoutRelay || null,
+    historyRelayChainId: chain.etherscanChainId || null,
     blockscout: chain.blockscout || null,
   });
   if (got.unavailable) {
@@ -350,7 +930,7 @@ export async function loadV4Position(chainKey, tokenId, opts = {}) {
     liquidity, tickLower: pos.tickLower, tickUpper: pos.tickUpper, sqrtPriceX96,
   });
 
-  return {
+  const position = {
     version: 'v4',
     tokenId,
     poolId,
@@ -373,11 +953,13 @@ export async function loadV4Position(chainKey, tokenId, opts = {}) {
     status: amounts.status,
     collectable0: fees ? scale(Number(fees.fees0), m0.decimals) : null,
     collectable1: fees ? scale(Number(fees.fees1), m1.decimals) : null,
-    // v4 lifetime events are emitted by the PoolManager keyed by poolId+salt,
-    // not by tokenId, so the v3 one-query-per-position approach does not apply.
-    history: {
-      unavailable: 'v4 lifetime history is not implemented — v4 emits ModifyLiquidity '
-        + 'from the PoolManager keyed by poolId and salt, not per tokenId',
-    },
   };
+  try {
+    position.history = await v4History(rpc, chain, position, opts);
+  } catch (err) {
+    // Present state remains useful even when the strictly optional proof path
+    // fails. Never let a history provider take down the position card.
+    position.history = { unavailable: err.message || String(err) };
+  }
+  return position;
 }
