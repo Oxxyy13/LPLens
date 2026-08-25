@@ -13,6 +13,11 @@
 export const KEYS = {
   // '<sha256 hex>': { label: 'Dave', expires: '2026-09-02' },
   '31b6dcea491c6dae4db197a10c1459c9698e1bfec45b60f2123965fc9abcee9a': { label: 'tester-1', expires: '2026-09-02' },
+  '4da173b9c68092c107ed97299d649c48b7bdb9974d883398b2d4d4d830812f1e': { label: 'beta-001', expires: '2026-09-08' },
+  '23b082839352b5aa097efe8a89836b4f48d2bc0896f77ee597edbfa5add5fffb': { label: 'beta-002', expires: '2026-09-08' },
+  '21554fb69f9c37727db72020eef2ec2a51cd562ab106cb0c56a567d703d72587': { label: 'beta-003', expires: '2026-09-08' },
+  '0c73a6ebca20a8c12a053fc96a8b9d60e6a383f79b6446dca8c548278ca4603f': { label: 'beta-004', expires: '2026-09-08' },
+  '154091f4e547299cae430254259f6155717417657fd277e09a1e7a5d07af0795': { label: 'beta-005', expires: '2026-09-08' },
   'c7f3da3eecba8e2ba08e76125ba9bd5deb7f84d8f4d1c34a6c8682bc31258777': { label: 'cws-reviewer', expires: '2027-08-31' },
 };
 
