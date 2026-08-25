@@ -7,6 +7,7 @@ const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const worker = readFileSync(new URL('./licence-worker/worker.js', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+const optionsJs = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 
 // The implementation discovers list rows through semantic position links and
 // uses a short visible label. Every user-facing privacy surface must say so.
@@ -29,4 +30,10 @@ for (const [name, body] of [['options', options], ['README', readme], ['privacy 
     `${name} omits the local side-panel snapshot`);
 }
 assert.match(panel, /No wallet connection or page access/i);
+assert.match(options, /id="licenseKey"\s+type="password"/,
+  'the saved LPLens access key must be masked when Options opens');
+assert.match(options, /id="showLicense"/,
+  'Options has no deliberate access-key reveal control');
+assert.match(optionsJs, /showLicense\.checked \? 'text' : 'password'/,
+  'the access-key reveal control does not restore masking');
 console.log('privacy disclosure: optional overlay implementation and copy agree');

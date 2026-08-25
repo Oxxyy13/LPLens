@@ -235,6 +235,7 @@ details.saved[open] summary::before { transform: translateY(1px) rotate(90deg); 
 .check { display: flex; align-items: center; gap: 7px; color: var(--ink-3); cursor: pointer; font: 10.5px/1.3 var(--mono); letter-spacing: .025em; }
 .check input, .perm input { accent-color: var(--signal); }
 .check input { width: 15px; height: 15px; margin: 0; }
+.secret-toggle { flex: none; margin: 0; padding: 0 4px; white-space: nowrap; }
 .status { min-height: 16px; color: var(--ink-3); font-size: 11.5px;
   /* Status text now names unscanned and unreadable holdings, and error
      strings can carry a long unbroken URL. Neither may widen the popup. */

@@ -47,6 +47,8 @@ codes and random browser-installation identifiers plus aggregate request counts;
 it does not store wallet addresses, log filters, IP addresses or API responses.
 The relay necessarily processes each allowlisted log filter long enough to send
 it to Blockscout; v4 ownership filters can contain the public address being read.
+The saved access key is masked whenever Options opens and is revealed only when
+the user explicitly selects **show**.
 
 This is access control for a private beta, not a paywall. Everything LPLens
 computes, it computes locally on your machine. The hosted component supplies a

@@ -42,6 +42,13 @@ chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey'], (s) => 
   if (GATING_ENABLED && s.licenseKey) document.getElementById('licenseKey').value = s.licenseKey;
 });
 
+const showLicense = document.getElementById('showLicense');
+if (showLicense) {
+  showLicense.addEventListener('change', () => {
+    document.getElementById('licenseKey').type = showLicense.checked ? 'text' : 'password';
+  });
+}
+
 const showEtherscan = document.getElementById('showEtherscan');
 if (showEtherscan) {
   showEtherscan.addEventListener('change', () => {
