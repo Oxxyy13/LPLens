@@ -18,6 +18,7 @@ export const KEYS = {
   '0c73a6ebca20a8c12a053fc96a8b9d60e6a383f79b6446dca8c548278ca4603f': { label: 'beta-004', expires: '2026-09-08' },
   '154091f4e547299cae430254259f6155717417657fd277e09a1e7a5d07af0795': { label: 'beta-005', expires: '2026-09-08' },
   'c7f3da3eecba8e2ba08e76125ba9bd5deb7f84d8f4d1c34a6c8682bc31258777': { label: 'cws-reviewer', expires: '2027-08-31' },
+  '69448619e77f5ce22fbe0435871e8183a3b4f0ce341ae952e8c2db7c0f63e077': { label: 'owner-primary', expires: '2030-12-31' },
 };
 
 const GENERIC = 'This access key was not recognised.';
