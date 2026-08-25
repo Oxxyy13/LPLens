@@ -1,0 +1,77 @@
+/* The browser owns the side panel width. Keep the existing popup components,
+   but let this surface fill any user-selected panel size without horizontal
+   clipping. */
+html, body.sidepanel {
+  width: 100%;
+  min-width: 280px;
+  min-height: 100%;
+}
+
+body.sidepanel .pop-head {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+body.sidepanel .pop-body {
+  padding-bottom: 18px;
+}
+
+.snapshot-status {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font: 10.5px/1.4 var(--mono);
+}
+.snapshot-status[hidden] { display: none; }
+
+.filter-bar {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 1px;
+  scrollbar-width: thin;
+}
+.filter-bar[hidden] { display: none; }
+.filter-bar button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font: 9.5px/1 var(--mono);
+  letter-spacing: .03em;
+}
+.filter-bar button.active {
+  border-color: var(--signal);
+  background: var(--signal-soft);
+  color: var(--signal-strong);
+}
+
+body.sidepanel footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+}
+
+@media (max-width: 330px) {
+  body.sidepanel .pop-body { padding: 12px 10px 16px; }
+  body.sidepanel .pop-head { padding-inline: 10px; }
+  body.sidepanel .totals { grid-template-columns: 1fr; }
+  body.sidepanel .totals .tot-line + .tot-line {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+  body.sidepanel .scan-row { flex-direction: column; }
+}
+
+@media (min-width: 520px) {
+  body.sidepanel #results {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+  body.sidepanel #results > .totals {
+    grid-column: 1 / -1;
+  }
+}

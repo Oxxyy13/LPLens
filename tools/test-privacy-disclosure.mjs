@@ -6,6 +6,7 @@ const options = readFileSync(new URL('../extension/options.html', import.meta.ur
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const worker = readFileSync(new URL('./licence-worker/worker.js', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
+const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
 
 // The implementation discovers list rows through semantic position links and
 // uses a short visible label. Every user-facing privacy surface must say so.
@@ -23,4 +24,9 @@ for (const falseClaim of [
 ]) {
   assert.doesNotMatch(options + readme + worker, falseClaim);
 }
+for (const [name, body] of [['options', options], ['README', readme], ['privacy policy', worker]]) {
+  assert.match(body, /most recent(?:ly)? rendered portfolio view/i,
+    `${name} omits the local side-panel snapshot`);
+}
+assert.match(panel, /No wallet connection or page access/i);
 console.log('privacy disclosure: optional overlay implementation and copy agree');

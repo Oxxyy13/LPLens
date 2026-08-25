@@ -189,6 +189,12 @@ button:disabled, #go:disabled { cursor: default; opacity: .42; }
   color: #17120B;
 }
 .secondary-button { background: var(--panel); }
+.panel-button {
+  width: 100%;
+  min-height: 34px;
+  border-style: dashed;
+  color: var(--signal-strong);
+}
 .icon-button { display: grid; place-items: center; }
 
 .addr-row input[type="text"] { flex: 1 1 0%; width: auto; }

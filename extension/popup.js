@@ -9,9 +9,16 @@ import {
   shortAddr, walletName,
 } from './lib/wallets.js';
 import { summarizeAggregate } from './lib/aggregate.js';
+import {
+  readDashboardSnapshot, writeDashboardSnapshot, snapshotAge,
+} from './lib/dashboard-snapshot.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
+const SIDE_PANEL = document.body.dataset.surface === 'sidepanel';
+const snapshotStatusEl = $('snapshotStatus');
+const filterBar = $('filterBar');
+let activePositionFilter = 'all';
 
 // Shared renderer, loaded as a classic script by popup.html before this module.
 // The popup and the on-page overlay had drifted badly — every feature from 0.4
@@ -28,6 +35,80 @@ const usd = (n) =>
     : '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 let book = [];
+
+function setSnapshotStatus(text) {
+  if (!snapshotStatusEl) return;
+  snapshotStatusEl.textContent = text || '';
+  snapshotStatusEl.hidden = !text;
+}
+
+function filterTokens(p) {
+  const tokens = [];
+  if (p.status === 'in-range') tokens.push('in-range');
+  if (p.status === 'below' || p.status === 'above') tokens.push('out-of-range');
+  if (p.status === 'closed') tokens.push('closed');
+  const h = p.history || {};
+  const u = p.usd || {};
+  if (h.unavailable || u.returnUnavailable
+      || u.totalNow === null || u.totalNow === undefined) tokens.push('issues');
+  return tokens.join(' ');
+}
+
+function applyPositionFilter(next = activePositionFilter) {
+  activePositionFilter = next;
+  const cards = [...resultsEl.querySelectorAll('.position-card')];
+  for (const el of cards) {
+    const tokens = String(el.dataset.positionFilters || '').split(/\s+/).filter(Boolean);
+    el.hidden = next !== 'all' && !tokens.includes(next);
+  }
+  if (filterBar) {
+    filterBar.hidden = cards.length === 0;
+    for (const button of filterBar.querySelectorAll('[data-position-filter]')) {
+      const active = button.dataset.positionFilter === next;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    }
+  }
+}
+
+if (filterBar) {
+  filterBar.addEventListener('click', (event) => {
+    const button = event.target.closest && event.target.closest('[data-position-filter]');
+    if (!button) return;
+    applyPositionFilter(button.dataset.positionFilter || 'all');
+  });
+}
+
+const openPanelButton = $('openPanel');
+let currentWindowId = null;
+if (openPanelButton) {
+  if (!chrome.sidePanel || !chrome.sidePanel.open || !chrome.windows) {
+    openPanelButton.disabled = true;
+    openPanelButton.title = 'Portfolio panel requires Chrome 116 or newer';
+  } else {
+    chrome.windows.getCurrent().then((win) => {
+      currentWindowId = win && win.id;
+      if (!Number.isInteger(currentWindowId)) {
+        openPanelButton.disabled = true;
+        openPanelButton.title = 'Chrome did not provide the current window';
+      }
+    }).catch(() => {
+      openPanelButton.disabled = true;
+      openPanelButton.title = 'Chrome did not provide the current window';
+    });
+    openPanelButton.addEventListener('click', () => {
+      if (!Number.isInteger(currentWindowId)) {
+        statusEl.className = 'status error';
+        statusEl.textContent = 'The portfolio panel is not ready yet. Try again.';
+        return;
+      }
+      chrome.sidePanel.open({ windowId: currentWindowId }).catch((err) => {
+        statusEl.className = 'status error';
+        statusEl.textContent = 'Could not open the portfolio panel: ' + (err.message || err);
+      });
+    });
+  }
+}
 
 chrome.storage.local.get(['address', 'chain'], async (s) => {
   book = await loadBook();
@@ -184,6 +265,26 @@ function showGate(ent) {
   statusEl.className = 'status error';
   statusEl.textContent = ent.reason || gateHeadline(ent.state);
   resultsEl.innerHTML = paywall(ent);
+  setSnapshotStatus('');
+  applyPositionFilter('all');
+}
+
+async function restoreDashboard() {
+  if (!SIDE_PANEL) return;
+  const snapshot = await readDashboardSnapshot();
+  if (!snapshot) {
+    setSnapshotStatus('No saved portfolio view yet. Refresh one wallet or every saved wallet.');
+    return;
+  }
+  resultsEl.innerHTML = snapshot.html;
+  statusEl.className = 'status';
+  statusEl.textContent = snapshot.status;
+  $('includeClosed').checked = snapshot.includeClosed;
+  const scope = `${snapshot.wallets} wallet${snapshot.wallets === 1 ? '' : 's'} · `
+    + `${snapshot.positions} position${snapshot.positions === 1 ? '' : 's'}`;
+  const limited = snapshot.summaryOnly ? ' · summary only, refresh to load position cards' : '';
+  setSnapshotStatus(`Saved view · ${scope} · refreshed ${snapshotAge(snapshot.at)}${limited}`);
+  applyPositionFilter('all');
 }
 
 // First paint (popup.html) already has the address + Load disabled and
@@ -205,6 +306,7 @@ function showGate(ent) {
     statusEl.className = 'status';
     statusEl.textContent = '';
     resultsEl.innerHTML = '';
+    await restoreDashboard();
   } catch (err) {
     showGate({
       allowed: false,
@@ -226,6 +328,8 @@ async function startScan(owners, includeClosed) {
   statusEl.textContent =
     `Scanning ${owners.length} wallet${owners.length === 1 ? '' : 's'} × ${chainKeys.length} chains (${nJobs} jobs, 2 at a time)…`;
   resultsEl.innerHTML = '';
+  setSnapshotStatus(SIDE_PANEL ? 'Refreshing on-chain data…' : '');
+  applyPositionFilter(activePositionFilter);
   try {
     // Recheck on submit even though we already checked on open: a key can
     // expire (or be revoked) while the popup sits open. The second call is
@@ -241,16 +345,34 @@ async function startScan(owners, includeClosed) {
     }
     const settings = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
     const historyRelay = await historyRelayCredentials();
-    await runSweep(owners, Object.keys(CHAINS), {
+    const final = await runSweep(owners, Object.keys(CHAINS), {
       includeClosed,
       rpcOverrides: settings.rpcOverrides || {},
       etherscanKey: settings.etherscanKey || null,
       historyRelay,
       withUsd: true,
     });
+    const saved = !final.allFailed && await writeDashboardSnapshot({
+        html: resultsEl.innerHTML,
+        summaryHtml: totalsCard(final.positions),
+        status: final.text,
+        positions: final.positions.length,
+        wallets: owners.length,
+        includeClosed,
+      });
+    if (SIDE_PANEL) {
+      const scope = `${owners.length} wallet${owners.length === 1 ? '' : 's'} · `
+        + `${final.positions.length} position${final.positions.length === 1 ? '' : 's'}`;
+      setSnapshotStatus(final.allFailed
+        ? 'Refresh failed on every chain · saved view was not replaced'
+        : saved
+        ? `Current view · ${scope} · refreshed just now`
+        : `Current view · ${scope} · local snapshot could not be saved`);
+    }
   } catch (err) {
     statusEl.className = 'status error';
     statusEl.textContent = 'Failed: ' + (err.message || err);
+    if (SIDE_PANEL) setSnapshotStatus('Refresh failed · saved view was not replaced');
   } finally {
     if (!$('address').disabled) {
       $('go').disabled = false;
@@ -391,6 +513,8 @@ async function runSweep(owners, chainKeys, opts) {
     statusEl.textContent = snap.text;
     resultsEl.innerHTML = totalsCard(snap.positions)
       + snap.positions.map((p) => card(p, {})).join('');
+    applyPositionFilter();
+    return snap;
   };
   await loadSweep(owners, chainKeys, {
     ...opts,
@@ -404,7 +528,7 @@ async function runSweep(owners, chainKeys, opts) {
       paint();
     },
   });
-  paint();
+  return paint();
 }
 
 /**
@@ -447,7 +571,7 @@ function card(p, prices) {
   const statusClass = ({ 'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed' }[p.status]) || '';
 
   return `
-    <div class="card">
+    <div class="card position-card" data-position-filters="${filterTokens(p)}">
       <div class="card-top">
         <span class="pair">${esc(s0)} / ${esc(s1)}</span>
         <span class="fee">${(p.fee / 10000).toFixed(2)}%</span>

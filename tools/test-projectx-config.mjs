@@ -24,7 +24,7 @@ assert.deepEqual(Object.keys(CHAINS), [
 ]);
 
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
-assert.equal(manifest.version, '0.28.0');
+assert.equal(manifest.version, '0.29.0');
 assert.match(manifest.name, /Concentrated LP Position Reader/);
 assert.match(manifest.description, /ProjectX/);
 assert.ok(manifest.host_permissions.includes('https://rpc.hyperliquid.xyz/*'));

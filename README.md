@@ -26,9 +26,16 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.28.0 — invite-only beta release
+## Status: 0.29.0 candidate - persistent portfolio panel
 
-The extension is complete and in daily use, but access is currently gated:
+The Chrome Web Store currently serves 0.28.0. The 0.29.0 candidate adds a
+browser-managed portfolio side panel that can stay open while the user changes
+tabs. It restores the most recent rendered portfolio view immediately, then
+refreshes only when the user asks. The snapshot stays in
+`chrome.storage.local`, is never used as an input to calculations, and is
+bounded so a large portfolio cannot exhaust extension storage.
+
+Access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
 link on its own grants nothing. A key is validated against a Cloudflare Worker
 whose registry is `SHA-256 hash -> { label, expires }`. The same Worker provides
@@ -54,7 +61,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.28.0
+diff -r extension build/lplens-0.29.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -68,9 +75,10 @@ Two claims worth checking directly, because they are the ones that matter:
   `eth_call`, `eth_getLogs`, `eth_getBlockByNumber`,
   `eth_getTransactionReceipt` — four reads. There is no
   code path that can issue `eth_sendTransaction` or `personal_sign`.
-- **The permissions** are in `extension/manifest.json`: `storage` and
-  `scripting`, plus network access to a named list of RPC, price, explorer, and
-  LPLens service hosts. No
+- **The permissions** are in `extension/manifest.json`: `storage`, `scripting`,
+  and `sidePanel`, plus network access to a named list of RPC, price, explorer,
+  and LPLens service hosts. `sidePanel` provides the persistent portfolio
+  surface and does not grant access to browsing data or page content. No
   `tabs`, no `cookies`, no `webRequest`, no `<all_urls>`. Note that
   `app.uniswap.org` and `www.prjx.com` appear under
   `optional_host_permissions`, not `host_permissions` — LPLens ships with
@@ -118,6 +126,11 @@ Two claims worth checking directly, because they are the ones that matter:
   every card names its chain, and its wallet when several are saved
 - Saves multiple addresses locally with optional labels, and can total them.
   Saved addresses live in `chrome.storage.local` and never leave the machine
+- Opens a persistent browser side panel from the popup. It can show the last
+  portfolio view on any tab without reading that tab, filter cards by range or
+  data status, and refresh one saved wallet or the full local address book.
+  Refresh is manual so simply leaving the panel open does not consume provider
+  quota
 - **Uniswap v4** as well as v3. v4 needed four separate mechanisms: pools are
   addressed by `keccak256(abi.encode(PoolKey))` rather than existing as
   contracts (hence `lib/keccak.js`), the PositionManager is *not*
@@ -204,6 +217,7 @@ withheld.
    [the one real risk](#the-one-real-risk-never-load-unpacked-from-a-synced-or-shared-folder)
    first
 5. Pin LPLens, click it, paste an address, hit **Load positions**
+6. Choose **Open portfolio panel** to keep the saved overview beside any tab
 
 No build step, no `npm install`, no bundler. After editing any file, hit the
 refresh icon on the extension card.
@@ -291,9 +305,10 @@ options page at your own RPC to reduce direct RPC exposure. If a v4 NFT has
 later additions, its public transaction hashes are sent directly to that
 chain's public Blockscout trace endpoint; this is what makes the principal/fee
 split exact without sending wallet credentials or requesting a signature.
-Saved addresses are stored with
+Saved addresses and the most recently rendered portfolio view are stored with
 `chrome.storage.local`, deliberately **not** `chrome.storage.sync`, so they are
-never carried into a Google account.
+never carried into a Google account. The saved view is local display output,
+not accounting input, and is replaced after a successful refresh.
 
 ### The one real risk: never load unpacked from a synced or shared folder
 
@@ -422,6 +437,7 @@ applies to any unpacked extension, not just this one.
 extension/
   manifest.json      MV3, minimum permissions
   popup.*            UI
+  sidepanel.*        persistent, page-independent portfolio UI
   options.*          optional custom RPCs and Etherscan key, data disclosure
   render.js          shared renderer, used by both the popup and the overlay
   lib/chains.js      NFPM/factory/RPC per chain — no credentials, ever
@@ -435,6 +451,7 @@ extension/
   lib/histprice.js   USD at any block, from a reference pool's Swap events
   lib/logs.js        log retrieval; Etherscan V2, Blockscout, or eth_getLogs
   lib/cache.js       bounded persistent caches
+  lib/dashboard-snapshot.js  bounded last-rendered side-panel view
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync
   lib/aggregate.js   all-wallets totals, with explicit exclusion reporting
   lib/license.js     beta access gate

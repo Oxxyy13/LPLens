@@ -1,11 +1,13 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "116",
   "name": "LPLens \u2014 Concentrated LP Position Reader",
-  "version": "0.28.0",
+  "version": "0.29.0",
   "description": "Read-only Uniswap and ProjectX LP position inspector. Paste any address; nothing is signed and no wallet is connected.",
   "permissions": [
     "storage",
-    "scripting"
+    "scripting",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://eth.drpc.org/*",
@@ -39,6 +41,9 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "options_page": "options.html",
   "background": {

@@ -36,9 +36,11 @@ Neither script can access another extension's storage or wallet keys.
 ## Permissions and data flow
 
 The complete permission list is in `extension/manifest.json`. LPLens requests
-`storage` and `scripting`, plus named hosts used for public-chain RPC reads,
-public explorer history, token-price marks, and the LPLens access/history
-service. It does not request `tabs`, `cookies`, `webRequest`, or `<all_urls>`.
+`storage`, `scripting`, and `sidePanel`, plus named hosts used for public-chain
+RPC reads, public explorer history, token-price marks, and the LPLens
+access/history service. `sidePanel` provides a browser-managed extension page;
+it does not grant access to the active tab or its content. LPLens does not
+request `tabs`, `cookies`, `webRequest`, or `<all_urls>`.
 
 Addresses, contract filters, token IDs, and transaction hashes are public chain
 identifiers. Providers necessarily receive the identifiers needed for a query
@@ -55,10 +57,10 @@ digest. There is no bundler or minifier: the packaged extension tree must be
 byte-identical to `extension/`.
 
 ```bash
-git checkout v0.28.0
+git checkout v0.29.0
 node tools/check-repo-secrets.mjs
 node tools/package.mjs
-diff -r extension build/lplens-0.28.0
+diff -r extension build/lplens-0.29.0
 ```
 
 The final `diff` must print nothing. `tools/package.mjs` also parses every

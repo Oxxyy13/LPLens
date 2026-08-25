@@ -145,7 +145,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <p>We retain hashed installation records and per-licence daily request totals to operate the beta, diagnose sharing and protect the shared API allowance. These are operational counters, not advertising or behavioural analytics. Cloudflare, which hosts the Worker, processes the HTTPS requests.</p>
 
 <h2>What stays on your machine</h2>
-<p><code>chrome.storage.local</code> may hold: the last address and chain, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay layout preferences, and a cache of position event history. That data does not sync through LPLens servers. Clearing site data for the extension, or uninstalling it, removes it from the computer.</p>
+<p><code>chrome.storage.local</code> may hold: saved addresses, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay layout preferences, a cache of immutable position event history, and the most recent rendered portfolio view used by the browser side panel. That data does not sync through LPLens servers. Completed portfolio views are not sent to or stored by LPLens. Clearing site data for the extension, or uninstalling it, removes the local data from the computer.</p>
 
 <h2>What we do not do</h2>
 <ul>
