@@ -12,6 +12,9 @@ import { summarizeAggregate } from './lib/aggregate.js';
 import {
   readDashboardSnapshot, writeDashboardSnapshot, snapshotAge,
 } from './lib/dashboard-snapshot.js';
+import {
+  loadHiddenPositions, positionHideKey, setPositionHidden,
+} from './lib/hidden-positions.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
@@ -23,7 +26,10 @@ let activePositionFilter = 'all';
 // Shared renderer, loaded as a classic script by popup.html before this module.
 // The popup and the on-page overlay had drifted badly — every feature from 0.4
 // to 0.8 landed only in the overlay — so both now render through one copy.
-const { esc, fmt, ageText, priceText, hero, rangeBar, details, rebalanceLine, CSS_COMPONENTS } = globalThis.LPLens;
+const {
+  esc, fmt, ageText, priceText, priceOrientation, hero, rangeBar, details,
+  rebalanceLine, CSS_COMPONENTS,
+} = globalThis.LPLens;
 
 // The overlay renders inside a shadow root; the popup has none, so the shared
 // component styles are injected once here. Only the components — the overlay's
@@ -35,6 +41,16 @@ const usd = (n) =>
     : '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 let book = [];
+let hiddenPositionKeys = new Set();
+let latestPositions = [];
+let latestSweepText = '';
+
+const hiddenReady = loadHiddenPositions().then((keys) => {
+  hiddenPositionKeys = new Set(keys);
+  const count = $('hiddenCount');
+  if (count) count.textContent = String(hiddenPositionKeys.size);
+  applyPositionFilter();
+});
 
 function setSnapshotStatus(text) {
   if (!snapshotStatusEl) return;
@@ -57,18 +73,25 @@ function filterTokens(p) {
 function applyPositionFilter(next = activePositionFilter) {
   activePositionFilter = next;
   const cards = [...resultsEl.querySelectorAll('.position-card')];
+  const showHidden = !!($('showHidden') && $('showHidden').checked);
   for (const el of cards) {
     const tokens = String(el.dataset.positionFilters || '').split(/\s+/).filter(Boolean);
-    el.hidden = next !== 'all' && !tokens.includes(next);
+    const locallyHidden = el.dataset.hiddenPosition === 'true';
+    el.hidden = (locallyHidden && !showHidden)
+      || (next !== 'all' && !tokens.includes(next));
   }
   if (filterBar) {
-    filterBar.hidden = cards.length === 0;
+    filterBar.hidden = cards.every((el) => el.dataset.hiddenPosition === 'true' && !showHidden);
     for (const button of filterBar.querySelectorAll('[data-position-filter]')) {
       const active = button.dataset.positionFilter === next;
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
     }
   }
+}
+
+if ($('showHidden')) {
+  $('showHidden').addEventListener('change', () => applyPositionFilter());
 }
 
 if (filterBar) {
@@ -277,6 +300,7 @@ async function restoreDashboard() {
     return;
   }
   resultsEl.innerHTML = snapshot.html;
+  reconcileHiddenCards();
   statusEl.className = 'status';
   statusEl.textContent = snapshot.status;
   $('includeClosed').checked = snapshot.includeClosed;
@@ -306,6 +330,7 @@ async function restoreDashboard() {
     statusEl.className = 'status';
     statusEl.textContent = '';
     resultsEl.innerHTML = '';
+    await hiddenReady;
     await restoreDashboard();
   } catch (err) {
     showGate({
@@ -343,6 +368,7 @@ async function startScan(owners, includeClosed) {
     if (GATING_ENABLED && ent.state === 'trial') {
       statusEl.textContent = `Trial — ${ent.daysLeft} day${ent.daysLeft === 1 ? '' : 's'} left of ${TRIAL_LENGTH_DAYS} · reading chain…`;
     }
+    await hiddenReady;
     const settings = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
     const historyRelay = await historyRelayCredentials();
     const final = await runSweep(owners, Object.keys(CHAINS), {
@@ -469,6 +495,54 @@ function totalsCard(positions) {
   </div>`;
 }
 
+function updateHiddenCount() {
+  const count = $('hiddenCount');
+  if (!count) return;
+  const allCards = [...resultsEl.querySelectorAll('.position-card')];
+  const hiddenCards = allCards.filter((cardEl) => cardEl.dataset.hiddenPosition === 'true');
+  count.textContent = String(allCards.length ? hiddenCards.length : hiddenPositionKeys.size);
+}
+
+function paintPortfolio(positions) {
+  latestPositions = Array.isArray(positions) ? positions : [];
+  const visible = [];
+  const hidden = [];
+  for (const position of latestPositions) {
+    const key = positionHideKey(position);
+    (key && hiddenPositionKeys.has(key) ? hidden : visible).push(position);
+  }
+  resultsEl.innerHTML = totalsCard(visible)
+    + latestPositions.map((position) => {
+      const key = positionHideKey(position);
+      return card(position, {}, !!(key && hiddenPositionKeys.has(key)));
+    }).join('');
+  updateHiddenCount();
+  applyPositionFilter();
+  return { visible, hidden };
+}
+
+function hiddenStatus(text, total, visible, hidden) {
+  let next = String(text || '');
+  if (total) next = next.replace(`${total} shown`, `${visible} shown`);
+  if (hidden) next += ` · ${hidden} hidden locally`;
+  return next;
+}
+
+function reconcileHiddenCards() {
+  for (const cardEl of resultsEl.querySelectorAll('.position-card[data-position-key]')) {
+    const hidden = hiddenPositionKeys.has(String(cardEl.dataset.positionKey || '').toLowerCase());
+    cardEl.dataset.hiddenPosition = String(hidden);
+    const button = cardEl.querySelector('.hide-position');
+    if (button) {
+      button.textContent = hidden ? 'restore' : 'hide';
+      button.setAttribute('aria-label', `${hidden ? 'Restore' : 'Hide'} this position in this browser`);
+      button.title = `${hidden ? 'Restore' : 'Hide'} this position in local portfolio views`;
+    }
+  }
+  updateHiddenCount();
+  applyPositionFilter();
+}
+
 function sweepStatus(states, jobs) {
   const bits = [];
   const failed = [];
@@ -509,12 +583,20 @@ async function runSweep(owners, chainKeys, opts) {
   const states = {};
   const paint = () => {
     const snap = sweepStatus(states, jobs);
+    const shown = paintPortfolio(snap.positions);
+    const text = hiddenStatus(
+      snap.text, snap.positions.length, shown.visible.length, shown.hidden.length,
+    );
+    latestSweepText = snap.text;
     statusEl.className = snap.allFailed ? 'status error' : 'status';
-    statusEl.textContent = snap.text;
-    resultsEl.innerHTML = totalsCard(snap.positions)
-      + snap.positions.map((p) => card(p, {})).join('');
-    applyPositionFilter();
-    return snap;
+    statusEl.textContent = text;
+    return {
+      ...snap,
+      text,
+      positions: shown.visible,
+      allPositions: snap.positions,
+      hiddenPositions: shown.hidden,
+    };
   };
   await loadSweep(owners, chainKeys, {
     ...opts,
@@ -539,15 +621,19 @@ async function runSweep(owners, chainKeys, opts) {
  * which the overlay does not fetch. Unpriced legs render "unpriced" rather than
  * $0 — a missing mark must never look like a zero balance.
  */
-function card(p, prices) {
+function card(p, prices, locallyHidden = false) {
   const table = (p.chainKey && prices[p.chainKey] && typeof prices[p.chainKey] === 'object')
     ? prices[p.chainKey] : prices;
   const s0 = p.token0Meta.symbol, s1 = p.token1Meta.symbol;
   const p0 = table[p.token0.toLowerCase()], p1 = table[p.token1.toLowerCase()];
   const h = p.history || {};
   const u = p.usd;
-  const lo = Math.min(p.priceLower, p.priceUpper);
-  const hi = Math.max(p.priceLower, p.priceUpper);
+  const standardPrice = priceOrientation(p, h, s0, s1, false);
+  const inversePrice = priceOrientation(p, h, s0, s1, true);
+  const flippable = standardPrice.valid && inversePrice.valid;
+  const priceViews = (standard, inverse) => flippable
+    ? `<span data-price-view="standard">${standard}</span><span data-price-view="inverse">${inverse}</span>`
+    : standard;
 
   // Same restraint as the overlay: answer the question, then offer the rest.
   const value = u && u.totalNow !== null && u.totalNow !== undefined
@@ -559,27 +645,37 @@ function card(p, prices) {
     ? '$' + u.collectable.toLocaleString('en-US', { maximumFractionDigits: 2 })
     : `${fmt(p.collectable0)} ${esc(s0)} + ${fmt(p.collectable1)} ${esc(s1)}`;
 
-  const entry = h.entry
-    ? (h.entry.exact
-        ? fmt(h.entry.price, 8)
-        : `${esc(h.entry.bound)} ${fmt(h.entry.price, 8)}`)
+  const entryValue = (point) => point
+    ? (point.exact
+        ? fmt(point.price, 8)
+        : `${esc(point.bound)} ${fmt(point.price, 8)}`)
     : (h.unavailable ? '—' : '—');
-  const entryNote = h.entry && !h.entry.exact
-    ? (h.entry.bound === 'at or below' ? 'at least' : h.entry.bound === 'at or above' ? 'at most' : h.entry.bound)
-    : (h.entry ? 'solved from mint' : (h.unavailable ? 'unavailable' : ''));
+  const entryNoteValue = (point) => point && !point.exact
+    ? (point.bound === 'at or below' ? 'at least' : point.bound === 'at or above' ? 'at most' : point.bound)
+    : (point ? 'solved from mint' : (h.unavailable ? 'unavailable' : ''));
+  const entry = priceViews(entryValue(standardPrice.entry), entryValue(inversePrice.entry));
+  const entryNote = priceViews(entryNoteValue(standardPrice.entry), entryNoteValue(inversePrice.entry));
 
   const statusClass = ({ 'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed' }[p.status]) || '';
+  const hideKey = positionHideKey(p);
+  const statusText = priceViews(esc(standardPrice.status), esc(inversePrice.status));
+  const currentPrice = priceViews(fmt(standardPrice.now, 8), fmt(inversePrice.now, 8));
+  const rangePrice = priceViews(
+    `${fmt(standardPrice.lo, 8)} – ${fmt(standardPrice.hi, 8)}`,
+    `${fmt(inversePrice.lo, 8)} – ${fmt(inversePrice.hi, 8)}`,
+  );
 
   return `
-    <div class="card position-card" data-position-filters="${filterTokens(p)}">
+    <div class="card position-card" data-position-filters="${filterTokens(p)}"
+      data-position-key="${esc(hideKey || '')}" data-hidden-position="${locallyHidden ? 'true' : 'false'}">
       <div class="card-top">
         <span class="pair">${esc(s0)} / ${esc(s1)}</span>
         <span class="fee">${(p.fee / 10000).toFixed(2)}%</span>
         <span class="wallet-lbl">${esc(walletName(p))}</span>
         <span class="chain-lbl">${esc(chainLabel(p.chainKey))}</span>
-        <span class="pill ${statusClass}">${esc(p.status)}</span>
+        <span class="pill ${statusClass}">${statusText}</span>
       </div>
-      ${rangeBar(p, h)}
+      ${rangeBar(p, h, flippable)}
       ${hero(p, h, s1)}
       <div class="stats">
         <div class="stat">
@@ -589,24 +685,87 @@ function card(p, prices) {
         <div class="stat">
           <span class="stat-l">entry</span>
           <span class="stat-v muted">${entry}</span>
-          <span class="stat-n">${esc(entryNote)}</span>
+          <span class="stat-n">${entryNote}</span>
         </div>
       </div>
       ${rebalanceLine(p, h, s0, s1)}
-      <button class="more" data-more="${p.tokenId}">details</button>
+      <div class="card-actions">
+        <button class="more" data-more="${p.tokenId}">details</button>
+        ${hideKey ? `<button type="button" class="hide-position"
+          aria-label="${locallyHidden ? 'Restore' : 'Hide'} ${esc(s0)} / ${esc(s1)} in this browser"
+          title="${locallyHidden ? 'Restore' : 'Hide'} this position in local portfolio views">${locallyHidden ? 'restore' : 'hide'}</button>` : ''}
+      </div>
       <div class="extra">
         <div class="kv"><span>value</span><span class="num">${value}</span></div>
-        <div class="kv"><span>current price</span><span class="num">${fmt(p.price, 8)}</span></div>
-        <div class="kv"><span>range</span><span class="num">${fmt(lo, 8)} – ${fmt(hi, 8)}</span></div>
+        <div class="kv"><span>current price</span><span class="num">${currentPrice}</span></div>
+        <div class="kv"><span>range</span><span class="num">${rangePrice}</span></div>
         <div class="kv"><span>holds</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>
         <div class="meta">#${p.tokenId}${p.protocol || p.version ? ' · ' : ''}${p.protocol ? esc(p.protocol) + ' ' : ''}${p.version ? esc(p.version) : ''}</div>
-        ${details(p, h, s0, s1)}
+        ${details(p, h, s0, s1, flippable)}
       </div>
     </div>`;
 }
 
 // One handler for every card, added once rather than per render.
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
+  const hideButton = e.target.closest && e.target.closest('.hide-position');
+  if (hideButton) {
+    const cardEl = hideButton.closest('.position-card');
+    const key = String(cardEl && cardEl.dataset.positionKey || '').toLowerCase();
+    if (!key) return;
+    const hide = cardEl.dataset.hiddenPosition !== 'true';
+    hiddenPositionKeys = new Set(await setPositionHidden(key, hide));
+    updateHiddenCount();
+
+    if (latestPositions.length) {
+      const shown = paintPortfolio(latestPositions);
+      statusEl.textContent = hiddenStatus(
+        latestSweepText, latestPositions.length, shown.visible.length, shown.hidden.length,
+      );
+      const previous = await readDashboardSnapshot();
+      await writeDashboardSnapshot({
+        html: resultsEl.innerHTML,
+        summaryHtml: totalsCard(shown.visible),
+        status: statusEl.textContent,
+        positions: shown.visible.length,
+        wallets: previous && previous.wallets || 1,
+        includeClosed: $('includeClosed').checked,
+      });
+    } else {
+      cardEl.dataset.hiddenPosition = String(hide);
+      hideButton.textContent = hide ? 'restore' : 'hide';
+      hideButton.setAttribute('aria-label', `${hide ? 'Restore' : 'Hide'} this position in this browser`);
+      hideButton.title = `${hide ? 'Restore' : 'Hide'} this position in local portfolio views`;
+      const totals = resultsEl.querySelector('.totals');
+      if (totals) totals.remove();
+      applyPositionFilter();
+      const visibleCount = resultsEl.querySelectorAll('.position-card[data-hidden-position="false"]').length;
+      const previous = await readDashboardSnapshot();
+      statusEl.textContent = 'Hidden preference saved locally. Refresh to recalculate portfolio totals.';
+      setSnapshotStatus(statusEl.textContent);
+      await writeDashboardSnapshot({
+        html: resultsEl.innerHTML,
+        summaryHtml: '',
+        status: statusEl.textContent,
+        positions: visibleCount,
+        wallets: previous && previous.wallets || 1,
+        includeClosed: $('includeClosed').checked,
+      });
+    }
+    return;
+  }
+  const flip = e.target.closest && e.target.closest('.price-flip');
+  if (flip) {
+    const card = flip.closest('.position-card');
+    if (!card) return;
+    const inverted = card.classList.toggle('price-inverted');
+    for (const button of card.querySelectorAll('.price-flip')) {
+      button.setAttribute('aria-pressed', String(inverted));
+      const next = inverted ? button.dataset.priceStandard : button.dataset.priceInverse;
+      button.setAttribute('aria-label', `Show prices as ${next}`);
+    }
+    return;
+  }
   const btn = e.target.closest && e.target.closest('.more');
   if (!btn) return;
   const card = btn.closest('.card');

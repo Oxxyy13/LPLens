@@ -114,6 +114,17 @@
 }
 .stat-n { font-size: 10.5px; color: var(--ink-3); display: block; margin-top: 1px; }
 .unit { font-size: 10px; color: var(--ink-3); font-weight: 400; }
+[data-price-view="inverse"] { display: none; }
+.position-card.price-inverted [data-price-view="standard"] { display: none; }
+.position-card.price-inverted [data-price-view="inverse"] { display: revert; }
+.price-flip {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; margin: 7px 0 0; padding: 3px 6px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ink-3); cursor: pointer;
+  font: 10px/1.25 var(--mono); letter-spacing: .015em;
+}
+.price-flip:hover, .price-flip:focus-visible { background: var(--signal-soft); color: var(--signal-strong); }
+.price-flip-mark { color: var(--signal); font-size: 13px; }
 .hero, .herolbl, .heroval, .herosub { } /* kept as aliases for older call sites */
 .herolbl { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
   text-transform: uppercase; color: var(--ink-3); }
@@ -273,6 +284,47 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     return fmt(e.price, 8);
   }
 
+  const invertBound = (bound) => ({
+    'at or below': 'at or above',
+    'at or above': 'at or below',
+    'at most': 'at least',
+    'at least': 'at most',
+  }[bound] || bound);
+
+  function orientPoint(point, inverse = false) {
+    if (!point || !inverse) return point;
+    const price = Number(point.price);
+    if (!(price > 0) || !Number.isFinite(price)) return null;
+    return { ...point, price: 1 / price, bound: invertBound(point.bound) };
+  }
+
+  /**
+   * Price-display orientation only. Position arithmetic remains token1/token0;
+   * this view helper reciprocates every displayed price as one consistent set.
+   */
+  function priceOrientation(d, h, s0, s1, inverse = false) {
+    const rawLo = Math.min(d.priceLower, d.priceUpper);
+    const rawHi = Math.max(d.priceLower, d.priceUpper);
+    const closed = d.status === 'closed' && h && h.exit;
+    const rawNow = closed ? h.exit.price : d.price;
+    const valid = rawLo > 0 && rawHi > rawLo && Number.isFinite(rawLo)
+      && rawNow > 0 && Number.isFinite(rawNow);
+    const lo = valid ? (inverse ? 1 / rawHi : rawLo) : null;
+    const hi = valid ? (inverse ? 1 / rawLo : rawHi) : null;
+    const now = valid ? (inverse ? 1 / rawNow : rawNow) : null;
+    const base = inverse ? s1 : s0;
+    const quote = inverse ? s0 : s1;
+    const status = inverse
+      ? ({ below: 'above', above: 'below' }[d.status] || d.status)
+      : d.status;
+    return {
+      valid, lo, hi, now, base, quote, status,
+      unit: base && quote ? `${quote} per ${base}` : '',
+      entry: orientPoint(h && h.entry, inverse),
+      exit: orientPoint(h && h.exit, inverse),
+    };
+  }
+
   /**
    * The headline. vs-HODL was previously the second-to-last row of a dense table,
    * which buried the one number that answers "was this worth doing" underneath
@@ -300,11 +352,14 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     const hasTotal = u && u.pnl !== null && u.pnl !== undefined;
     const hasVsUsd = u && u.vsHodl !== null && u.vsHodl !== undefined;
     const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : 'muted');
+    const vsPct = v && Number.isFinite(v.pct)
+      ? `${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}% · fees minus IL`
+      : 'fees minus IL';
 
     const vsInner = h && h.unavailable
       ? ['muted', '—', 'lifetime history unavailable']
       : hasVsUsd
-        ? [cls(u.vsHodl), money(u.vsHodl, Math.abs(u.vsHodl) < 10 ? 2 : 2), 'fees minus IL']
+        ? [cls(u.vsHodl), money(u.vsHodl, Math.abs(u.vsHodl) < 10 ? 2 : 2), vsPct]
         : v
           ? [cls(v.pct), `${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}%`, 'fees minus IL']
           : ['muted', '—', 'no history'];
@@ -371,7 +426,29 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
    * Everything the headline leaves out, shown only when asked for.
    * Same numbers as before; they simply no longer compete with the answer.
    */
-  function details(d, h, s0, s1) {
+  function priceHistoryRows(d, h, s0, s1, inverse = false) {
+    const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+    const o = priceOrientation(d, h, s0, s1, inverse);
+    const closed = d.status === 'closed' && h.exit;
+    const drift = o.entry && o.now ? (o.now / o.entry.price - 1) * 100 : null;
+    const qual = o.entry && !o.entry.exact
+      ? (o.entry.bound === 'at or below' ? 'at least ' : 'at most ') : '';
+    const unit = `${esc(o.unit)}`;
+    const rows = [];
+    rows.push(`<div class="kv"><span>${h.adds > 1 ? 'first add price' : 'entry price'}</span><span class="num">${priceText(o.entry)}<br><span class="unit">${unit}</span></span></div>`);
+    if (h.adds > 1) rows.push(`<div class="kv"><span>liquidity additions</span><span class="num">${h.adds}</span></div>`);
+    if (o.exit) rows.push(`<div class="kv"><span>exit price</span><span class="num">${priceText(o.exit)}<br><span class="unit">${unit}</span></span></div>`);
+    if (drift !== null) {
+      const winner = drift < 0
+        ? `${esc(o.quote)} up ${(((1 / (1 + drift / 100)) - 1) * 100).toFixed(1)}% vs ${esc(o.base)}`
+        : `${esc(o.base)} up ${drift.toFixed(1)}% vs ${esc(o.quote)}`;
+      rows.push(`<div class="kv"><span>price ${closed ? 'entry to exit' : 'since entry'}</span><span class="num ${cls(drift)}">${esc(qual)}${drift > 0 ? '+' : ''}${drift.toFixed(2)}%<br><span class="unit">${unit}</span></span></div>`);
+      rows.push(`<div class="note" style="margin-top:2px">i.e. ${winner}</div>`);
+    }
+    return rows.join('');
+  }
+
+  function details(d, h, s0, s1, flippable = false) {
     const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
     const v = h && h.vsHodl;
     const u = d.usd;
@@ -413,27 +490,18 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     }
 
     if (h && !h.unavailable) {
-      const closed = d.status === 'closed' && h.exit;
-      const drift = h.entry ? ((closed ? h.exit.price : d.price) / h.entry.price - 1) * 100 : null;
-      const qual = h.entry && !h.entry.exact
-        ? (h.entry.bound === 'at or below' ? 'at least ' : 'at most ') : '';
       // Every price here is token1-per-token0, and printing it bare is
       // genuinely unreadable: on a WETH/HMM pool a *negative* move means HMM
       // got stronger, which reads as a loss. This was misread in testing
       // against a token that was up 59% while the panel showed −34%. So the
       // unit travels with the number, and the drift states which side won.
-      const unit = `${esc(s1)} per ${esc(s0)}`;
       rows.push('<div class="sep"></div>');
-      rows.push(`<div class="kv"><span>${h.adds > 1 ? 'first add price' : 'entry price'}</span><span class="num">${priceText(h.entry)}<br><span class="unit">${unit}</span></span></div>`);
-      if (h.adds > 1) rows.push(`<div class="kv"><span>liquidity additions</span><span class="num">${h.adds}</span></div>`);
-      if (h.exit) rows.push(`<div class="kv"><span>exit price</span><span class="num">${priceText(h.exit)}<br><span class="unit">${unit}</span></span></div>`);
-      if (drift !== null) {
-        // Same move, stated as the token that actually appreciated.
-        const winner = drift < 0
-          ? `${esc(s1)} up ${(((1 / (1 + drift / 100)) - 1) * 100).toFixed(1)}% vs ${esc(s0)}`
-          : `${esc(s0)} up ${drift.toFixed(1)}% vs ${esc(s1)}`;
-        rows.push(`<div class="kv"><span>price ${closed ? 'entry to exit' : 'since entry'}</span><span class="num ${cls(drift)}">${esc(qual)}${drift > 0 ? '+' : ''}${drift.toFixed(2)}%<br><span class="unit">${unit}</span></span></div>`);
-        rows.push(`<div class="note" style="margin-top:2px">i.e. ${winner}</div>`);
+      const standardPrices = priceHistoryRows(d, h, s0, s1, false);
+      if (flippable) {
+        rows.push(`<div data-price-view="standard">${standardPrices}</div>`);
+        rows.push(`<div data-price-view="inverse">${priceHistoryRows(d, h, s0, s1, true)}</div>`);
+      } else {
+        rows.push(standardPrices);
       }
       const priceGroups = d.status === 'closed' || !u ? [] : [
         u.tokenPriceChange,
@@ -484,16 +552,8 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     return rows.join('') + (caveats.length ? `<div class="note">${caveats.join(' ')}</div>` : '');
   }
 
-  function rangeBar(d, h) {
-    const lo = Math.min(d.priceLower, d.priceUpper);
-    const hi = Math.max(d.priceLower, d.priceUpper);
-    if (!(lo > 0 && hi > lo && Number.isFinite(lo) && Number.isFinite(hi))) return '';
-
-    const closed = d.status === 'closed' && h && h.exit;
-    const nowP = closed ? h.exit.price : d.price;
-    if (!(nowP > 0) || !Number.isFinite(nowP)) return '';
-
-    const lnLo = Math.log(lo), lnHi = Math.log(hi), lnNow = Math.log(nowP);
+  function rangeView(o) {
+    const lnLo = Math.log(o.lo), lnHi = Math.log(o.hi), lnNow = Math.log(o.now);
     const span = lnHi - lnLo;
     const pad = span * 0.45;
     let viewLo = lnLo - pad, viewHi = lnHi + pad;
@@ -502,25 +562,45 @@ button:hover { border-color: var(--line); background: var(--panel-2); color: var
     const view = viewHi - viewLo || 1;
     const pct = (ln) => ((ln - viewLo) / view) * 100;
     const bandL = pct(lnLo), bandR = pct(lnHi), nowPct = pct(lnNow);
-    const inRange = nowP >= lo && nowP <= hi;
-
-    const s0 = d.token0Meta && d.token0Meta.symbol;
-    const s1 = d.token1Meta && d.token1Meta.symbol;
-    const unit = (s0 && s1) ? `<span class="unit">${esc(s1)} per ${esc(s0)}</span>` : '';
-
-    return `<div class="meter">
-      <div class="track">
+    const inRange = o.now >= o.lo && o.now <= o.hi;
+    return `<div class="track">
         <div class="band ${inRange ? 'in' : 'out'}" style="left:${bandL.toFixed(2)}%;width:${(bandR - bandL).toFixed(2)}%"></div>
         <div class="now" style="left:${nowPct.toFixed(2)}%"></div>
       </div>
       <div class="ticks">
-        <span>${fmt(lo, 6)}</span>
-        <span>now ${fmt(nowP, 6)}</span>
-        <span>${fmt(hi, 6)}</span>
-      </div>
-      ${unit ? `<div class="ticks" style="justify-content:center">${unit}</div>` : ''}
+        <span>${fmt(o.lo, 6)}</span>
+        <span>now ${fmt(o.now, 6)}</span>
+        <span>${fmt(o.hi, 6)}</span>
+      </div>`;
+  }
+
+  function rangeBar(d, h, flippable = false) {
+    const s0 = d.token0Meta && d.token0Meta.symbol;
+    const s1 = d.token1Meta && d.token1Meta.symbol;
+    const standard = priceOrientation(d, h, s0, s1, false);
+    if (!standard.valid) return '';
+    if (!flippable) {
+      return `<div class="meter">${rangeView(standard)}
+        ${standard.unit ? `<div class="ticks" style="justify-content:center"><span class="unit">${esc(standard.unit)}</span></div>` : ''}
+      </div>`;
+    }
+
+    const inverse = priceOrientation(d, h, s0, s1, true);
+    return `<div class="meter">
+      <div data-price-view="standard">${rangeView(standard)}</div>
+      <div data-price-view="inverse">${rangeView(inverse)}</div>
+      <button type="button" class="price-flip" aria-pressed="false"
+        aria-label="Show prices as ${esc(inverse.unit)}"
+        data-price-standard="${esc(standard.unit)}" data-price-inverse="${esc(inverse.unit)}">
+        <span data-price-view="standard">${esc(standard.unit)}</span>
+        <span data-price-view="inverse">${esc(inverse.unit)}</span>
+        <span class="price-flip-mark" aria-hidden="true">⇄</span>
+      </button>
     </div>`;
   }
 
-  globalThis.LPLens = { CSS, CSS_PANEL, CSS_COMPONENTS, details, rebalanceLine, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar };
+  globalThis.LPLens = {
+    CSS, CSS_PANEL, CSS_COMPONENTS, details, rebalanceLine, esc, fmt,
+    humanSpan, ageText, priceText, priceOrientation, hero, rangeBar,
+  };
 })();

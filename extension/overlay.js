@@ -633,7 +633,11 @@ async function syncList() {
           type: 'LPLENS_POSITION', chain: row.chain, tokenId: row.tokenId,
           version: row.version,
         });
-        row.data = res && res.ok ? res.data : { error: (res && res.error) || 'no response' };
+        if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+          row.data = { error: res.entitlement.reason || 'LPLens access is required; check Options.' };
+        } else {
+          row.data = res && res.ok ? res.data : { error: (res && res.error) || 'no response' };
+        }
       } catch (err) {
         if (isOrphanError(err)) return shutdownOrphan('list');
         row.data = { error: err.message || String(err) };

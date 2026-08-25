@@ -33,7 +33,11 @@ browser-managed portfolio side panel that can stay open while the user changes
 tabs. It restores the most recent rendered portfolio view immediately, then
 refreshes only when the user asks. The snapshot stays in
 `chrome.storage.local`, is never used as an input to calculations, and is
-bounded so a large portfolio cannot exhaust extension storage.
+bounded so a large portfolio cannot exhaust extension storage. Each position's
+price unit can be flipped without changing its accounting, and `vs holding`
+shows both dollars and percentage when available. Unwanted or unsolicited LP
+NFTs can be hidden locally from the side panel; hidden cards are excluded from
+portfolio counts and totals and can be restored at any time.
 
 Access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -130,9 +134,13 @@ Two claims worth checking directly, because they are the ones that matter:
   Saved addresses live in `chrome.storage.local` and never leave the machine
 - Opens a persistent browser side panel from the popup. It can show the last
   portfolio view on any tab without reading that tab, filter cards by range or
-  data status, and refresh one saved wallet or the full local address book.
-  Refresh is manual so simply leaving the panel open does not consume provider
-  quota
+  data status, flip every displayed position price into either token direction,
+  hide or restore unwanted LP NFTs locally, and refresh one saved wallet or the
+  full local address book. Hidden cards do not contribute to portfolio counts
+  or totals. Refresh is manual so simply leaving the panel open does not consume
+  provider quota
+- Shows `vs holding` in both dollars and percentage when history is available,
+  including ProjectX positions
 - **Uniswap v4** as well as v3. v4 needed four separate mechanisms: pools are
   addressed by `keccak256(abi.encode(PoolKey))` rather than existing as
   contracts (hence `lib/keccak.js`), the PositionManager is *not*

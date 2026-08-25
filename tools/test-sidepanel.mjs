@@ -20,6 +20,7 @@ assert.match(panel, /data-surface="sidepanel"/);
 assert.match(panel, /data-position-filter="in-range"/);
 assert.match(panel, /data-position-filter="out-of-range"/);
 assert.match(panel, /data-position-filter="issues"/);
+assert.match(panel, /id="showHidden"/);
 assert.match(controller, /chrome\.sidePanel\.open\(\{ windowId: currentWindowId \}\)/);
 
 assert.equal(snapshotAge(1_000_000, 1_030_000), 'just now');

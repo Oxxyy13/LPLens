@@ -277,6 +277,16 @@ details.saved[open] summary::before { transform: translateY(1px) rotate(90deg); 
 }
 .more::after { content: "  ↓"; color: var(--signal); }
 .showmore .more::after { content: "  ↑"; }
+.card-actions { display: flex; align-items: stretch; gap: 7px; margin: 8px 11px 10px; }
+.card-actions .more { flex: 1 1 auto; width: auto; margin: 0; }
+.hide-position {
+  flex: 0 0 auto; min-height: 32px; padding: 6px 9px; border: 1px solid var(--line);
+  border-radius: 8px; background: transparent; color: var(--ink-3);
+  font: 10px/1 var(--mono); box-shadow: none;
+}
+.hide-position:hover { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+body:not(.sidepanel) .hide-position { display: none; }
+.position-card[data-hidden-position="true"] { opacity: .62; border-style: dashed; }
 .extra { display: none; padding: 4px 0 9px; border-top: 1px solid var(--line); }
 .showmore .extra { display: block; }
 

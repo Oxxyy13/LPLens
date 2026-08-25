@@ -23,6 +23,8 @@ assert.match(worker, /chrome\.scripting\.updateContentScripts\(\[definition\]\)/
 // send it to the same version-aware service-worker path used by detail pages.
 assert.match(overlay, /version:\s*m\[1\]\.toLowerCase\(\)/);
 assert.match(overlay, /version:\s*row\.version/);
+assert.match(overlay, /res\.gated\s*&&\s*res\.entitlement/,
+  'list cards must render access-gate replies instead of saying no response');
 assert.doesNotMatch(overlay, /if\s*\(\s*row\.v4\s*\|\|/,
   'v4 list rows are still being skipped');
 
