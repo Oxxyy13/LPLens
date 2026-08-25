@@ -10,6 +10,7 @@ const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', i
 const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
 const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 'utf8');
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
+const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
 
 assert.equal(manifest.version, '0.29.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
@@ -21,7 +22,13 @@ assert.match(panel, /data-position-filter="in-range"/);
 assert.match(panel, /data-position-filter="out-of-range"/);
 assert.match(panel, /data-position-filter="issues"/);
 assert.match(panel, /id="showHidden"/);
+assert.match(panel, /id="scanDetails"/);
+assert.match(panel, /id="scanDetailsBody"/);
 assert.match(controller, /chrome\.sidePanel\.open\(\{ windowId: currentWindowId \}\)/);
+assert.match(controller, /function legacyScanPresentation/);
+assert.match(controller, /refresh to enable card controls/);
+assert.match(controller, /details:\s*bits\.join\('\\n'\)/);
+assert.match(panelCss, /body\.sidepanel \.hide-position\s*\{\s*display:\s*block/);
 
 assert.equal(snapshotAge(1_000_000, 1_030_000), 'just now');
 assert.equal(snapshotAge(1_000_000, 1_420_000), '7m ago');
@@ -31,6 +38,8 @@ assert.equal(await writeDashboardSnapshot({
   html: '<div class="position-card">one</div>',
   summaryHtml: '<div class="totals">summary</div>',
   status: 'complete',
+  details: 'Ethereum: 1\nBase: nothing',
+  issues: 0,
   positions: 1,
   wallets: 1,
   includeClosed: false,
@@ -39,6 +48,8 @@ let snapshot = await readDashboardSnapshot();
 assert.equal(snapshot.html, '<div class="position-card">one</div>');
 assert.equal(snapshot.summaryOnly, false);
 assert.equal(snapshot.positions, 1);
+assert.equal(snapshot.details, 'Ethereum: 1\nBase: nothing');
+assert.equal(snapshot.issues, 0);
 
 assert.equal(await writeDashboardSnapshot({
   html: 'x'.repeat(MAX_SNAPSHOT_HTML + 1),

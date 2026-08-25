@@ -14,6 +14,7 @@
 
 export const DASHBOARD_SNAPSHOT_KEY = 'dashboardSnapshotV1';
 export const MAX_SNAPSHOT_HTML = 1_500_000;
+export const MAX_SNAPSHOT_DETAILS = 100_000;
 
 const memory = {};
 const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
@@ -28,6 +29,8 @@ function clean(raw) {
     at: raw.at,
     html: raw.html,
     status: raw.status,
+    details: typeof raw.details === 'string' ? raw.details.slice(0, MAX_SNAPSHOT_DETAILS) : '',
+    issues: Number.isInteger(raw.issues) && raw.issues >= 0 ? raw.issues : 0,
     positions: Number.isInteger(raw.positions) && raw.positions >= 0 ? raw.positions : 0,
     wallets: Number.isInteger(raw.wallets) && raw.wallets >= 0 ? raw.wallets : 0,
     includeClosed: !!raw.includeClosed,
@@ -54,6 +57,8 @@ export async function writeDashboardSnapshot(snapshot) {
     at: Date.now(),
     html: summaryOnly ? summary : full,
     status: String(snapshot.status || ''),
+    details: String(snapshot.details || '').slice(0, MAX_SNAPSHOT_DETAILS),
+    issues: Number(snapshot.issues) || 0,
     positions: Number(snapshot.positions) || 0,
     wallets: Number(snapshot.wallets) || 0,
     includeClosed: !!snapshot.includeClosed,

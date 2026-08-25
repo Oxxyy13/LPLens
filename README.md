@@ -37,7 +37,9 @@ bounded so a large portfolio cannot exhaust extension storage. Each position's
 price unit can be flipped without changing its accounting, and `vs holding`
 shows both dollars and percentage when available. Unwanted or unsolicited LP
 NFTs can be hidden locally from the side panel; hidden cards are excluded from
-portfolio counts and totals and can be restored at any time.
+portfolio counts and totals and can be restored at any time. Multi-wallet scan
+progress stays compact, while per-wallet and per-chain outcomes remain available
+under an expandable `Scan details` control.
 
 Access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -138,7 +140,8 @@ Two claims worth checking directly, because they are the ones that matter:
   hide or restore unwanted LP NFTs locally, and refresh one saved wallet or the
   full local address book. Hidden cards do not contribute to portfolio counts
   or totals. Refresh is manual so simply leaving the panel open does not consume
-  provider quota
+  provider quota. The headline scan status stays short; complete chain outcomes
+  and provider failures are kept in an expandable details section
 - Shows `vs holding` in both dollars and percentage when history is available,
   including ProjectX positions
 - **Uniswap v4** as well as v3. v4 needed four separate mechanisms: pools are

@@ -20,6 +20,9 @@ const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
 const SIDE_PANEL = document.body.dataset.surface === 'sidepanel';
 const snapshotStatusEl = $('snapshotStatus');
+const scanDetailsEl = $('scanDetails');
+const scanDetailsSummaryEl = $('scanDetailsSummary');
+const scanDetailsBodyEl = $('scanDetailsBody');
 const filterBar = $('filterBar');
 let activePositionFilter = 'all';
 
@@ -44,6 +47,9 @@ let book = [];
 let hiddenPositionKeys = new Set();
 let latestPositions = [];
 let latestSweepText = '';
+let latestSweepSummary = '';
+let latestSweepDetails = '';
+let latestSweepIssues = 0;
 
 const hiddenReady = loadHiddenPositions().then((keys) => {
   hiddenPositionKeys = new Set(keys);
@@ -56,6 +62,39 @@ function setSnapshotStatus(text) {
   if (!snapshotStatusEl) return;
   snapshotStatusEl.textContent = text || '';
   snapshotStatusEl.hidden = !text;
+}
+
+function clearScanDetails() {
+  if (!scanDetailsEl) return;
+  scanDetailsEl.hidden = true;
+  scanDetailsEl.open = false;
+  scanDetailsBodyEl.textContent = '';
+}
+
+function presentScanStatus(summary, detail = '', issues = 0) {
+  statusEl.textContent = summary || '';
+  if (!SIDE_PANEL || !scanDetailsEl) return;
+  const body = String(detail || '').trim();
+  scanDetailsBodyEl.textContent = body;
+  scanDetailsSummaryEl.textContent = issues
+    ? `Scan details (${issues} issue${issues === 1 ? '' : 's'})`
+    : 'Scan details';
+  scanDetailsEl.hidden = !body;
+  if (!body) scanDetailsEl.open = false;
+}
+
+function legacyScanPresentation(text) {
+  const full = String(text || '').trim();
+  const match = /^(\d+)\/(\d+)(?: · (\d+) in flight)?(?: · (\d+) shown)?/.exec(full);
+  if (!match) return { summary: full, details: '', issues: 0 };
+  const failures = (full.match(/ failed:/g) || []).length;
+  const incomplete = (full.match(/\([^)]*(?:unreadable|beyond scan limit)[^)]*\)/g) || []).length;
+  const issues = failures + incomplete;
+  const parts = [`${match[1]}/${match[2]} scans`];
+  if (match[3]) parts.push(`${match[3]} reading`);
+  if (match[4]) parts.push(`${match[4]} positions`);
+  if (issues) parts.push(`${issues} issue${issues === 1 ? '' : 's'}`);
+  return { summary: parts.join(' · '), details: full, issues };
 }
 
 function filterTokens(p) {
@@ -287,6 +326,7 @@ function showGate(ent) {
   setFormInteractive(false);
   statusEl.className = 'status error';
   statusEl.textContent = ent.reason || gateHeadline(ent.state);
+  clearScanDetails();
   resultsEl.innerHTML = paywall(ent);
   setSnapshotStatus('');
   applyPositionFilter('all');
@@ -302,12 +342,18 @@ async function restoreDashboard() {
   resultsEl.innerHTML = snapshot.html;
   reconcileHiddenCards();
   statusEl.className = 'status';
-  statusEl.textContent = snapshot.status;
+  const presentation = snapshot.details
+    ? { summary: snapshot.status, details: snapshot.details, issues: snapshot.issues }
+    : legacyScanPresentation(snapshot.status);
+  presentScanStatus(presentation.summary, presentation.details, presentation.issues);
   $('includeClosed').checked = snapshot.includeClosed;
   const scope = `${snapshot.wallets} wallet${snapshot.wallets === 1 ? '' : 's'} · `
     + `${snapshot.positions} position${snapshot.positions === 1 ? '' : 's'}`;
   const limited = snapshot.summaryOnly ? ' · summary only, refresh to load position cards' : '';
-  setSnapshotStatus(`Saved view · ${scope} · refreshed ${snapshotAge(snapshot.at)}${limited}`);
+  const cards = [...resultsEl.querySelectorAll('.position-card')];
+  const legacy = cards.length > 0 && !cards.some((cardEl) => cardEl.dataset.positionKey);
+  const controls = legacy ? ' · refresh to enable card controls' : '';
+  setSnapshotStatus(`Saved view · ${scope} · refreshed ${snapshotAge(snapshot.at)}${limited}${controls}`);
   applyPositionFilter('all');
 }
 
@@ -329,6 +375,7 @@ async function restoreDashboard() {
     setFormInteractive(true);
     statusEl.className = 'status';
     statusEl.textContent = '';
+    clearScanDetails();
     resultsEl.innerHTML = '';
     await hiddenReady;
     await restoreDashboard();
@@ -352,6 +399,7 @@ async function startScan(owners, includeClosed) {
   const nJobs = owners.length * chainKeys.length;
   statusEl.textContent =
     `Scanning ${owners.length} wallet${owners.length === 1 ? '' : 's'} × ${chainKeys.length} chains (${nJobs} jobs, 2 at a time)…`;
+  clearScanDetails();
   resultsEl.innerHTML = '';
   setSnapshotStatus(SIDE_PANEL ? 'Refreshing on-chain data…' : '');
   applyPositionFilter(activePositionFilter);
@@ -379,13 +427,15 @@ async function startScan(owners, includeClosed) {
       withUsd: true,
     });
     const saved = !final.allFailed && await writeDashboardSnapshot({
-        html: resultsEl.innerHTML,
-        summaryHtml: totalsCard(final.positions),
-        status: final.text,
-        positions: final.positions.length,
-        wallets: owners.length,
-        includeClosed,
-      });
+      html: resultsEl.innerHTML,
+      summaryHtml: totalsCard(final.positions),
+      status: final.summary,
+      details: final.details,
+      issues: final.issueCount,
+      positions: final.positions.length,
+      wallets: owners.length,
+      includeClosed,
+    });
     if (SIDE_PANEL) {
       const scope = `${owners.length} wallet${owners.length === 1 ? '' : 's'} · `
         + `${final.positions.length} position${final.positions.length === 1 ? '' : 's'}`;
@@ -398,6 +448,7 @@ async function startScan(owners, includeClosed) {
   } catch (err) {
     statusEl.className = 'status error';
     statusEl.textContent = 'Failed: ' + (err.message || err);
+    clearScanDetails();
     if (SIDE_PANEL) setSnapshotStatus('Refresh failed · saved view was not replaced');
   } finally {
     if (!$('address').disabled) {
@@ -485,6 +536,16 @@ function jobOutcome(job, s) {
   return gaps.length ? `${base} (${gaps.join(', ')})` : base;
 }
 
+function jobHasIssue(s) {
+  if (!s || s.phase === 'start') return false;
+  if (s.ok === false) return true;
+  const r = s.result || {};
+  if (r.count > (r.attempted ?? r.scanned)) return true;
+  if (r.enumUnreadable || r.positionUnreadable) return true;
+  const v4 = r.v4;
+  return !!(v4 && (v4.unavailable || v4.unreadable));
+}
+
 function totalsCard(positions) {
   const a = summarizeAggregate(positions);
   if (!a.n) return '';
@@ -523,7 +584,10 @@ function paintPortfolio(positions) {
 
 function hiddenStatus(text, total, visible, hidden) {
   let next = String(text || '');
-  if (total) next = next.replace(`${total} shown`, `${visible} shown`);
+  if (total) {
+    next = next.replace(`${total} shown`, `${visible} shown`);
+    next = next.replace(`${total} positions`, `${visible} positions`);
+  }
   if (hidden) next += ` · ${hidden} hidden locally`;
   return next;
 }
@@ -549,9 +613,11 @@ function sweepStatus(states, jobs) {
   const positions = [];
   let done = 0;
   let inflight = 0;
+  let issueCount = 0;
   for (const job of jobs) {
     const s = states[jobKey(job)];
     bits.push(jobOutcome(job, s));
+    if (jobHasIssue(s)) issueCount++;
     if (!s || s.phase === 'start') inflight++;
     else if (s.ok === false) {
       done++;
@@ -568,8 +634,21 @@ function sweepStatus(states, jobs) {
     head.push('No Uniswap v3 position NFTs held');
   }
   const line = [...head, ...bits].join(' · ');
+  const summary = [`${done}/${jobs.length} scans`];
+  if (inflight) summary.push(`${inflight} reading`);
+  if (positions.length) summary.push(`${positions.length} positions`);
+  else if (done === jobs.length && !failed.length) summary.push('no open positions');
+  if (issueCount) summary.push(`${issueCount} issue${issueCount === 1 ? '' : 's'}`);
   const allFailed = done === jobs.length && failed.length === jobs.length;
-  return { text: line, failed: failed.length > 0, allFailed, positions };
+  return {
+    text: line,
+    summary: summary.join(' · '),
+    details: bits.join('\n'),
+    issueCount,
+    failed: failed.length > 0,
+    allFailed,
+    positions,
+  };
 }
 
 async function runSweep(owners, chainKeys, opts) {
@@ -587,12 +666,20 @@ async function runSweep(owners, chainKeys, opts) {
     const text = hiddenStatus(
       snap.text, snap.positions.length, shown.visible.length, shown.hidden.length,
     );
+    const summary = hiddenStatus(
+      snap.summary, snap.positions.length, shown.visible.length, shown.hidden.length,
+    );
     latestSweepText = snap.text;
+    latestSweepSummary = snap.summary;
+    latestSweepDetails = snap.details;
+    latestSweepIssues = snap.issueCount;
     statusEl.className = snap.allFailed ? 'status error' : 'status';
-    statusEl.textContent = text;
+    if (SIDE_PANEL) presentScanStatus(summary, snap.details, snap.issueCount);
+    else statusEl.textContent = text;
     return {
       ...snap,
       text,
+      summary,
       positions: shown.visible,
       allPositions: snap.positions,
       hiddenPositions: shown.hidden,
@@ -719,14 +806,21 @@ document.addEventListener('click', async (e) => {
 
     if (latestPositions.length) {
       const shown = paintPortfolio(latestPositions);
-      statusEl.textContent = hiddenStatus(
+      const text = hiddenStatus(
         latestSweepText, latestPositions.length, shown.visible.length, shown.hidden.length,
       );
+      const summary = hiddenStatus(
+        latestSweepSummary, latestPositions.length, shown.visible.length, shown.hidden.length,
+      );
+      if (SIDE_PANEL) presentScanStatus(summary, latestSweepDetails, latestSweepIssues);
+      else statusEl.textContent = text;
       const previous = await readDashboardSnapshot();
       await writeDashboardSnapshot({
         html: resultsEl.innerHTML,
         summaryHtml: totalsCard(shown.visible),
-        status: statusEl.textContent,
+        status: summary,
+        details: latestSweepDetails,
+        issues: latestSweepIssues,
         positions: shown.visible.length,
         wallets: previous && previous.wallets || 1,
         includeClosed: $('includeClosed').checked,
@@ -742,11 +836,14 @@ document.addEventListener('click', async (e) => {
       const visibleCount = resultsEl.querySelectorAll('.position-card[data-hidden-position="false"]').length;
       const previous = await readDashboardSnapshot();
       statusEl.textContent = 'Hidden preference saved locally. Refresh to recalculate portfolio totals.';
+      clearScanDetails();
       setSnapshotStatus(statusEl.textContent);
       await writeDashboardSnapshot({
         html: resultsEl.innerHTML,
         summaryHtml: '',
         status: statusEl.textContent,
+        details: '',
+        issues: 0,
         positions: visibleCount,
         wallets: previous && previous.wallets || 1,
         includeClosed: $('includeClosed').checked,

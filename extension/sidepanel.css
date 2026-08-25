@@ -27,6 +27,34 @@ body.sidepanel .pop-body {
 }
 .snapshot-status[hidden] { display: none; }
 
+.scan-details {
+  margin: -2px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--ink-2);
+}
+.scan-details[hidden] { display: none; }
+.scan-details summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font: 10.5px/1.25 var(--mono);
+}
+.scan-details-body {
+  max-height: 240px;
+  overflow: auto;
+  padding: 0 10px 10px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  color: var(--ink-3);
+  font: 10px/1.5 var(--mono);
+}
+
+/* The shared popup stylesheet hides these controls outside the side panel.
+   Keep the side-panel rule explicit so cached selector order cannot suppress it. */
+body.sidepanel .hide-position { display: block; }
+
 .filter-bar {
   display: flex;
   gap: 6px;
