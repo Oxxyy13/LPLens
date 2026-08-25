@@ -12,7 +12,6 @@
 
 export const KEYS = {
   // '<sha256 hex>': { label: 'Dave', expires: '2026-09-02' },
-  '31b6dcea491c6dae4db197a10c1459c9698e1bfec45b60f2123965fc9abcee9a': { label: 'tester-1', expires: '2026-09-02' },
   '4da173b9c68092c107ed97299d649c48b7bdb9974d883398b2d4d4d830812f1e': { label: 'beta-001', expires: '2026-09-08' },
   '23b082839352b5aa097efe8a89836b4f48d2bc0896f77ee597edbfa5add5fffb': { label: 'beta-002', expires: '2026-09-08' },
   '21554fb69f9c37727db72020eef2ec2a51cd562ab106cb0c56a567d703d72587': { label: 'beta-003', expires: '2026-09-08' },
