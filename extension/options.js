@@ -129,11 +129,11 @@ async function paintPermissions() {
   if (granted) pageRows.push(`<li class="yes"><b>app.uniswap.org position pages</b> — can read and add
     to the positions list and individual position pages only.</li>`);
   if (projectxGranted) pageRows.push(`<li class="yes"><b>www.prjx.com/portfolio</b> — can add the
-    ProjectX panel. It uses the last address loaded in LPLens and does not read
+    ProjectX panel. It uses the active overlay wallet selected in LPLens and does not read
     the connected wallet or ProjectX page content.</li>`);
   if (dexscreenerGranted) pageRows.push(`<li class="yes"><b>dexscreener.com pair pages</b> - can read
     the chain and pool identifier in the URL and append a matching-position panel.
-    It uses the last address loaded in LPLens and reads no Dexscreener page content.</li>`);
+    It uses the active overlay wallet selected in LPLens and reads no Dexscreener page content.</li>`);
   const pageAccess = pageRows.length ? pageRows.join('')
     : `<li class="no"><b>No web page at all.</b> All overlays are off, so no
          content script is registered anywhere.</li>`;

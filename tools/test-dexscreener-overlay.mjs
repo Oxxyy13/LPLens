@@ -29,6 +29,7 @@ assert.match(options, /id="dexscreenerOverlayPerm"/);
 for (const [name, body] of [['Options', options], ['README', readme], ['privacy policy', privacy]]) {
   assert.match(body, /dexscreener\.com/i, `${name} omits the optional Dexscreener scope`);
   assert.match(body, /chain and pool identifier/i, `${name} omits the URL-only routing boundary`);
-  assert.match(body, /last address/i, `${name} omits the last-LPLens-address behavior`);
+  assert.match(body, /active overlay wallet|active wallet/i,
+    `${name} omits the explicit active-wallet behavior`);
 }
-console.log('Dexscreener overlay: optional permission, URL-only route and local-address dispatch pass');
+console.log('Dexscreener overlay: optional permission, URL-only route and active-wallet dispatch pass');

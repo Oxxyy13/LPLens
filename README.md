@@ -288,11 +288,13 @@ understanding rather than skimming:
   the position-page URL; on the positions list it reads semantic position links
   and the first line of visible row text to discover and label positions. On
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
-  the panel uses only the last address explicitly loaded in LPLens. On
-  Dexscreener it reads only the chain and pool identifier in the pair-page URL,
-  then checks the last address loaded in LPLens for a matching position. It
+  the panel uses only the active overlay wallet explicitly selected in LPLens.
+  On Dexscreener it reads only the chain and pool identifier in the pair-page
+  URL, then checks that same active wallet for a matching position. It
   reads no Dexscreener text, chart state, connected-wallet state, or provider
-  object. It never
+  object. The popup and side panel always name the active overlay wallet;
+  clicking a saved wallet selects it immediately, and scanning every saved
+  wallet does not change that selection. It never
   reads balances, forms, connected-wallet state, wallet-provider objects, or
   signing prompts. Its only page write is adding its own closed-shadow-root
   panel; it never moves or rewrites anything either site rendered.

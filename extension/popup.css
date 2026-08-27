@@ -199,6 +199,35 @@ button:disabled, #go:disabled { cursor: default; opacity: .42; }
 
 .addr-row input[type="text"] { flex: 1 1 0%; width: auto; }
 #addWallet { flex: none; width: 40px; padding: 0; font-size: 20px; line-height: 1; }
+.active-wallet {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  margin-top: -4px;
+  padding: 6px 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--good) 30%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--good-soft) 45%, var(--panel));
+  color: var(--good);
+  font: 9.5px/1.35 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.active-wallet::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 0 3px var(--good-soft);
+}
+.active-wallet.pending { border-color: var(--signal); background: var(--signal-soft); color: var(--signal-strong); }
+.active-wallet.pending::before { background: var(--signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal-soft) 70%, transparent); }
+.active-wallet.empty { border-color: var(--line); background: var(--panel-2); color: var(--ink-3); }
+.active-wallet.empty::before { background: var(--ink-3); box-shadow: none; }
 .scan-row { margin-top: 1px; }
 .scan-row button { flex: 1 1 0; min-width: 0; }
 
@@ -229,6 +258,12 @@ details.saved[open] summary::before { transform: translateY(1px) rotate(90deg); 
 .saved-row:last-child { margin-bottom: 0; }
 .saved-row .saved-label { flex: 1 1 0%; width: auto; padding: 7px 8px; text-overflow: ellipsis; }
 .saved-row .saved-load { flex: none; min-height: 34px; padding: 6px 8px; font: 500 10.5px/1 var(--mono); }
+.saved-row.active .saved-load {
+  border-color: var(--good);
+  background: var(--good-soft);
+  color: var(--good);
+}
+.saved-row.active .saved-load::before { content: "✓ "; font-family: var(--ui); font-weight: 800; }
 .saved-row .saved-remove { flex: none; width: 32px; min-height: 34px; padding: 0; color: var(--ink-3); font-size: 16px; }
 .saved-row .saved-remove:hover:not(:disabled) { border-color: var(--warn); background: var(--warn-soft); color: var(--warn); }
 

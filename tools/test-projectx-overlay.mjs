@@ -38,10 +38,10 @@ assert.match(options, /id="projectxOverlayPerm"/);
 
 for (const [name, body] of [['options', options], ['README', readme], ['privacy policy', privacy]]) {
   assert.match(body, /www\.prjx\.com\/portfolio/i, `${name} omits the ProjectX page scope`);
-  assert.match(body, /last address|last-loaded-address/i,
-    `${name} omits the last-LPLens-address behavior`);
+  assert.match(body, /active overlay wallet|active wallet/i,
+    `${name} omits the explicit active-wallet behavior`);
   assert.match(body, /does not read ProjectX page content|ProjectX[^.]{0,100}reads no page content/i,
     `${name} omits the ProjectX page-content boundary`);
 }
 
-console.log('ProjectX overlay: optional permission, local address and portfolio dispatch pass');
+console.log('ProjectX overlay: optional permission, explicit active wallet and portfolio dispatch pass');

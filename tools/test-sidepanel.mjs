@@ -22,6 +22,8 @@ assert.match(panel, /data-position-filter="in-range"/);
 assert.match(panel, /data-position-filter="out-of-range"/);
 assert.match(panel, /data-position-filter="issues"/);
 assert.match(panel, /id="showHidden"/);
+assert.match(panel, /id="activeWallet"/);
+assert.match(popup, /id="activeWallet"/);
 assert.match(panel, /id="scanDetails"/);
 assert.match(panel, /id="scanDetailsBody"/);
 assert.match(panel, /id="copyDiagnostics"/);
@@ -30,6 +32,25 @@ assert.match(controller, /chrome\.sidePanel\.open\(\{ windowId: currentWindowId 
 assert.match(controller, /function legacyScanPresentation/);
 assert.match(controller, /refresh to enable card controls/);
 assert.match(controller, /details:\s*bits\.join\('\\n'\)/);
+assert.match(controller, /async function setActiveAddress/);
+assert.match(controller, /if \(selectOverlayWallet\) await setActiveAddress\(owners\[0\]\.address\)/,
+  'only an explicit one-wallet load may select the overlay wallet');
+assert.match(controller, /\{ selectOverlayWallet: true \}/,
+  'the one-wallet form must explicitly request overlay selection');
+assert.doesNotMatch(controller, /owners\.length === 1.*setActiveAddress/,
+  'Scan all with one saved wallet must not change the overlay wallet');
+assert.match(controller, /await setActiveAddress\(addr\)/,
+  'clicking a saved wallet must select it immediately');
+assert.doesNotMatch(controller, /address:\s*owners\.length === 1/,
+  'multi-wallet refresh must not silently rewrite the active wallet');
+assert.match(controller, /chrome\.storage\.onChanged\.addListener/,
+  'open popup and side-panel surfaces must follow active-wallet changes');
+assert.match(controller, /book = dedupeBook\(changes\.wallets\.newValue \|\| \[\]\)/,
+  'open popup and side-panel address books must stay in sync');
+assert.match(controller, /activeAddressRevision === startupAddressRevision/,
+  'a slower startup must not overwrite a newer active-wallet event');
+assert.match(controller, /It remains the overlay wallet/,
+  'removing a saved row must not silently replace the active wallet');
 assert.match(panelCss, /body\.sidepanel \.hide-position\s*\{\s*display:\s*block/);
 
 assert.equal(snapshotAge(1_000_000, 1_030_000), 'just now');

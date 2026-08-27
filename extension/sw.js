@@ -134,8 +134,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // Dexscreener pair pages expose a chain slug and pool identifier in the URL.
 // The content script passes only those two route values. As with ProjectX, the
-// address comes exclusively from the last explicit LPLens load, never from the
-// page or a connected wallet.
+// address comes exclusively from the active overlay-wallet selection in
+// LPLens, never from the page or a connected wallet.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== 'LPLENS_DEXSCREENER_POOL') return false;
 
@@ -154,7 +154,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     ]);
     const address = String(store.address || '').trim().toLowerCase();
     if (!/^0x[0-9a-f]{40}$/.test(address)) {
-      return { ok: false, error: 'Open LPLens and load an address first.' };
+      return { ok: false, error: 'Open LPLens and select an overlay wallet first.' };
     }
 
     const allPositions = await cachedDexscreenerPositions(chainKey, address, store);
@@ -175,9 +175,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ProjectX does not expose position NFT ids in stable portfolio links. Its
-// overlay therefore scans only the last address the user explicitly loaded in
-// LPLens; it never reads ProjectX's connected wallet or accepts an address from
-// page content.
+// overlay therefore scans only the active overlay wallet the user explicitly
+// selected in LPLens; it never reads ProjectX's connected wallet or accepts an
+// address from page content.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== 'LPLENS_PROJECTX_PORTFOLIO') return false;
 
@@ -190,7 +190,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     ]);
     const address = String(store.address || '').trim().toLowerCase();
     if (!/^0x[0-9a-f]{40}$/.test(address)) {
-      return { ok: false, error: 'Open LPLens and load an address first.' };
+      return { ok: false, error: 'Open LPLens and select an overlay wallet first.' };
     }
 
     await slot();

@@ -513,8 +513,8 @@ function portfolioCard(position) {
  * ProjectX renders its position actions inline and does not put NFT ids in
  * stable semantic links. Reading the connected wallet would violate LPLens's
  * no-wallet boundary, so this panel instead asks the service worker for the
- * last address the user explicitly loaded in LPLens. No ProjectX page content
- * is needed or sent anywhere.
+ * active overlay wallet explicitly selected in LPLens. No ProjectX page
+ * content is needed or sent anywhere.
  */
 let projectxBusy = false;
 let projectxPending = false;
@@ -529,7 +529,7 @@ async function syncProjectXPortfolio() {
   lastKey = key;
   teardownList();
   render(head('<span class="pill">ProjectX</span>') +
-    '<div class="bd"><div class="note">Reading the last address loaded in LPLens…</div></div>', true);
+    '<div class="bd"><div class="note">Reading the active wallet selected in LPLens…</div></div>', true);
 
   try {
     if (!contextAlive()) return shutdownOrphan();
@@ -561,9 +561,9 @@ async function syncProjectXPortfolio() {
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
     const content = positions.length
       ? positions.map(portfolioCard).join('')
-      : '<div class="note">No open ProjectX positions found for this address.</div>';
+      : '<div class="note">No open ProjectX positions found for the active wallet.</div>';
     render(head(`<span class="pill">ProjectX · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Last LPLens address: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
       ${content}
     </div>`, true);
   } finally {
@@ -613,7 +613,7 @@ async function syncDexscreener() {
   const generation = dexscreenerGeneration;
   teardownList();
   render(head('<span class="pill">Dexscreener</span>')
-    + '<div class="bd"><div class="note">Checking the last address loaded in LPLens for this pool…</div></div>');
+    + '<div class="bd"><div class="note">Checking the active wallet selected in LPLens for this pool…</div></div>');
 
   try {
     if (!contextAlive()) return shutdownOrphan();
@@ -649,9 +649,9 @@ async function syncDexscreener() {
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
     const content = positions.length
       ? positions.map(portfolioCard).join('')
-      : '<div class="note">No open matching position for the last address loaded in LPLens.</div>';
+      : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
     render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">LPLens address: <span class="num">${esc(short)}</span>. Dexscreener page content and wallet data are not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. Dexscreener page content and wallet data are not read.</div>
       ${content}
     </div>`);
   } finally {
@@ -927,8 +927,8 @@ window.addEventListener('popstate', () => {
   setTimeout(sync, 50);
 });
 
-// If the user loads another address in the popup while ProjectX is open, the
-// panel follows that explicit choice without reading the site's wallet state.
+// If the user selects another active wallet in the popup or side panel, the
+// overlay follows that explicit choice without reading the site's wallet state.
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.address
