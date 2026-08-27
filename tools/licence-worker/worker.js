@@ -106,7 +106,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>LPLens privacy policy</h1>
-<p class="meta">Effective 21 August 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
+<p class="meta">Effective 27 August 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
 <p>LPLens is a read-only Chrome extension that inspects Uniswap v3/v4 and ProjectX concentrated-liquidity positions for an Ethereum-style address you paste. It never connects a wallet, never asks for a signature, and never sees a private key.</p>
 <p>This policy uses the Chrome Web Store data-category names so the store listing and this page say the same things.</p>
 
@@ -121,9 +121,9 @@ const PRIVACY_HTML = `<!DOCTYPE html>
   <dt>Web history</dt>
   <dd>Only if you independently turn on an optional overlay: the extension reads whether you opened the Uniswap positions list or an individual position page (<code>app.uniswap.org/positions</code> and its position-detail paths), or the ProjectX portfolio page (<code>www.prjx.com/portfolio</code>). Each site permission is off until you grant it in options. We do not collect browsing history for any other site, and we do not store or transmit your Uniswap or ProjectX browsing history.</dd>
   <dt>Website content</dt>
-  <dd>On an individual Uniswap position page, the overlay uses the URL. On the Uniswap positions list, it reads position links whose paths identify v3 or v4 positions and the first line of visible row text so it can discover positions, label its panels, and place each panel beside the matching row. This page-derived label stays in the tab and is not sent to LPLens or a third party. ProjectX does not expose stable position-NFT links, so its overlay does not read ProjectX page content or the connected wallet; it displays the HyperEVM positions for the last address you explicitly loaded in LPLens. Neither overlay reads balances, form fields, wallet-provider state, or signing prompts; neither alters site content, and each only appends its own panel. Position amounts and history are loaded from public chain data through the extension’s background worker, not scraped from the page.</dd>
+  <dd>On an individual Uniswap position page, the overlay uses the URL. On the Uniswap positions list, it reads position links whose paths identify v3 or v4 positions and the first line of visible row text so it can discover positions, label its panels, and place each panel beside the matching row. This page-derived label stays in the tab and is not sent to LPLens or a third party. ProjectX does not expose stable position-NFT links, so its overlay does not read ProjectX page content or the connected wallet; it displays the HyperEVM positions for the ProjectX wallet you explicitly select in LPLens. Neither overlay reads balances, form fields, wallet-provider state, or signing prompts; neither alters site content, and each only appends its own panel. Position amounts and history are loaded from public chain data through the extension’s background worker, not scraped from the page.</dd>
   <dt>User activity</dt>
-  <dd>The chain you select and the address you look up are stored locally so you do not have to retype them. We do not run behavioural analytics or advertising. The limited operational installation and request counters are described below.</dd>
+  <dd>The wallet addresses you save or select are stored locally so you do not have to retype them. We do not run behavioural analytics or advertising. The limited operational installation and request counters are described below.</dd>
   <dt>Health information</dt>
   <dd>Not collected.</dd>
   <dt>Personal communications</dt>
@@ -146,7 +146,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <p>We retain hashed installation records and per-licence daily request totals to operate the beta, diagnose sharing and protect the shared API allowance. These are operational counters, not advertising or behavioural analytics. Cloudflare, which hosts the Worker, processes the HTTPS requests.</p>
 
 <h2>What stays on your machine</h2>
-<p><code>chrome.storage.local</code> may hold: the last address and chain, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay layout preferences, and a cache of position event history. That data does not sync through LPLens servers. Clearing site data for the extension, or uninstalling it, removes it from the computer.</p>
+<p><code>chrome.storage.local</code> may hold: saved wallet addresses, the active ProjectX wallet address, a legacy chain setting, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay layout preferences, and a cache of position event history. That data does not sync through LPLens servers. Clearing site data for the extension, or uninstalling it, removes it from the computer.</p>
 
 <h2>What we do not do</h2>
 <ul>
@@ -156,7 +156,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </ul>
 
 <h2>Optional on-page overlays</h2>
-<p>Access to <code>app.uniswap.org</code> and <code>www.prjx.com</code> is separately optional and off at install. Before Chrome asks for either permission, options explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show a last-loaded-address panel only on the ProjectX portfolio. Revoking either permission unregisters only that site's content script immediately.</p>
+<p>Access to <code>app.uniswap.org</code> and <code>www.prjx.com</code> is separately optional and off at install. Before Chrome asks for either permission, options explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show the explicitly selected ProjectX wallet only on the ProjectX portfolio. Revoking either permission unregisters only that site's content script immediately.</p>
 
 <h2>Limited Use</h2>
 <p>Data listed above is used only to provide LPLens’s single purpose: showing Uniswap and ProjectX concentrated-liquidity positions and lifetime figures for an address you choose, controlling beta access and protecting the shared history allowance. It is not used or transferred for advertising, credit, or unrelated profiling. Transfers to RPC providers, DexScreener, Etherscan, Blockscout, and this Worker happen only as needed for that purpose, or as required by law.</p>

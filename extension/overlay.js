@@ -502,18 +502,23 @@ function portfolioCard(position) {
  * ProjectX renders its position actions inline and does not put NFT ids in
  * stable semantic links. Reading the connected wallet would violate LPLens's
  * no-wallet boundary, so this panel instead asks the service worker for the
- * last address the user explicitly loaded in LPLens. No ProjectX page content
- * is needed or sent anywhere.
+ * ProjectX wallet the user explicitly selected in LPLens. No ProjectX page
+ * content is needed or sent anywhere.
  */
 let projectxBusy = false;
+let projectxPending = false;
 async function syncProjectXPortfolio() {
   const key = 'projectx:portfolio';
-  if (projectxBusy || lastKey === key) return;
+  if (projectxBusy) {
+    projectxPending = true;
+    return;
+  }
+  if (lastKey === key) return;
   projectxBusy = true;
   lastKey = key;
   teardownList();
   render(head('<span class="pill">ProjectX</span>') +
-    '<div class="bd"><div class="note">Reading the last address loaded in LPLens…</div></div>', true);
+    '<div class="bd"><div class="note">Reading the ProjectX wallet selected in LPLens…</div></div>', true);
 
   try {
     if (!contextAlive()) return shutdownOrphan();
@@ -547,11 +552,16 @@ async function syncProjectXPortfolio() {
       ? positions.map(portfolioCard).join('')
       : '<div class="note">No open ProjectX positions found for this address.</div>';
     render(head(`<span class="pill">ProjectX · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Last LPLens address: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
+      <div class="note">Selected LPLens wallet: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
       ${content}
     </div>`, true);
   } finally {
     projectxBusy = false;
+    if (projectxPending) {
+      projectxPending = false;
+      lastKey = null;
+      void syncProjectXPortfolio();
+    }
   }
 }
 
@@ -811,8 +821,8 @@ window.addEventListener('popstate', () => {
   setTimeout(sync, 50);
 });
 
-// If the user loads another address in the popup while ProjectX is open, the
-// panel follows that explicit choice without reading the site's wallet state.
+// If the user selects another ProjectX wallet in the popup while ProjectX is
+// open, the panel follows that choice without reading the site's wallet state.
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.address || !PROJECTX_ROUTE.test(location.pathname)) return;

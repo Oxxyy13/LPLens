@@ -26,7 +26,7 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.28.0 — invite-only beta release
+## Status: 0.28.1: invite-only beta hotfix
 
 The extension is complete and in daily use, but access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -54,7 +54,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.28.0
+diff -r extension build/lplens-0.28.1
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -250,7 +250,10 @@ understanding rather than skimming:
   the position-page URL; on the positions list it reads semantic position links
   and the first line of visible row text to discover and label positions. On
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
-  the panel uses only the last address explicitly loaded in LPLens. It never
+  the panel uses only the ProjectX wallet explicitly selected in LPLens. The
+  popup always names that wallet, and clicking a saved wallet selects it
+  immediately. **Scan all** refreshes the portfolio without changing the
+  ProjectX selection. It never
   reads balances, forms, connected-wallet state, wallet-provider objects, or
   signing prompts. Its only page write is adding its own closed-shadow-root
   panel; it never moves or rewrites anything either site rendered.
