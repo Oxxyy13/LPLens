@@ -10,6 +10,11 @@ const experiment = worker.match(
 assert.ok(experiment, 'service worker is missing the fenced local chart experiment');
 
 const context = vm.createContext({ URL });
+context.innerWidth = 1200;
+context.innerHeight = 800;
+context.getComputedStyle = (node) => node.__style || ({
+  display: 'block', visibility: 'visible', opacity: '1',
+});
 vm.runInContext(`${experiment[1]}
 globalThis.__bridge = {
   sanitizeDexscreenerChartRequest,
@@ -70,50 +75,108 @@ assert.equal(sanitize({
 }, { tab: { id: 17, url: 'https://example.com/robinhood/0x2b0d0183d017c58b924401ca8ac362f6e01f0e9e' } }).reason,
 'invalid-request');
 
-const titleNode = (title) => ({ getAttribute: (name) => name === 'title' ? title : null });
+const titleNode = (input) => {
+  const spec = typeof input === 'string' ? { title: input } : input;
+  const rect = spec.rect || { left: 10, top: 10, width: 24, height: 24 };
+  return {
+    isConnected: spec.connected !== false,
+    __style: {
+      display: spec.display || 'block',
+      visibility: spec.visibility || 'visible',
+      opacity: spec.opacity ?? '1',
+      contentVisibility: spec.contentVisibility || 'visible',
+    },
+    checkVisibility: () => spec.checkVisible !== false,
+    getClientRects: () => spec.clientRects === false ? [] : [rect],
+    getBoundingClientRect: () => rect,
+    getAttribute: (name) => name === 'title' ? spec.title : null,
+  };
+};
 function installChart({
   pageHref = href,
   chartTitle = 'Switch to market cap chart',
   unitTitle = 'Switch to price in WETH',
+  topTitles = [],
+  frameTitles = null,
   scaleMode = 0,
+  inverted = false,
   frameCount = 1,
+  frameSpecs = null,
+  elementsFromPoint = null,
+  plotRects = null,
+  priceToCoordinate = (price) => 200 - price * 10,
 } = {}) {
-  const privateScale = { priceToCoordinate: (price) => 200 - price * 10 };
-  const chart = {
-    getPanes: () => [{
-      getMainSourcePriceScale: () => ({
-        getMode: () => scaleMode,
-        _priceScale: privateScale,
-      }),
-    }],
-  };
-  const plot = {
-    getBoundingClientRect: () => ({ left: 20, top: 40, width: 800, height: 400 }),
-  };
-  const frameDocument = {
-    querySelectorAll: (selector) => selector === '[title]' ? [] : [],
-    querySelector: (selector) => selector === '.chart-markup-table.pane' ? plot : null,
-  };
-  const makeFrame = () => ({
-    contentWindow: {
-      innerWidth: 1000,
-      innerHeight: 500,
+  const defaultPlotRects = plotRects || [{ left: 20, top: 40, width: 800, height: 400 }];
+  const specs = frameSpecs || Array.from({ length: frameCount }, () => ({}));
+  const makeFrame = (spec = {}) => {
+    const privateScale = {
+      priceToCoordinate: spec.priceToCoordinate || priceToCoordinate,
+    };
+    const chart = {
+      getPanes: () => [{
+        getMainSourcePriceScale: () => ({
+          getMode: () => scaleMode,
+          isInverted: () => inverted,
+          _priceScale: privateScale,
+        }),
+      }],
+    };
+    const plots = (spec.plotRects || defaultPlotRects).map((input) => {
+      const plotSpec = input && input.rect ? input : { rect: input };
+      const rect = plotSpec.rect;
+      return {
+        isConnected: plotSpec.connected !== false,
+        __style: {
+          display: plotSpec.display || 'block',
+          visibility: plotSpec.visibility || 'visible',
+          opacity: plotSpec.opacity ?? '1',
+          contentVisibility: plotSpec.contentVisibility || 'visible',
+        },
+        checkVisibility: () => plotSpec.checkVisible !== false,
+        getClientRects: () => plotSpec.clientRects === false ? [] : [rect],
+        getBoundingClientRect: () => rect,
+      };
+    });
+    const defaultFrameTitles = [chartTitle,
+      ...(Array.isArray(unitTitle) ? unitTitle : [unitTitle])];
+    const frameTitleNodes = (frameTitles || defaultFrameTitles).map(titleNode);
+    const frameDocument = {
+      querySelectorAll: (selector) => selector === '[title]' ? frameTitleNodes
+        : selector === '.chart-markup-table.pane' ? plots : [],
+      querySelector: (selector) => selector === '.chart-markup-table.pane' ? plots[0] : null,
+    };
+    const frameWindow = {
+      innerWidth: spec.innerWidth || 1000,
+      innerHeight: spec.innerHeight || 500,
       tradingViewApi: { activeChart: () => chart },
-    },
-    contentDocument: frameDocument,
-    getBoundingClientRect: () => ({ left: 100, top: 50, width: 500, height: 250 }),
-  });
-  const frames = Array.from({ length: frameCount }, makeFrame);
+      getComputedStyle: (node) => node.__style,
+    };
+    return {
+      isConnected: spec.connected !== false,
+      checkVisibility: () => spec.checkVisible !== false,
+      __style: {
+        display: spec.display || 'block',
+        visibility: spec.visibility || 'visible',
+        opacity: spec.opacity ?? '1',
+      },
+      contentWindow: frameWindow,
+      contentDocument: frameDocument,
+      getBoundingClientRect: () => spec.rect
+        || ({ left: 100, top: 50, width: 500, height: 250 }),
+    };
+  };
+  const frames = specs.map(makeFrame);
+  const topTitleNodes = topTitles.map(titleNode);
   context.location = { href: pageHref };
   context.document = {
     querySelectorAll: (selector) => {
       if (selector === 'iframe[title="Financial Chart"]') return frames;
-      if (selector === '[title]') return [
-        titleNode(chartTitle),
-        ...(Array.isArray(unitTitle) ? unitTitle : [unitTitle]).map(titleNode),
-      ];
+      if (selector === '[title]') return topTitleNodes;
       return [];
     },
+    ...(elementsFromPoint ? {
+      elementsFromPoint: (x, y) => elementsFromPoint(x, y, frames),
+    } : {}),
   };
 }
 
@@ -127,13 +190,16 @@ assert.deepEqual(measured, {
   ok: true,
   href,
   displayMode: 'price-usd',
+  inverted: false,
   plot: { left: 110, top: 70, width: 400, height: 200 },
   ranges: [{
     id: 'r0', loY: 160, hiY: 140, nowY: 150,
     loValue: 2, hiValue: 6, nowValue: 4,
   }],
 }, 'MAIN measurement must return top-page viewport coordinates');
-assert.deepEqual(Object.keys(measured).sort(), ['displayMode', 'href', 'ok', 'plot', 'ranges']);
+assert.deepEqual(Object.keys(measured).sort(), [
+  'displayMode', 'href', 'inverted', 'ok', 'plot', 'ranges',
+]);
 assert.deepEqual(Object.keys(measured.plot).sort(), ['height', 'left', 'top', 'width']);
 assert.deepEqual(Object.keys(measured.ranges[0]).sort(), [
   'hiValue', 'hiY', 'id', 'loValue', 'loY', 'nowValue', 'nowY',
@@ -159,19 +225,110 @@ assert.equal(measure({
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
   pair: {},
 }).reason, 'unsupported-chart-mode', 'contradictory unit controls must fail closed');
+installChart({ frameTitles: [
+  'Switch to market cap chart',
+  'Switch to USD price',
+  { title: 'Switch to price in WETH', display: 'none' },
+] });
+const nativeWithStaleControl = plain(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}));
+assert.equal(nativeWithStaleControl.displayMode, 'price-native',
+  'a hidden stale USD-mode control must not break native quote mode');
+assert.deepEqual(nativeWithStaleControl.ranges.map(({ loValue, nowValue, hiValue }) =>
+  ({ loValue, nowValue, hiValue })), [{ loValue: 1, nowValue: 2, hiValue: 3 }],
+'native quote mode must retain exact on-chain values');
+installChart({ frameTitles: [
+  'Switch to market cap chart',
+  'Switch to price in WETH',
+  { title: 'Switch to USD price', visibility: 'hidden' },
+] });
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 10 },
+}).displayMode, 'price-usd', 'a hidden stale native-mode control must not break USD mode');
+installChart({ frameTitles: [
+  'Switch to market cap chart',
+  { title: 'Switch to price chart', opacity: '0' },
+  'Switch to USD price',
+] });
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}).displayMode, 'price-native', 'a hidden stale chart-kind control must be ignored');
+for (const [label, hidden] of [
+  ['ancestor visibility', { checkVisible: false }],
+  ['client rectangles', { clientRects: false }],
+  ['document connection', { connected: false }],
+  ['content visibility', { contentVisibility: 'hidden' }],
+  ['viewport intersection', { rect: { left: 1300, top: 10, width: 24, height: 24 } }],
+]) {
+  installChart({ frameTitles: [
+    'Switch to market cap chart',
+    'Switch to USD price',
+    { title: 'Switch to price in WETH', ...hidden },
+  ] });
+  assert.equal(measure({
+    href,
+    ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+    pair: {},
+  }).displayMode, 'price-native', `${label} must hide a stale mode control`);
+}
+installChart({
+  frameTitles: [],
+  topTitles: [
+    'Switch to market cap chart',
+    'Switch to USD price',
+    { title: 'Switch to price in WETH', display: 'none' },
+  ],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}).displayMode, 'price-native', 'a visible outer toolbar remains a valid fallback');
 installChart({ unitTitle: 'Switch to price in USD', scaleMode: 1 });
 assert.equal(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
   pair: {},
 }).ok, true, 'TradingView numeric mode 1 must preserve log-scale coordinates');
+installChart({
+  unitTitle: 'Switch to USD price',
+  inverted: true,
+  priceToCoordinate: (price) => 100 + price * 10,
+});
+const invertedNativeMeasured = plain(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}));
+assert.equal(invertedNativeMeasured.inverted, true);
+assert.ok(invertedNativeMeasured.ranges[0].hiY > invertedNativeMeasured.ranges[0].loY,
+  'an inverted native scale must preserve its real coordinate direction');
 
 installChart({ chartTitle: 'Switch to price chart' });
-assert.equal(measure({
+const marketCapUsdMeasured = plain(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
   pair: { priceNative: 2, priceUsd: 4, marketCap: 100 },
-}).displayMode, 'mcap-usd');
+}));
+assert.equal(marketCapUsdMeasured.displayMode, 'mcap-usd');
+assert.deepEqual(marketCapUsdMeasured.ranges.map(({ loValue, nowValue, hiValue }) =>
+  ({ loValue, nowValue, hiValue })), [{ loValue: 50, nowValue: 100, hiValue: 150 }]);
+installChart({ chartTitle: 'Switch to price chart', unitTitle: 'Switch to USD price' });
+const marketCapNativeMeasured = plain(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 10, marketCap: 100 },
+}));
+assert.equal(marketCapNativeMeasured.displayMode, 'mcap-native');
+assert.deepEqual(marketCapNativeMeasured.ranges.map(({ loValue, nowValue, hiValue }) =>
+  ({ loValue, nowValue, hiValue })), [{ loValue: 10, nowValue: 20, hiValue: 30 }]);
 
 installChart({ scaleMode: 2 });
 assert.equal(measure({
@@ -185,6 +342,118 @@ assert.equal(measure({
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
   pair: {},
 }).reason, 'chart-frame-ambiguous');
+installChart({
+  frameSpecs: [
+    { checkVisible: false, priceToCoordinate: () => 999 },
+    {},
+  ],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).ranges[0].loY, 160,
+'an ancestor-hidden stale chart frame must not block the visible replacement');
+installChart({
+  frameSpecs: [
+    { priceToCoordinate: () => 999 },
+    {},
+  ],
+  elementsFromPoint: (_x, _y, frames) => [frames[1], frames[0]],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).ranges[0].loY, 160, 'the topmost equal-size chart frame must win the overlap tie');
+installChart({
+  frameSpecs: [
+    { rect: { left: 50, top: 50, width: 500, height: 250 } },
+    { rect: { left: 650, top: 50, width: 500, height: 250 } },
+  ],
+  elementsFromPoint: (x, _y, frames) => x < 600 ? [frames[0]] : [frames[1]],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).reason, 'chart-frame-ambiguous',
+'two genuinely top-visible equal-size charts must remain fail-closed');
+installChart({
+  frameSpecs: [
+    { display: 'none', priceToCoordinate: () => 999 },
+    {},
+  ],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).ranges[0].loY, 160, 'a hidden stale chart frame must not block the visible replacement');
+installChart({
+  frameSpecs: [
+    {},
+    { rect: { left: 700, top: 50, width: 100, height: 50 }, priceToCoordinate: () => 999 },
+  ],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).ranges[0].loY, 160, 'a dominant visible chart must beat a small transitional frame');
+installChart({ plotRects: [
+  { rect: { left: 20, top: 40, width: 900, height: 420 }, display: 'none' },
+  { left: 30, top: 50, width: 700, height: 350 },
+] });
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).plot.width, 350, 'a hidden stale pane must not override the visible price pane');
+installChart({ plotRects: [
+  { left: 20, top: 40, width: 600, height: 250 },
+  { left: 10, top: 10, width: 900, height: 450 },
+] });
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 4 },
+}).plot.width, 300,
+'the first visible price pane must stay paired with chart.getPanes()[0] when an indicator is larger');
+installChart({
+  unitTitle: 'Switch to price in USD',
+  priceToCoordinate: (price) => -1_000_000 * price,
+});
+const extremeMeasured = plain(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}));
+assert.deepEqual(extremeMeasured.ranges.map(({ loY, nowY, hiY }) => ({ loY, nowY, hiY })),
+  [{ loY: -130, nowY: -130, hiY: -130 }],
+  'extreme finite TradingView coordinates must clamp to a truthful above-view sentinel');
+installChart({
+  unitTitle: 'Switch to USD price',
+  priceToCoordinate: (price) => 1_000_000 * price,
+});
+const extremeBelowMeasured = plain(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}));
+assert.deepEqual(extremeBelowMeasured.ranges.map(({ loY, nowY, hiY }) =>
+  ({ loY, nowY, hiY })), [{ loY: 470, nowY: 470, hiY: 470 }],
+'extreme finite coordinates must clamp to a truthful below-view sentinel');
+installChart({
+  unitTitle: 'Switch to USD price',
+  priceToCoordinate: () => 123,
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}).reason, 'coordinate-unavailable',
+'a constant interior coordinate must not masquerade as an aligned range');
 installChart({ pageHref: `${href}?moved=1` });
 assert.equal(measure({
   href,
@@ -213,6 +482,7 @@ assert.deepEqual(validated, {
   data: {
     href,
     displayMode: 'price-usd',
+    inverted: false,
     plot: { left: 110, top: 70, width: 400, height: 200 },
     ranges: [{
       id: 'r0', loY: 160, hiY: 140, nowY: 150,
@@ -220,6 +490,26 @@ assert.deepEqual(validated, {
     }],
   },
 }, 'worker must reconstruct the MAIN result instead of forwarding it');
+const validatedNative = plain(validate(nativeWithStaleControl, validationRequest, {}));
+assert.equal(validatedNative.ok, true,
+  'native quote mode must pass the full MAIN-to-worker round trip without conversion metadata');
+assert.equal(validatedNative.data.displayMode, 'price-native');
+assert.equal(validatedNative.data.inverted, false);
+const validatedInverted = plain(validate(invertedNativeMeasured, validationRequest, {}));
+assert.equal(validatedInverted.ok, true,
+  'an explicitly inverted native scale must survive worker reconstruction');
+assert.equal(validatedInverted.data.inverted, true);
+assert.equal(validate({ ...invertedNativeMeasured, inverted: false }, validationRequest, {}).reason,
+'invalid-result', 'worker must reject an inversion flag that contradicts coordinate order');
+assert.equal(validate(extremeMeasured, validationRequest, pairMetadata).ok, true,
+  'worker validation must accept MAIN-clamped offscreen sentinels');
+assert.equal(validate(extremeBelowMeasured, validationRequest, pairMetadata).ok, true,
+  'worker validation must accept a below-view clamp sentinel');
+assert.equal(validate({
+  ...measured,
+  ranges: [{ ...measured.ranges[0], loY: 200, nowY: 200, hiY: 200 }],
+}, validationRequest, pairMetadata).reason, 'invalid-result',
+'worker validation must reject a constant interior coordinate');
 assert.equal(validate({ ...measured, href: `${href}?stale=1` }, validationRequest, pairMetadata).reason,
 'stale-route');
 assert.equal(validate({

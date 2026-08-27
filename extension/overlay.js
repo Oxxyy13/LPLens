@@ -529,7 +529,7 @@ function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError, rang
     ${rangeId ? `<div class="dex-range-aligned">
       <span class="dex-range-aligned-copy">Range drawn on chart</span>
       <span class="dex-range-aligned-mode">chart scale pending</span>
-    </div>` : ''}
+    </div><div class="gc-sub dex-chart-status" hidden></div>` : ''}
   </div>`;
 }
 
@@ -618,7 +618,35 @@ async function syncProjectXPortfolio() {
  * never touches the chart, the page's JavaScript, or a wallet provider.
  * ------------------------------------------------------------------------- */
 
+// BEGIN PURE DEXSCREENER CHART RECOVERY
 const DEXSCREENER_CHART_POLL_MS = 750;
+const DEXSCREENER_CHART_RETRY_MS = [100, 200, 400];
+const DEXSCREENER_CHART_GRACE_MS = 450;
+const DEXSCREENER_CHART_TRANSIENT_FAILURES = new Set([
+  'chart-frame-ambiguous', 'chart-frame-unavailable', 'chart-api-unavailable',
+  'unsupported-chart-mode', 'chart-geometry-unavailable', 'coordinate-unavailable',
+  'measurement-failed', 'execution-timeout', 'execution-failed', 'invalid-result',
+  'isolated-validation-failed', 'paint-failed',
+]);
+
+function planDexscreenerChartRecovery(reason, misses, elapsed, hasVisual) {
+  const transient = reason === 'no-response'
+    || DEXSCREENER_CHART_TRANSIENT_FAILURES.has(reason);
+  const retry = transient
+    ? DEXSCREENER_CHART_RETRY_MS[Math.min(Math.max(0, misses - 1),
+      DEXSCREENER_CHART_RETRY_MS.length - 1)]
+    : DEXSCREENER_CHART_POLL_MS;
+  const keepVisual = transient && hasVisual && elapsed < DEXSCREENER_CHART_GRACE_MS;
+  return {
+    transient,
+    keepVisual,
+    delay: keepVisual
+      ? Math.min(retry, Math.max(50, DEXSCREENER_CHART_GRACE_MS - elapsed))
+      : retry,
+  };
+}
+// END PURE DEXSCREENER CHART RECOVERY
+
 const DEXSCREENER_CHART_CSS = `
 :host {
   all: initial !important; position: fixed !important; inset: 0 !important;
@@ -652,7 +680,8 @@ function finiteNumber(value) {
 function validateDexscreenerChartGeometry(response, expectedHref, expectedRanges, viewport) {
   const data = response && response.ok === true && response.data;
   if (!data || typeof data !== 'object' || Array.isArray(data)
-      || data.href !== expectedHref || !DEXSCREENER_CHART_MODES.has(data.displayMode)) return null;
+      || data.href !== expectedHref || !DEXSCREENER_CHART_MODES.has(data.displayMode)
+      || typeof data.inverted !== 'boolean') return null;
   const plot = data.plot;
   if (!plot || typeof plot !== 'object' || Array.isArray(plot)) return null;
   const { left, top, width, height } = plot;
@@ -665,13 +694,23 @@ function validateDexscreenerChartGeometry(response, expectedHref, expectedRanges
   const rows = data.ranges;
   const expectedIds = new Set(expectedRanges.map((range) => range.id));
   if (!Array.isArray(rows) || rows.length !== expectedIds.size || rows.length > 3) return null;
-  const minY = top - 10 * height;
-  const maxY = top + 11 * height;
+  const minY = top - height;
+  const maxY = top + 2 * height;
   const seen = new Set();
   const normalized = [];
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
     const expected = expectedRanges[index];
+    const ordered = [
+      { value: row && row.loValue, y: row && row.loY },
+      { value: row && row.nowValue, y: row && row.nowY },
+      { value: row && row.hiValue, y: row && row.hiY },
+    ].sort((a, b) => a.value - b.value);
+    const coordinateOrderValid = ordered.every((point, pointIndex) => pointIndex === 0
+      || (data.inverted ? point.y >= ordered[pointIndex - 1].y
+        : point.y <= ordered[pointIndex - 1].y));
+    const collapsedAtSentinel = row && row.loY === row.hiY
+      && (row.loY === minY || row.loY === maxY);
     if (!row || typeof row !== 'object' || Array.isArray(row)
         || typeof row.id !== 'string' || row.id !== expected.id
         || !expectedIds.has(row.id) || seen.has(row.id)
@@ -684,11 +723,8 @@ function validateDexscreenerChartGeometry(response, expectedHref, expectedRanges
     const factor = factors[0];
     if (!(factor > 0) || factors.some((value) => !finiteNumber(value)
         || Math.abs(value - factor) > Math.max(1e-12, Math.abs(factor) * 1e-9))
-        || row.hiY > row.loY
-        || (row.nowValue < row.loValue && row.nowY < row.loY)
-        || (row.nowValue > row.hiValue && row.nowY > row.hiY)
-        || (row.nowValue >= row.loValue && row.nowValue <= row.hiValue
-          && (row.nowY < row.hiY || row.nowY > row.loY))) return null;
+        || !coordinateOrderValid
+        || (row.loY === row.hiY && !collapsedAtSentinel)) return null;
     seen.add(row.id);
     normalized.push({
       id: row.id, loY: row.loY, hiY: row.hiY, nowY: row.nowY,
@@ -699,6 +735,7 @@ function validateDexscreenerChartGeometry(response, expectedHref, expectedRanges
   return {
     href: expectedHref,
     displayMode: data.displayMode,
+    inverted: data.inverted,
     plot: { left, top, width, height },
     ranges: normalized,
   };
@@ -787,6 +824,25 @@ function resetDexscreenerAlignedCards() {
     card.classList.remove('chart-range-aligned');
     const mode = card.querySelector('.dex-range-aligned-mode');
     if (mode) mode.textContent = 'chart scale pending';
+    const status = card.querySelector('.dex-chart-status');
+    if (status) {
+      status.hidden = true;
+      status.textContent = '';
+    }
+  }
+}
+
+function showDexscreenerChartFailure(reason) {
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  const safeReason = /^[a-z0-9-]{1,48}$/.test(String(reason || ''))
+    ? String(reason) : 'unknown';
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    const status = card.querySelector('.dex-chart-status');
+    if (!status) continue;
+    status.textContent = `chart: ${safeReason}`;
+    status.hidden = false;
   }
 }
 
@@ -794,6 +850,18 @@ function clearDexscreenerChartVisual() {
   const host = document.getElementById(DEXSCREENER_CHART_HOST_ID);
   if (host && host.__shadow) host.remove();
   resetDexscreenerAlignedCards();
+}
+
+function markDexscreenerChartRealigning() {
+  const host = document.getElementById(DEXSCREENER_CHART_HOST_ID);
+  if (host && host.__shadow) host.style.setProperty('opacity', '.35', 'important');
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  for (const card of panelShadow.querySelectorAll('.portfolio-card.chart-range-aligned')) {
+    const mode = card.querySelector('.dex-range-aligned-mode');
+    if (mode) mode.textContent = 'chart realigning';
+  }
 }
 
 function stopDexscreenerChartSession() {
@@ -834,6 +902,7 @@ function paintDexscreenerChartGeometry(geometry) {
   const dashes = ['', '8 5', '2 5'];
   const host = chartLayerHost();
   if (!host || !host.__shadow) return false;
+  host.style.setProperty('opacity', '1', 'important');
   const shadow = host.__shadow;
   const svg = appendSvg(document.createDocumentFragment(), 'svg', {
     viewBox: `0 0 ${width} ${height}`,
@@ -914,7 +983,7 @@ function paintDexscreenerChartGeometry(geometry) {
   const alignedIds = new Set(geometry.ranges.map((range) => range.id));
   const panelHost = document.getElementById(HOST_ID);
   const panelShadow = panelHost && panelHost.__shadow;
-  if (!panelShadow) return;
+  if (!panelShadow) return true;
   const alignedMode = geometry.displayMode === 'price-native' ? 'exact native scale'
     : geometry.displayMode === 'price-usd' ? 'current USD equivalent'
       : 'current market cap equivalent';
@@ -923,17 +992,22 @@ function paintDexscreenerChartGeometry(geometry) {
     card.classList.toggle('chart-range-aligned', aligned);
     const mode = card.querySelector('.dex-range-aligned-mode');
     if (mode && aligned) mode.textContent = alignedMode;
+    const status = card.querySelector('.dex-chart-status');
+    if (status) {
+      status.hidden = true;
+      status.textContent = '';
+    }
   }
   return true;
 }
 
-function scheduleDexscreenerChartGeometry(session) {
+function scheduleDexscreenerChartGeometry(session, delay = DEXSCREENER_CHART_POLL_MS) {
   if (dexscreenerChartSession !== session) return;
   if (dexscreenerChartTimer !== null) clearTimeout(dexscreenerChartTimer);
   dexscreenerChartTimer = setTimeout(() => {
     dexscreenerChartTimer = null;
     void refreshDexscreenerChartGeometry(session);
-  }, DEXSCREENER_CHART_POLL_MS);
+  }, delay);
 }
 
 async function refreshDexscreenerChartGeometry(session) {
@@ -960,12 +1034,41 @@ async function refreshDexscreenerChartGeometry(session) {
   const geometry = validateDexscreenerChartGeometry(
     response, session.href, session.ranges, { width: innerWidth, height: innerHeight },
   );
+  let painted = false;
   try {
-    if (!geometry || !paintDexscreenerChartGeometry(geometry)) clearDexscreenerChartVisual();
+    painted = Boolean(geometry && paintDexscreenerChartGeometry(geometry));
   } catch {
-    clearDexscreenerChartVisual();
+    painted = false;
   }
-  scheduleDexscreenerChartGeometry(session);
+  if (painted) {
+    session.misses = 0;
+    session.firstMissAt = 0;
+    session.lastFailure = '';
+    scheduleDexscreenerChartGeometry(session);
+    return;
+  }
+
+  const reason = response && typeof response.reason === 'string'
+    ? response.reason
+    : response && response.ok === true
+      ? geometry ? 'paint-failed' : 'isolated-validation-failed'
+      : 'no-response';
+  session.misses += 1;
+  session.lastFailure = reason;
+  const now = Date.now();
+  if (!session.firstMissAt) session.firstMissAt = now;
+  const elapsed = now - session.firstMissAt;
+  const visual = document.getElementById(DEXSCREENER_CHART_HOST_ID);
+  const recovery = planDexscreenerChartRecovery(
+    reason, session.misses, elapsed, Boolean(visual && visual.__shadow),
+  );
+  if (recovery.keepVisual) {
+    markDexscreenerChartRealigning();
+  } else {
+    clearDexscreenerChartVisual();
+    showDexscreenerChartFailure(reason);
+  }
+  scheduleDexscreenerChartGeometry(session, recovery.delay);
 }
 
 function startDexscreenerChartSession(key, generation, href, ranges) {
@@ -974,6 +1077,9 @@ function startDexscreenerChartSession(key, generation, href, ranges) {
   const session = {
     key, generation, href,
     ranges: ranges.slice(0, 3).map(({ id, lo, hi, now }) => ({ id, lo, hi, now })),
+    misses: 0,
+    firstMissAt: 0,
+    lastFailure: '',
   };
   dexscreenerChartSession = session;
   void refreshDexscreenerChartGeometry(session);

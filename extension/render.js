@@ -184,6 +184,7 @@
   border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 14%, transparent); }
 .dex-range-aligned-copy { flex: 1; }
 .dex-range-aligned-mode { color: var(--ink-3); font-size: 8.5px; letter-spacing: .04em; text-transform: uppercase; }
+.dex-chart-status { color: var(--warn); font-size: 9px; overflow-wrap: anywhere; }
 .portfolio-card.chart-range-aligned .dex-range { display: none; }
 .portfolio-card.chart-range-aligned .dex-range-aligned { display: flex; }
 .hero, .herolbl, .heroval, .herosub { } /* kept as aliases for older call sites */

@@ -368,21 +368,81 @@ function measureDexscreenerChart(payload) {
     const candidates = [];
     for (const frame of frames) {
       try {
+        if (frame.isConnected === false || typeof frame.getBoundingClientRect !== 'function') continue;
+        if (typeof frame.checkVisibility === 'function'
+            && !frame.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+        const frameRect = frame.getBoundingClientRect();
+        if (![frameRect.left, frameRect.top, frameRect.width, frameRect.height].every(finite)
+            || frameRect.width <= 1 || frameRect.height <= 1) continue;
+        if (typeof getComputedStyle === 'function') {
+          const style = getComputedStyle(frame);
+          const opacity = Number.parseFloat(style.opacity);
+          if (style.display === 'none' || style.visibility === 'hidden'
+              || style.visibility === 'collapse' || (finite(opacity) && opacity <= 0)) continue;
+        }
+        const viewportWidth = finite(globalThis.innerWidth) ? globalThis.innerWidth : frameRect.width;
+        const viewportHeight = finite(globalThis.innerHeight) ? globalThis.innerHeight : frameRect.height;
+        const visibleWidth = Math.max(0,
+          Math.min(frameRect.left + frameRect.width, viewportWidth) - Math.max(frameRect.left, 0));
+        const visibleHeight = Math.max(0,
+          Math.min(frameRect.top + frameRect.height, viewportHeight) - Math.max(frameRect.top, 0));
+        const visibleArea = visibleWidth * visibleHeight;
+        if (!finite(visibleArea) || visibleArea <= 1) continue;
+        let hitScore = 0;
+        let hitSamples = 0;
+        if (typeof document.elementsFromPoint === 'function') {
+          const visibleLeft = Math.max(frameRect.left, 0);
+          const visibleTop = Math.max(frameRect.top, 0);
+          const points = [
+            [.5, .5], [.2, .2], [.8, .2], [.2, .8], [.8, .8],
+          ];
+          for (const [xRatio, yRatio] of points) {
+            const x = visibleLeft + visibleWidth * xRatio;
+            const y = visibleTop + visibleHeight * yRatio;
+            const hits = Array.from(document.elementsFromPoint(x, y) || []);
+            const topHit = hits.find((node) => {
+              try {
+                if (typeof getComputedStyle !== 'function') return true;
+                const style = getComputedStyle(node);
+                return style.pointerEvents !== 'none' && style.display !== 'none'
+                  && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+              } catch {
+                return true;
+              }
+            });
+            if (!topHit) continue;
+            hitSamples += 1;
+            if (topHit === frame) hitScore += 1;
+          }
+        }
         const frameWindow = frame.contentWindow;
         const frameDocument = frame.contentDocument;
         const api = frameWindow && frameWindow.tradingViewApi;
         if (!frameWindow || !frameDocument || !api || typeof api.activeChart !== 'function') continue;
         const chart = api.activeChart();
-        if (chart) candidates.push({ frame, frameWindow, frameDocument, chart });
+        if (chart) candidates.push({
+          frame, frameWindow, frameDocument, chart, visibleArea, hitScore, hitSamples,
+        });
       } catch {
         // Cross-origin or incomplete frames are deliberately ignored.
       }
     }
-    if (candidates.length !== 1) {
-      return fail(candidates.length > 1 ? 'chart-frame-ambiguous' : 'chart-frame-unavailable');
+    candidates.sort((a, b) => b.visibleArea - a.visibleArea);
+    if (!candidates.length) return fail('chart-frame-unavailable');
+    let selected = candidates[0];
+    const comparable = candidates.filter((candidate) =>
+      candidate.visibleArea >= candidates[0].visibleArea * 0.5);
+    if (comparable.length > 1) {
+      const hitRank = (candidate) => candidate.hitSamples > 0
+        ? candidate.hitScore / candidate.hitSamples : -1;
+      const ranked = comparable.slice().sort((a, b) => hitRank(b) - hitRank(a));
+      if (hitRank(ranked[0]) <= hitRank(ranked[1]) || ranked[0].hitScore < 1) {
+        return fail('chart-frame-ambiguous');
+      }
+      selected = ranked[0];
     }
 
-    const { frame, frameWindow, frameDocument, chart } = candidates[0];
+    const { frame, frameWindow, frameDocument, chart } = selected;
     if (typeof chart.getPanes !== 'function') return fail('chart-api-unavailable');
     const panes = chart.getPanes();
     const pane = Array.isArray(panes) && panes[0];
@@ -394,27 +454,65 @@ function measureDexscreenerChart(payload) {
       ? scaleFacade.getMode() : null;
     const scaleMode = rawMode && typeof rawMode === 'object' ? rawMode.mode : rawMode;
     if (scaleMode !== 0 && scaleMode !== 1) return fail('unsupported-price-scale');
+    const inverted = Boolean(scaleFacade && typeof scaleFacade.isInverted === 'function'
+      && scaleFacade.isInverted() === true);
     const privateScale = scaleFacade && scaleFacade._priceScale;
     if (!privateScale || typeof privateScale.priceToCoordinate !== 'function') {
       return fail('chart-api-unavailable');
     }
 
-    const titleRoots = [document, frameDocument];
-    const titles = [];
-    for (const root of titleRoots) {
+    const visibleTitles = (root, rootWindow) => {
+      const found = [];
       for (const node of Array.from(root.querySelectorAll('[title]'))) {
-        const title = String(node.getAttribute('title') || '').trim();
-        if (title) titles.push(title);
+        try {
+          if (!node || node.isConnected === false
+              || typeof node.getBoundingClientRect !== 'function') continue;
+          if (typeof node.checkVisibility === 'function'
+              && !node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+          const styleReader = rootWindow && typeof rootWindow.getComputedStyle === 'function'
+            ? rootWindow.getComputedStyle.bind(rootWindow)
+            : typeof getComputedStyle === 'function' ? getComputedStyle : null;
+          if (styleReader) {
+            const style = styleReader(node);
+            const opacity = Number.parseFloat(style.opacity);
+            if (style.display === 'none' || style.visibility === 'hidden'
+                || style.visibility === 'collapse' || style.contentVisibility === 'hidden'
+                || (finite(opacity) && opacity <= 0)) continue;
+          }
+          if (typeof node.getClientRects === 'function' && node.getClientRects().length < 1) continue;
+          const rect = node.getBoundingClientRect();
+          if (![rect.left, rect.top, rect.width, rect.height].every(finite)
+              || rect.width <= 0 || rect.height <= 0) continue;
+          const viewportWidth = finite(rootWindow && rootWindow.innerWidth)
+            ? rootWindow.innerWidth : rect.left + rect.width;
+          const viewportHeight = finite(rootWindow && rootWindow.innerHeight)
+            ? rootWindow.innerHeight : rect.top + rect.height;
+          if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0
+              || rect.left >= viewportWidth || rect.top >= viewportHeight) continue;
+          const title = String(node.getAttribute('title') || '').trim();
+          if (title) found.push(title);
+        } catch {
+          // Incomplete or transitioning controls are not trustworthy mode signals.
+        }
       }
-    }
-    const normalizedTitles = titles.map((title) => title.toLowerCase());
-    const priceSignal = normalizedTitles.includes('switch to market cap chart');
-    const marketCapSignal = normalizedTitles.includes('switch to price chart');
+      return found;
+    };
+    const frameTitles = visibleTitles(frameDocument, frameWindow);
+    const pageTitles = visibleTitles(document, globalThis);
+    const chooseTitles = (matches) => {
+      const selected = frameTitles.filter(matches);
+      return selected.length ? selected : pageTitles.filter(matches);
+    };
+    const chartTitles = chooseTitles((title) => /^switch to (?:market cap|price) chart$/i.test(title));
+    const normalizedChartTitles = chartTitles.map((title) => title.toLowerCase());
+    const priceSignal = normalizedChartTitles.includes('switch to market cap chart');
+    const marketCapSignal = normalizedChartTitles.includes('switch to price chart');
     if (priceSignal === marketCapSignal) return fail('unsupported-chart-mode');
     const chartKind = priceSignal ? 'price' : 'mcap';
 
     const unitSignals = new Set();
-    for (const title of titles) {
+    const unitTitles = chooseTitles((title) => /^switch to (?:usd price|price in\s+.+)$/i.test(title));
+    for (const title of unitTitles) {
       if (title.toLowerCase() === 'switch to usd price') {
         unitSignals.add('native');
         continue;
@@ -447,23 +545,57 @@ function measureDexscreenerChart(payload) {
     }
     if (!positive(factor)) return fail('pair-conversion-unavailable');
 
-    const plot = frameDocument.querySelector('.chart-markup-table.pane');
-    if (!plot || typeof plot.getBoundingClientRect !== 'function'
-        || typeof frame.getBoundingClientRect !== 'function') {
-      return fail('chart-geometry-unavailable');
-    }
     const frameRect = frame.getBoundingClientRect();
-    const plotRect = plot.getBoundingClientRect();
     const frameWidth = frameWindow.innerWidth;
     const frameHeight = frameWindow.innerHeight;
     if (![frameRect.left, frameRect.top, frameRect.width, frameRect.height,
-      plotRect.left, plotRect.top, plotRect.width, plotRect.height,
       frameWidth, frameHeight].every(finite)
         || frameRect.width <= 1 || frameRect.height <= 1
-        || plotRect.width <= 1 || plotRect.height <= 1
         || frameWidth <= 1 || frameHeight <= 1) {
       return fail('chart-geometry-unavailable');
     }
+    const plotNodes = typeof frameDocument.querySelectorAll === 'function'
+      ? Array.from(frameDocument.querySelectorAll('.chart-markup-table.pane')) : [];
+    if (!plotNodes.length && typeof frameDocument.querySelector === 'function') {
+      const fallbackPlot = frameDocument.querySelector('.chart-markup-table.pane');
+      if (fallbackPlot) plotNodes.push(fallbackPlot);
+    }
+    let plotRect = null;
+    let plotArea = 0;
+    for (const plot of plotNodes) {
+      try {
+        if (!plot || plot.isConnected === false
+            || typeof plot.getBoundingClientRect !== 'function') continue;
+        if (typeof plot.checkVisibility === 'function'
+            && !plot.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+        if (typeof frameWindow.getComputedStyle === 'function') {
+          const style = frameWindow.getComputedStyle(plot);
+          const opacity = Number.parseFloat(style.opacity);
+          if (style.display === 'none' || style.visibility === 'hidden'
+              || style.visibility === 'collapse' || style.contentVisibility === 'hidden'
+              || (finite(opacity) && opacity <= 0)) continue;
+        }
+        if (typeof plot.getClientRects === 'function' && plot.getClientRects().length < 1) continue;
+        const rect = plot.getBoundingClientRect();
+        if (![rect.left, rect.top, rect.width, rect.height].every(finite)
+            || rect.width <= 1 || rect.height <= 1) continue;
+        const visibleWidth = Math.max(0,
+          Math.min(rect.left + rect.width, frameWidth) - Math.max(rect.left, 0));
+        const visibleHeight = Math.max(0,
+          Math.min(rect.top + rect.height, frameHeight) - Math.max(rect.top, 0));
+        const area = visibleWidth * visibleHeight;
+        if (!finite(area) || area <= 1) continue;
+        // TradingView exposes panes in the same order through its API and DOM.
+        // The coordinate scale above belongs to getPanes()[0], so use the first
+        // genuinely visible DOM pane instead of a larger indicator pane.
+        plotRect = rect;
+        plotArea = area;
+        break;
+      } catch {
+        // A transitioning pane is not safe chart geometry.
+      }
+    }
+    if (!plotRect || plotArea <= 1) return fail('chart-geometry-unavailable');
     const scaleX = frameRect.width / frameWidth;
     const scaleY = frameRect.height / frameHeight;
     if (!positive(scaleX) || !positive(scaleY)) return fail('chart-geometry-unavailable');
@@ -480,7 +612,13 @@ function measureDexscreenerChart(payload) {
 
     const coordinate = (displayValue) => {
       const local = privateScale.priceToCoordinate(displayValue, 0);
-      return finite(local) ? viewportPlot.top + local * scaleY : null;
+      if (!finite(local)) return null;
+      const raw = viewportPlot.top + local * scaleY;
+      if (!finite(raw)) return null;
+      // TradingView returns legitimate but extreme finite coordinates while a
+      // user pans or zooms. Preserve only the above/inside/below relationship.
+      return Math.max(viewportPlot.top - viewportPlot.height,
+        Math.min(viewportPlot.top + 2 * viewportPlot.height, raw));
     };
     const measuredRanges = [];
     for (const range of ranges) {
@@ -494,6 +632,11 @@ function measureDexscreenerChart(payload) {
       const nowY = coordinate(nowValue);
       const hiY = coordinate(hiValue);
       if (![loY, nowY, hiY].every(finite)) return fail('coordinate-unavailable');
+      const topSentinel = viewportPlot.top - viewportPlot.height;
+      const bottomSentinel = viewportPlot.top + 2 * viewportPlot.height;
+      if (loY === hiY && loY !== topSentinel && loY !== bottomSentinel) {
+        return fail('coordinate-unavailable');
+      }
       measuredRanges.push({
         id: range.id,
         loY,
@@ -509,6 +652,7 @@ function measureDexscreenerChart(payload) {
       ok: true,
       href: payload.href,
       displayMode,
+      inverted,
       plot: viewportPlot,
       ranges: measuredRanges,
     };
@@ -532,7 +676,9 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
   }
   if (!expected || raw.href !== expected.href) return fail('stale-route');
   const modes = new Set(['price-native', 'price-usd', 'mcap-native', 'mcap-usd']);
-  if (!modes.has(raw.displayMode)) return fail('invalid-result');
+  if (!modes.has(raw.displayMode) || typeof raw.inverted !== 'boolean') {
+    return fail('invalid-result');
+  }
   const finite = (value) => typeof value === 'number' && Number.isFinite(value);
   const positive = (value) => finite(value) && value > 0;
   const pairValue = (name) => positive(pairMetadata && pairMetadata[name])
@@ -563,8 +709,8 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
   if (!Array.isArray(raw.ranges) || raw.ranges.length !== expected.ranges.length) {
     return fail('invalid-result');
   }
-  const minY = plot.top - 10 * plot.height;
-  const maxY = plot.top + 11 * plot.height;
+  const minY = plot.top - plot.height;
+  const maxY = plot.top + 2 * plot.height;
   const ranges = [];
   for (let index = 0; index < raw.ranges.length; index++) {
     const item = raw.ranges[index];
@@ -581,10 +727,21 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
       return positive(value) && positive(target)
         && Math.abs(value - target) <= Math.max(1e-12, Math.abs(target) * 1e-9);
     });
+    const ordered = [
+      { value: item && item.loValue, y: item && item.loY },
+      { value: item && item.nowValue, y: item && item.nowY },
+      { value: item && item.hiValue, y: item && item.hiY },
+    ].sort((a, b) => a.value - b.value);
+    const coordinateOrderValid = ordered.every((point, pointIndex) => pointIndex === 0
+      || (raw.inverted ? point.y >= ordered[pointIndex - 1].y
+        : point.y <= ordered[pointIndex - 1].y));
+    const collapsedAtSentinel = item && item.loY === item.hiY
+      && (item.loY === minY || item.loY === maxY);
     if (!item || typeof item !== 'object' || item.id !== expectedId
         || ![item.loY, item.hiY, item.nowY].every(finite)
         || [item.loY, item.hiY, item.nowY].some((value) => value < minY || value > maxY)
-        || !closeEnough) {
+        || !closeEnough || !coordinateOrderValid
+        || (item.loY === item.hiY && !collapsedAtSentinel)) {
       return fail('invalid-result');
     }
     ranges.push({
@@ -602,6 +759,7 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
     data: {
       href: expected.href,
       displayMode: raw.displayMode,
+      inverted: raw.inverted,
       plot: {
         left: plot.left,
         top: plot.top,
