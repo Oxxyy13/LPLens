@@ -18,7 +18,9 @@ import { CHAINS } from './lib/chains.js';
 
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
 const dexscreenerScanCache = new Map();
+const dexscreenerPairCache = new Map();
 const DEXSCREENER_CACHE_MS = 60_000;
+const DEXSCREENER_PAIR_CACHE_MS = 10 * 60_000;
 
 // Concurrency limit across ALL callers. One position load issues 6-10 fetches,
 // so an unexpected burst of requests multiplies straight into the network
@@ -71,6 +73,51 @@ async function cachedDexscreenerPositions(chainKey, address, store) {
     return data;
   } catch (err) {
     dexscreenerScanCache.delete(key);
+    throw err;
+  }
+}
+
+async function cachedDexscreenerPair(chainKey, poolRef) {
+  // This request contains only the two values already present in the pair-page
+  // URL. The active LPLens wallet is deliberately not accepted by this helper.
+  const key = `${chainKey}:${poolRef}`;
+  const existing = dexscreenerPairCache.get(key);
+  if (existing && Object.prototype.hasOwnProperty.call(existing, 'data')
+      && Date.now() - existing.at < DEXSCREENER_PAIR_CACHE_MS) {
+    return existing.data;
+  }
+  if (existing && existing.promise) return existing.promise;
+
+  const promise = (async () => {
+    const chain = CHAINS[chainKey];
+    const apiChain = String(chain && chain.dexscreener || '').toLowerCase();
+    if (!apiChain) return null;
+    const url = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(apiChain)}/${encodeURIComponent(poolRef)}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`Dexscreener pair lookup failed: HTTP ${response.status}`);
+    const json = await response.json();
+    const candidates = Array.isArray(json && json.pairs) ? json.pairs : [];
+    const pair = candidates.find((item) =>
+      String(item && item.pairAddress || '').toLowerCase() === poolRef);
+    if (!pair) return null;
+
+    const token = (value) => {
+      const address = String(value && value.address || '').toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(address)) return null;
+      return { address, symbol: String(value && value.symbol || '').slice(0, 32) };
+    };
+    const baseToken = token(pair.baseToken);
+    const quoteToken = token(pair.quoteToken);
+    return baseToken && quoteToken ? { baseToken, quoteToken } : null;
+  })();
+
+  dexscreenerPairCache.set(key, { promise });
+  try {
+    const data = await promise;
+    dexscreenerPairCache.set(key, { data, at: Date.now() });
+    return data;
+  } catch (err) {
+    dexscreenerPairCache.delete(key);
     throw err;
   }
 }
@@ -163,7 +210,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         .toLowerCase();
       return id === poolRef;
     });
-    const safe = JSON.parse(JSON.stringify({ address, positions }, (_key, value) =>
+    let pair = null;
+    let pairError = null;
+    if (positions.length) {
+      try {
+        pair = await cachedDexscreenerPair(chainKey, poolRef);
+        if (!pair) pairError = 'pair-metadata-unavailable';
+      } catch {
+        pairError = 'pair-metadata-unavailable';
+      }
+    }
+    const usdRef = CHAINS[chainKey].usdRef || {};
+    const wrappedNative = usdRef.nativeEquivalent ? String(usdRef.weth || '').toLowerCase() : '';
+    const safe = JSON.parse(JSON.stringify({ address, positions, pair, pairError, wrappedNative }, (_key, value) =>
       typeof value === 'bigint' ? value.toString() : value));
     return { ok: true, data: safe };
   })().then(

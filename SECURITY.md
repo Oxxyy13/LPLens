@@ -50,6 +50,11 @@ access codes and random installation identifiers plus operational request
 counts. See the live policy for the complete disclosure:
 <https://lplens-beta.licence-worker.workers.dev/privacy>.
 
+When the optional Dexscreener overlay is enabled, its service-worker request to
+Dexscreener contains only the pair page's URL-derived chain and pool identifier.
+It does not include the active wallet. The response supplies base/quote token
+addresses used to orient the independent LPLens range display.
+
 When enabled in Settings, anonymous scan telemetry is limited to extension
 version, popup or side-panel surface, coarse outcome/count/duration buckets,
 and allowlisted per-chain error categories. Those aggregate database rows have

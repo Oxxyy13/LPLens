@@ -290,7 +290,9 @@ understanding rather than skimming:
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
   the panel uses only the active overlay wallet explicitly selected in LPLens.
   On Dexscreener it reads only the chain and pool identifier in the pair-page
-  URL, then checks that same active wallet for a matching position. It
+  URL, then checks that same active wallet for a matching position. The service
+  worker sends those two route values, without the wallet address, to
+  `api.dexscreener.com` to retrieve the pair's base/quote token orientation. It
   reads no Dexscreener text, chart state, connected-wallet state, or provider
   object. The popup and side panel always name the active overlay wallet;
   clicking a saved wallet selects it immediately, and scanning every saved

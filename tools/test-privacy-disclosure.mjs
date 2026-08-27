@@ -28,6 +28,12 @@ for (const falseClaim of [
 for (const [name, body] of [['options', options], ['README', readme], ['privacy policy', worker]]) {
   assert.match(body, /most recent(?:ly)? rendered portfolio view/i,
     `${name} omits the local side-panel snapshot`);
+  assert.match(body, /chain and pool identifier/i,
+    `${name} omits the Dexscreener route values`);
+  assert.match(body, /without the (?:active )?wallet address/i,
+    `${name} omits the Dexscreener pair-request wallet exclusion`);
+  assert.match(body, /api\.dexscreener\.com|Dexscreener(?:'s)? API/i,
+    `${name} omits the Dexscreener pair-request destination`);
 }
 assert.match(panel, /No wallet connection or page access/i);
 assert.match(options, /id="licenseKey"\s+type="password"/,

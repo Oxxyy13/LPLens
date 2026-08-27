@@ -27,7 +27,10 @@
 
 // Shared renderer, loaded ahead of this file by the manifest. Keeping these
 // in one place is what stops the popup and the overlay drifting apart again.
-const { CSS, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar, details, rebalanceLine } = globalThis.LPLens;
+const {
+  CSS, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar, details,
+  rebalanceLine, dexscreenerRangeRuler,
+} = globalThis.LPLens;
 
 // v4 reads through a different manager and view contract, but the URL shape
 // is identical, so the route captures the version and passes it through.
@@ -430,7 +433,7 @@ const placeSoon = () => {
   requestAnimationFrame(placeGutterCards);
 };
 
-function gutterCard(row) {
+function gutterCard(row, includeRange = true) {
   if (!row.data) {
     return `<div class="gc-pair">${esc(row.label || '')}</div><div class="gc-sub">reading…</div>`;
   }
@@ -455,7 +458,7 @@ function gutterCard(row) {
   const lo = Math.min(d.priceLower, d.priceUpper);
   const hi = Math.max(d.priceLower, d.priceUpper);
   let bar = '';
-  if (lo > 0 && hi > lo && Number.isFinite(lo) && Number.isFinite(hi)) {
+  if (includeRange && lo > 0 && hi > lo && Number.isFinite(lo) && Number.isFinite(hi)) {
     const nowP = closed ? h.exit.price : d.price;
     const lnLo = Math.log(lo), lnHi = Math.log(hi), lnNow = Math.log(nowP);
     const span = lnHi - lnLo;
@@ -505,6 +508,15 @@ function gutterCard(row) {
 
 function portfolioCard(position) {
   return `<div class="portfolio-card">${gutterCard({ data: position })}</div>`;
+}
+
+function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError) {
+  const tokenId = position && position.tokenId !== undefined ? String(position.tokenId) : '';
+  return `<div class="portfolio-card">
+    ${gutterCard({ data: position }, false)}
+    ${tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
+    ${dexscreenerRangeRuler(position, pair, wrappedNative, pairError)}
+  </div>`;
 }
 
 /**
@@ -645,13 +657,19 @@ async function syncDexscreener() {
     }
 
     const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
+    const pair = res.data && res.data.pair || null;
+    const pairError = String(res.data && res.data.pairError || '');
+    const wrappedNative = String(res.data && res.data.wrappedNative || '');
     const address = String(res.data && res.data.address || '');
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+    const shown = positions.slice(0, 8);
+    const overflow = positions.length - shown.length;
     const content = positions.length
-      ? positions.map(portfolioCard).join('')
+      ? shown.map((position) => dexscreenerPortfolioCard(position, pair, wrappedNative, pairError)).join('')
+        + (overflow > 0 ? `<div class="note">${overflow} more matching position${overflow === 1 ? '' : 's'} not shown here.</div>` : '')
       : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
     render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. Dexscreener page content and wallet data are not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. Pair orientation is matched by token address. Dexscreener page content and wallet data are not read.</div>
       ${content}
     </div>`);
   } finally {
