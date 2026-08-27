@@ -55,10 +55,10 @@ digest. There is no bundler or minifier: the packaged extension tree must be
 byte-identical to `extension/`.
 
 ```bash
-git checkout v0.28.0
+git checkout v0.28.1
 node tools/check-repo-secrets.mjs
 node tools/package.mjs
-diff -r extension build/lplens-0.28.0
+diff -r extension build/lplens-0.28.1
 ```
 
 The final `diff` must print nothing. `tools/package.mjs` also parses every

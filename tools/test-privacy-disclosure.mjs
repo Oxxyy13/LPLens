@@ -7,6 +7,13 @@ const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const worker = readFileSync(new URL('./licence-worker/worker.js', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 
+assert.match(worker, /Effective 27 August 2026/,
+  'privacy policy effective date must match the 0.28.1 copy change');
+assert.match(worker, /wallet addresses you save or select are stored locally/i,
+  'privacy policy must describe the current all-chain wallet selection model');
+assert.doesNotMatch(worker, /chain you select and the address you look up are stored locally/i,
+  'privacy policy still describes the retired chain picker');
+
 // The implementation discovers list rows through semantic position links and
 // uses a short visible label. Every user-facing privacy surface must say so.
 assert.match(overlay, /querySelectorAll\('a\[href\*="\/positions\/v"\]'\)/);

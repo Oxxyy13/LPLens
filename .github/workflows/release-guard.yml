@@ -27,6 +27,7 @@ jobs:
           node tools/test-privacy-disclosure.mjs
           node tools/test-overlay-list.mjs
           node tools/test-projectx-overlay.mjs
+          node tools/test-active-projectx-wallet.mjs
           node tools/test-projectx-config.mjs
           node tools/test-blockscout-relay.mjs
           node tools/test-rpc-retry.mjs

@@ -107,8 +107,8 @@ async function paintPermissions() {
   if (granted) pageRows.push(`<li class="yes"><b>app.uniswap.org position pages</b> — can read and add
     to the positions list and individual position pages only.</li>`);
   if (projectxGranted) pageRows.push(`<li class="yes"><b>www.prjx.com/portfolio</b> — can add the
-    ProjectX panel. It uses the last address loaded in LPLens and does not read
-    the connected wallet or ProjectX page content.</li>`);
+    ProjectX panel. It uses the ProjectX wallet explicitly selected in LPLens
+    and does not read the connected wallet or ProjectX page content.</li>`);
   const pageAccess = pageRows.length ? pageRows.join('')
     : `<li class="no"><b>No web page at all.</b> Both overlays are off, so no
          content script is registered anywhere.</li>`;

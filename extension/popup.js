@@ -5,8 +5,8 @@ import {
   TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint,
 } from './lib/license.js';
 import {
-  loadBook, upsertWallet, removeWallet, MAX_SAVED_ADDRESSES, normalizeAddress,
-  shortAddr, walletName,
+  loadBook, upsertWallet, removeWallet, dedupeBook, MAX_SAVED_ADDRESSES,
+  normalizeAddress, shortAddr, walletName,
 } from './lib/wallets.js';
 import { summarizeAggregate } from './lib/aggregate.js';
 
@@ -28,11 +28,26 @@ const usd = (n) =>
     : '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 let book = [];
+// `address` is the backwards-compatible storage key read by the ProjectX
+// overlay. Treat it as an explicit selection, not whichever wallet happened
+// to be scanned most recently.
+let activeAddress = null;
+let activeAddressRevision = 0;
+let walletBookRevision = 0;
 
-chrome.storage.local.get(['address', 'chain'], async (s) => {
-  book = await loadBook();
-  if (s.address) $('address').value = s.address;
-  else if (book[0]) $('address').value = book[0].address;
+const startupAddressRevision = activeAddressRevision;
+const startupBookRevision = walletBookRevision;
+chrome.storage.local.get(['chain'], async (s) => {
+  const initialBook = await loadBook();
+  const latest = await chrome.storage.local.get(['address']);
+  // Another popup may have changed either value while loadBook() was awaiting
+  // storage. Do not let this slower startup overwrite that newer choice.
+  if (walletBookRevision === startupBookRevision) book = initialBook;
+  if (activeAddressRevision === startupAddressRevision) {
+    activeAddress = normalizeAddress(latest.address);
+    // A saved wallet is not the ProjectX wallet until the user selects it.
+    $('address').value = activeAddress || '';
+  }
   // Pre-0.22 stored a single-chain pick. Scanning is always every chain
   // now; leaving the key would let an old `chain: 'robinhood'` silently
   // pin a user to one network if anything still read it.
@@ -60,6 +75,31 @@ paintScanHint();
 
 function fieldAddress() {
   return normalizeAddress($('address').value);
+}
+
+function paintActiveWallet() {
+  const el = $('activeWallet');
+  if (!el) return;
+  const entry = activeAddress && book.find((wallet) => wallet.address === activeAddress);
+  const identity = activeAddress
+    ? `${entry && entry.label ? `${entry.label} · ` : ''}${shortAddr(activeAddress)}`
+    : 'none selected';
+  const typed = fieldAddress();
+  const pending = !!(typed && typed !== activeAddress);
+  el.textContent = `ProjectX wallet: ${identity}${pending ? ' · typed wallet not selected yet' : ''}`;
+  el.title = activeAddress || 'Choose a saved wallet or load one wallet to select it.';
+  el.classList.toggle('pending', pending);
+  el.classList.toggle('empty', !activeAddress && !pending);
+}
+
+async function setActiveAddress(value, { syncField = true } = {}) {
+  const address = normalizeAddress(value);
+  if (!address) return false;
+  activeAddress = address;
+  if (syncField) $('address').value = address;
+  await chrome.storage.local.set({ address });
+  paintBook();
+  return true;
 }
 
 function formUnlocked() {
@@ -93,6 +133,9 @@ function paintBook() {
     const row = document.createElement('div');
     row.className = 'saved-row';
     row.dataset.address = e.address;
+    const active = e.address === activeAddress;
+    row.classList.toggle('active', active);
+    row.dataset.activeWallet = String(active);
 
     const lab = document.createElement('input');
     lab.type = 'text';
@@ -107,7 +150,10 @@ function paintBook() {
     load.type = 'button';
     load.className = 'saved-load';
     load.textContent = shortAddr(e.address);
-    load.title = 'Use this address';
+    load.title = active
+      ? 'This wallet is used by the ProjectX overlay'
+      : 'Use this wallet for the ProjectX overlay';
+    load.setAttribute('aria-pressed', String(active));
     load.disabled = !unlocked;
 
     const rm = document.createElement('button');
@@ -127,24 +173,31 @@ function paintBook() {
     scanAll.title = n === 0 ? 'Save at least one address first' : 'Scan every saved wallet';
   }
   paintAddButton();
+  paintActiveWallet();
   paintScanHint();
 }
 
-$('address').addEventListener('input', paintAddButton);
+$('address').addEventListener('input', () => {
+  paintAddButton();
+  paintActiveWallet();
+});
 
 $('addWallet').addEventListener('click', async () => {
   if ($('addWallet').disabled) return;
   const r = await upsertWallet($('address').value, '');
   book = r.book;
-  paintBook();
   if (r.error) {
+    paintBook();
     statusEl.className = 'status error';
     statusEl.textContent = r.error;
     return;
   }
+  await setActiveAddress($('address').value);
   statusEl.className = 'status';
-  statusEl.textContent = 'Saved.';
-  setTimeout(() => { if (statusEl.textContent === 'Saved.') statusEl.textContent = ''; }, 1500);
+  statusEl.textContent = 'Saved and selected as the ProjectX wallet.';
+  setTimeout(() => {
+    if (statusEl.textContent === 'Saved and selected as the ProjectX wallet.') statusEl.textContent = '';
+  }, 1800);
 });
 
 $('savedList').addEventListener('click', async (e) => {
@@ -154,13 +207,19 @@ $('savedList').addEventListener('click', async (e) => {
   if (e.target.closest('.saved-remove')) {
     // Instant — an address costs nothing to re-add. No confirm(), no dialog.
     book = await removeWallet(addr);
+    // Saving and selecting are independent. Removing the active saved row
+    // leaves that address selected until the user chooses another.
     paintBook();
-    paintAddButton();
+    if (addr === activeAddress) {
+      statusEl.className = 'status';
+      statusEl.textContent = 'Removed from saved wallets. It remains the ProjectX wallet.';
+    }
     return;
   }
   if (e.target.closest('.saved-load')) {
-    $('address').value = addr;
-    paintAddButton();
+    await setActiveAddress(addr);
+    statusEl.className = 'status';
+    statusEl.textContent = `ProjectX wallet changed to ${shortAddr(addr)}.`;
   }
 });
 
@@ -171,7 +230,30 @@ $('savedList').addEventListener('change', async (e) => {
   if (!row) return;
   const r = await upsertWallet(row.dataset.address, input.value);
   book = r.book;
+  paintActiveWallet();
 });
+
+// Keep every open popup and the ProjectX overlay aligned with the same explicit
+// selection. The overlay already refreshes when this storage key changes.
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes.address) {
+      activeAddressRevision++;
+      const next = normalizeAddress(changes.address.newValue);
+      activeAddress = next;
+      if (document.activeElement !== $('address')) $('address').value = next || '';
+      paintBook();
+    }
+    if (changes.wallets) {
+      walletBookRevision++;
+      // Chrome's event value is authoritative. Async reloads here could finish
+      // out of order and repaint an older saved-wallet list.
+      book = dedupeBook(changes.wallets.newValue || []);
+      paintBook();
+    }
+  });
+} catch { /* preview harness or orphaned extension page */ }
 
 function setFormInteractive(on) {
   $('address').disabled = !on;
@@ -214,10 +296,10 @@ function showGate(ent) {
   }
 })();
 
-async function startScan(owners, includeClosed) {
-  chrome.storage.local.set({
-    address: owners.length === 1 ? owners[0].address : ($('address').value || ''),
-  });
+async function startScan(owners, includeClosed, { selectOverlayWallet = false } = {}) {
+  // Loading one wallet is an explicit ProjectX-wallet choice. Scan all never
+  // changes that choice as a side effect, even when only one wallet is saved.
+  if (selectOverlayWallet) await setActiveAddress(owners[0].address);
   $('go').disabled = true;
   $('scanAll').disabled = true;
   statusEl.className = 'status';
@@ -269,7 +351,11 @@ form.addEventListener('submit', async (e) => {
     return;
   }
   const known = book.find((e) => e.address === typed);
-  await startScan([{ address: typed, label: known ? known.label : '' }], includeClosed);
+  await startScan(
+    [{ address: typed, label: known ? known.label : '' }],
+    includeClosed,
+    { selectOverlayWallet: true },
+  );
 });
 
 $('scanAll').addEventListener('click', async () => {

@@ -44,7 +44,7 @@
         <span class="section-icon" aria-hidden="true">U</span>
         <div><h2>On-page overlays</h2><p>Bring position context onto the protocol page where you use it.</p></div>
       </div>
-      <p class="section-copy">LPLens has <b>no access to any web page when installed</b>. Each site below is independently optional. On Uniswap it reads the position-page URL; on the positions list it reads position links and the first line of visible row text to discover and label positions. On ProjectX it runs only on <code>www.prjx.com/portfolio</code> and uses the last address you loaded in LPLens; it does not read ProjectX page content or the connected wallet. It never reads balances, forms, signing prompts, or wallet-provider state, and it only appends its own panel. Turning a site off removes that permission and content script.</p>
+      <p class="section-copy">LPLens has <b>no access to any web page when installed</b>. Each site below is independently optional. On Uniswap it reads the position-page URL; on the positions list it reads position links and the first line of visible row text to discover and label positions. On ProjectX it runs only on <code>www.prjx.com/portfolio</code> and uses the ProjectX wallet you explicitly select in LPLens; it does not read ProjectX page content or the connected wallet. It never reads balances, forms, signing prompts, or wallet-provider state, and it only appends its own panel. Turning a site off removes that permission and content script.</p>
       <label class="perm switch-row">
         <span><b>Show the position overlay</b><small>On <code>app.uniswap.org</code> position pages</small></span>
         <input type="checkbox" id="overlayPerm">
