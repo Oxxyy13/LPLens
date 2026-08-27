@@ -41,6 +41,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 > break when Dexscreener changes. `tools/package.mjs` rejects the experiment
 > marker so this code cannot become a release accidentally.
 
+On Dexscreener, drag the dotted panel header to move LPLens anywhere in the
+viewport. Its position is stored only in `chrome.storage.local` and is clamped
+back on-screen after zoom or window-size changes. The minus control collapses
+the panel to a small LPLens pill; double-clicking the header restores the default
+dock. These layout preferences apply only to Dexscreener and do not change the
+Uniswap or ProjectX overlays.
+
 The Chrome Web Store currently serves 0.28.0. This 0.30.0 candidate includes the
 browser-managed portfolio side panel that can stay open while the user changes
 tabs. It restores the most recent rendered portfolio view immediately, then

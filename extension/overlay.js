@@ -72,6 +72,8 @@ const DEXSCREENER_CHAIN_SLUGS = Object.freeze({
   robinhoodchain: 'robinhood',
 });
 let lastKey = null;
+let dexscreenerPanelResizeObserver = null;
+let finishActiveDexscreenerPanelDrag = null;
 
 
 function mount() {
@@ -89,17 +91,30 @@ function mount() {
   sheet.replaceSync(CSS);
   shadow.adoptedStyleSheets = [sheet];
   const panel = document.createElement('div');
-  panel.className = 'panel';
+  panel.className = `panel${ON_DEXSCREENER ? ' dexscreener-panel' : ''}`;
   shadow.appendChild(panel);
   host.__shadow = shadow;
   document.body.appendChild(host);
+  if (ON_DEXSCREENER && typeof ResizeObserver === 'function') {
+    if (dexscreenerPanelResizeObserver) dexscreenerPanelResizeObserver.disconnect();
+    dexscreenerPanelResizeObserver = new ResizeObserver(() => {
+      if (!panel.isConnected || panel.classList.contains('dragging')
+          || !dexscreenerPanelPlacement) return;
+      applyDexscreenerPanelPlacement(panel);
+    });
+    dexscreenerPanelResizeObserver.observe(panel);
+  }
   return shadow;
 }
 
 // Collapsed state is remembered. Without this the panel reopened on every SPA
 // navigation and every reload, so "get out of the way of the chart" had to be
 // re-done constantly.
+const PANEL_COLLAPSED_KEY = ON_DEXSCREENER
+  ? 'dexscreenerPanelCollapsed'
+  : 'panelCollapsed';
 let collapsed = false;
+let collapsedPreferenceGeneration = 0;
 // Set once the user opens the panel by hand, so an automatic collapse from a
 // tight layout never overrides a deliberate choice.
 let userExpanded = false;
@@ -109,11 +124,26 @@ try {
   chrome.storage.local.get('showDetails', (s) => { showDetails = !!(s && s.showDetails); });
 } catch { /* orphaned context */ }
 try {
-  chrome.storage.local.get('panelCollapsed', (s) => {
-    collapsed = !!(s && s.panelCollapsed);
-    const host = document.getElementById(HOST_ID);
-    if (host) host.__shadow.querySelector('.panel').classList.toggle('collapsed', collapsed);
-  });
+  const loadGeneration = collapsedPreferenceGeneration;
+  chrome.storage.local.get(
+    ON_DEXSCREENER ? [PANEL_COLLAPSED_KEY, 'panelCollapsed'] : PANEL_COLLAPSED_KEY,
+    (s) => {
+      if (loadGeneration !== collapsedPreferenceGeneration) return;
+      // Migrate the old shared preference once, without continuing to let a
+      // Dexscreener choice collapse the Uniswap or ProjectX panel too.
+      const hasOwnPreference = Object.prototype.hasOwnProperty.call(
+        s || {}, PANEL_COLLAPSED_KEY,
+      );
+      collapsed = ON_DEXSCREENER && !hasOwnPreference
+        ? !!(s && s.panelCollapsed)
+        : !!(s && s[PANEL_COLLAPSED_KEY]);
+      if (ON_DEXSCREENER && !hasOwnPreference) {
+        try { chrome.storage.local.set({ [PANEL_COLLAPSED_KEY]: collapsed }); } catch {}
+      }
+      const host = document.getElementById(HOST_ID);
+      if (host) applyPanelCollapsedUI(host.__shadow.querySelector('.panel'), collapsed);
+    },
+  );
 } catch { /* orphaned context; default to open */ }
 
 /* ---------------------------------------------------------------------------
@@ -141,8 +171,122 @@ try {
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/* ---------------------------------------------------------------------------
+ * Dexscreener panel placement.
+ *
+ * The chart uses nearly every useful pixel, so the overlay has to be movable.
+ * Placement is Dexscreener-only: ProjectX must keep its forced-left dock and
+ * Uniswap must keep measuring its gutters. Normalized coordinates survive
+ * zoom and window-size changes, while every application is clamped on-screen.
+ * ------------------------------------------------------------------------- */
+
+const DEXSCREENER_PANEL_PLACEMENT_KEY = 'dexscreenerPanelPlacementV1';
+const PANEL_VIEWPORT_MARGIN = 12;
+let dexscreenerPanelPlacement = null;
+let dexscreenerPanelPlacementGeneration = 0;
+
+// BEGIN PURE OVERLAY PANEL PLACEMENT
+function validPanelPlacement(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Number.isFinite(value.x) && Number.isFinite(value.y)
+    && value.x >= 0 && value.x <= 1 && value.y >= 0 && value.y <= 1;
+}
+
+function resolvePanelPlacement(value, size, viewport, margin = 12) {
+  if (!validPanelPlacement(value) || !size || !viewport
+      || !Number.isFinite(size.width) || !Number.isFinite(size.height)
+      || !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height)
+      || !(size.width > 0) || !(size.height > 0)
+      || !(viewport.width > 0) || !(viewport.height > 0)
+      || !Number.isFinite(margin) || margin < 0) return null;
+  const travelX = Math.max(0, viewport.width - size.width - margin * 2);
+  const travelY = Math.max(0, viewport.height - size.height - margin * 2);
+  return {
+    left: margin + value.x * travelX,
+    top: margin + value.y * travelY,
+  };
+}
+
+function panelPlacementFromRect(rect, viewport, margin = 12) {
+  if (!rect || !viewport
+      || !Number.isFinite(rect.left) || !Number.isFinite(rect.top)
+      || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)
+      || !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height)
+      || !(rect.width > 0) || !(rect.height > 0)
+      || !(viewport.width > 0) || !(viewport.height > 0)
+      || !Number.isFinite(margin) || margin < 0) return null;
+  const travelX = Math.max(0, viewport.width - rect.width - margin * 2);
+  const travelY = Math.max(0, viewport.height - rect.height - margin * 2);
+  const x = travelX > 0 ? (rect.left - margin) / travelX : 0;
+  const y = travelY > 0 ? (rect.top - margin) / travelY : 0;
+  return {
+    x: Math.max(0, Math.min(1, x)),
+    y: Math.max(0, Math.min(1, y)),
+  };
+}
+// END PURE OVERLAY PANEL PLACEMENT
+
+function setPanelPixelPosition(panel, left, top) {
+  if (!panel) return false;
+  const rect = panel.getBoundingClientRect();
+  const maxLeft = Math.max(PANEL_VIEWPORT_MARGIN,
+    innerWidth - rect.width - PANEL_VIEWPORT_MARGIN);
+  const maxTop = Math.max(PANEL_VIEWPORT_MARGIN,
+    innerHeight - rect.height - PANEL_VIEWPORT_MARGIN);
+  panel.style.left = clamp(left, PANEL_VIEWPORT_MARGIN, maxLeft) + 'px';
+  panel.style.top = clamp(top, PANEL_VIEWPORT_MARGIN, maxTop) + 'px';
+  // `bottom` exists in the shared stylesheet, so an empty inline value would
+  // reactivate the dock and leave both top and bottom constraining the panel.
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+  return true;
+}
+
+function applyDexscreenerPanelPlacement(panel) {
+  if (!ON_DEXSCREENER || !panel || !validPanelPlacement(dexscreenerPanelPlacement)) return false;
+  const rect = panel.getBoundingClientRect();
+  const target = resolvePanelPlacement(
+    dexscreenerPanelPlacement,
+    { width: rect.width, height: rect.height },
+    { width: innerWidth, height: innerHeight },
+    PANEL_VIEWPORT_MARGIN,
+  );
+  return !!target && setPanelPixelPosition(panel, target.left, target.top);
+}
+
+function rememberDexscreenerPanelPlacement(panel) {
+  if (!ON_DEXSCREENER || !panel) return;
+  const next = panelPlacementFromRect(
+    panel.getBoundingClientRect(),
+    { width: innerWidth, height: innerHeight },
+    PANEL_VIEWPORT_MARGIN,
+  );
+  if (!next) return;
+  dexscreenerPanelPlacementGeneration += 1;
+  dexscreenerPanelPlacement = next;
+  applyDexscreenerPanelPlacement(panel);
+  try { chrome.storage.local.set({ [DEXSCREENER_PANEL_PLACEMENT_KEY]: next }); } catch {}
+}
+
+try {
+  if (ON_DEXSCREENER) {
+    const loadGeneration = dexscreenerPanelPlacementGeneration;
+    chrome.storage.local.get(DEXSCREENER_PANEL_PLACEMENT_KEY, (s) => {
+      if (loadGeneration !== dexscreenerPanelPlacementGeneration) return;
+      const saved = s && s[DEXSCREENER_PANEL_PLACEMENT_KEY];
+      dexscreenerPanelPlacement = validPanelPlacement(saved) ? saved : null;
+      const host = document.getElementById(HOST_ID);
+      if (host && dexscreenerPanelPlacement) {
+        applyDexscreenerPanelPlacement(host.__shadow.querySelector('.panel'));
+      }
+    });
+  }
+} catch { /* orphaned context; use automatic placement */ }
+
 function applyPanelSize(panel) {
-  if (!panel || !panelSize) return false;
+  // The legacy resize grip assumes a bottom-docked panel. Dexscreener is free
+  // positioned now, and its compact mode is the supported smaller footprint.
+  if (ON_DEXSCREENER || !panel || !panelSize) return false;
   panel.style.width = clamp(panelSize.w, 260, innerWidth - 32) + 'px';
   panel.style.maxHeight = clamp(panelSize.h, 140, innerHeight - 32) + 'px';
   return true;
@@ -192,6 +336,119 @@ function attachGrip(panel, dockedRight) {
   });
 }
 
+function attachDexscreenerPanelDrag(panel) {
+  if (!ON_DEXSCREENER || !panel) return;
+  const header = panel.querySelector('.hd');
+  if (!header) return;
+  header.classList.add('panel-drag-handle');
+  header.title = 'Drag to move LPLens. Double-click to reset position.';
+
+  header.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest('button, a, input, select, textarea, [role="button"]')) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (finishActiveDexscreenerPanelDrag) finishActiveDexscreenerPanelDrag();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    let finished = false;
+    let dragOffsetLeft = 0;
+    let dragOffsetTop = 0;
+    try { header.setPointerCapture(pointerId); } catch {}
+
+    const onMove = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      moveEvent.stopPropagation();
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      if (!moved) {
+        moved = true;
+        dexscreenerPanelPlacementGeneration += 1;
+        const currentRect = panel.getBoundingClientRect();
+        dragOffsetLeft = currentRect.left - moveEvent.clientX;
+        dragOffsetTop = currentRect.top - moveEvent.clientY;
+        panel.classList.add('dragging');
+      }
+      setPanelPixelPosition(
+        panel,
+        moveEvent.clientX + dragOffsetLeft,
+        moveEvent.clientY + dragOffsetTop,
+      );
+      const livePlacement = panelPlacementFromRect(
+        panel.getBoundingClientRect(),
+        { width: innerWidth, height: innerHeight },
+        PANEL_VIEWPORT_MARGIN,
+      );
+      if (livePlacement) dexscreenerPanelPlacement = livePlacement;
+    };
+
+    let complete;
+    const finish = (finishEvent) => {
+      if (finishEvent.pointerId !== undefined && finishEvent.pointerId !== pointerId) return;
+      finishEvent.stopPropagation();
+      complete();
+    };
+    complete = () => {
+      if (finished) return;
+      finished = true;
+      header.removeEventListener('pointermove', onMove);
+      header.removeEventListener('pointerup', finish);
+      header.removeEventListener('pointercancel', finish);
+      header.removeEventListener('lostpointercapture', finish);
+      panel.classList.remove('dragging');
+      if (moved) rememberDexscreenerPanelPlacement(panel);
+      if (finishActiveDexscreenerPanelDrag === complete) {
+        finishActiveDexscreenerPanelDrag = null;
+      }
+      try {
+        if (header.hasPointerCapture(pointerId)) header.releasePointerCapture(pointerId);
+      } catch {}
+    };
+    finishActiveDexscreenerPanelDrag = complete;
+
+    header.addEventListener('pointermove', onMove);
+    header.addEventListener('pointerup', finish);
+    header.addEventListener('pointercancel', finish);
+    header.addEventListener('lostpointercapture', finish);
+  });
+
+  header.addEventListener('dblclick', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest('button, a, input, select, textarea, [role="button"]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dexscreenerPanelPlacementGeneration += 1;
+    dexscreenerPanelPlacement = null;
+    panel.style.left = '';
+    panel.style.top = '';
+    panel.style.right = '';
+    panel.style.bottom = '';
+    try { chrome.storage.local.remove(DEXSCREENER_PANEL_PLACEMENT_KEY); } catch {}
+    placePanel(panel);
+  });
+}
+
+function applyPanelCollapsedUI(panel, isCollapsed) {
+  if (!panel) return;
+  panel.classList.toggle('collapsed', isCollapsed);
+  const button = panel.querySelector('#lplens-toggle');
+  if (button) {
+    button.textContent = isCollapsed ? '+' : '−';
+    button.title = isCollapsed ? 'expand' : 'collapse';
+    button.setAttribute('aria-expanded', String(!isCollapsed));
+    button.setAttribute('aria-label', `${isCollapsed ? 'Expand' : 'Collapse'} LPLens panel`);
+  }
+  if (ON_DEXSCREENER && dexscreenerPanelPlacement) {
+    applyDexscreenerPanelPlacement(panel);
+  }
+}
+
 /**
  * Adaptive placement for the detail panel.
  *
@@ -225,13 +482,26 @@ function placePanel(panel) {
   const room = useRight ? roomRight : roomLeft;
   const width = Math.min(MAX, room);
 
+  panel.style.top = '';
+
   // A size the user chose by hand outranks the computed fit.
   if (applyPanelSize(panel)) {
     panel.style.left = useRight ? '' : GAP + 'px';
     panel.style.right = useRight ? GAP + 'px' : '';
+    panel.style.bottom = GAP + 'px';
     return true;
   }
   panel.style.width = width >= MIN ? width + 'px' : '';
+
+  // A dragged Dexscreener panel no longer belongs to either gutter. Its saved
+  // normalized anchor is applied after width selection so zoom and compacting
+  // cannot strand it off-screen.
+  if (ON_DEXSCREENER && applyDexscreenerPanelPlacement(panel)) {
+    panel.dataset.overlapping = '';
+    return true;
+  }
+
+  panel.style.bottom = GAP + 'px';
   if (width >= MIN) {
     panel.style.left = useRight ? '' : GAP + 'px';
     panel.style.right = useRight ? GAP + 'px' : '';
@@ -249,11 +519,18 @@ function placePanel(panel) {
 function render(html, openWhenOverlapping = false) {
   const shadow = mount();
   const panel = shadow.querySelector('.panel');
+  // A network response can rerender the initial Checking card while the user
+  // is dragging it. Finish that gesture first so replacing the header cannot
+  // redock the panel or strand its old pointer capture.
+  if (ON_DEXSCREENER && finishActiveDexscreenerPanelDrag) {
+    finishActiveDexscreenerPanelDrag();
+  }
   panel.innerHTML = html;
   const fits = placePanel(panel);
-  attachGrip(panel, !panel.style.left);
+  if (!ON_DEXSCREENER) attachGrip(panel, !panel.style.left);
   const startsCollapsed = collapsed || (!fits && !userExpanded && !openWhenOverlapping);
-  panel.classList.toggle('collapsed', startsCollapsed);
+  applyPanelCollapsedUI(panel, startsCollapsed);
+  attachDexscreenerPanelDrag(panel);
   const more = panel.querySelector('#lplens-more');
   if (more) {
     panel.classList.toggle('showmore', showDetails);
@@ -267,15 +544,12 @@ function render(html, openWhenOverlapping = false) {
   }
   const btn = panel.querySelector('#lplens-toggle');
   if (btn) {
-    btn.textContent = startsCollapsed ? '+' : '−';
-    btn.title = startsCollapsed ? 'expand' : 'collapse';
     btn.onclick = () => {
+      collapsedPreferenceGeneration += 1;
       collapsed = !panel.classList.contains('collapsed');
       if (!collapsed) userExpanded = true;
-      panel.classList.toggle('collapsed', collapsed);
-      btn.textContent = collapsed ? '+' : '−';
-      btn.title = collapsed ? 'expand' : 'collapse';
-      try { chrome.storage.local.set({ panelCollapsed: collapsed }); } catch {}
+      applyPanelCollapsedUI(panel, collapsed);
+      try { chrome.storage.local.set({ [PANEL_COLLAPSED_KEY]: collapsed }); } catch {}
     };
   }
 }
@@ -290,7 +564,9 @@ const VERSION = (() => {
 const head = (right) => `
   <div class="hd${ON_DEXSCREENER ? ' local-experiment-header' : ''}">
     <span class="brand">LPLens <span class="tag">read-only v${esc(VERSION)}</span></span>
-    <span class="right">${right || ''}<button id="lplens-toggle" title="collapse">-</button></span>
+    ${ON_DEXSCREENER ? '<span class="panel-drag-mark" aria-hidden="true">⠿</span>' : ''}
+    <span class="right">${right || ''}<button id="lplens-toggle" type="button"
+      title="collapse" aria-expanded="true" aria-label="Collapse LPLens panel">−</button></span>
     ${ON_DEXSCREENER ? '<span class="local-experiment-banner">local chart experiment</span>' : ''}
   </div>`;
 
@@ -337,8 +613,13 @@ function body(d) {
 }
 
 function teardown() {
+  if (finishActiveDexscreenerPanelDrag) finishActiveDexscreenerPanelDrag();
   stopDexscreenerChartSession();
   dexscreenerHref = '';
+  if (dexscreenerPanelResizeObserver) {
+    dexscreenerPanelResizeObserver.disconnect();
+    dexscreenerPanelResizeObserver = null;
+  }
   const host = document.getElementById(HOST_ID);
   if (host) host.remove();
   lastKey = null;
@@ -1364,6 +1645,9 @@ function shutdownOrphan(target) {
     } else {
       render(html);
     }
+  } catch {}
+  try {
+    if (dexscreenerPanelResizeObserver) dexscreenerPanelResizeObserver.disconnect();
   } catch {}
 }
 

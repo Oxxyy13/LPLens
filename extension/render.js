@@ -231,14 +231,36 @@
   border: 1px solid color-mix(in srgb, var(--signal) 55%, var(--line)); border-radius: 6px;
   background: color-mix(in srgb, var(--signal-soft) 72%, var(--panel)); color: var(--signal-strong);
   font: 700 8.5px/1.25 var(--mono); letter-spacing: .08em; text-align: center; text-transform: uppercase; }
+.panel-drag-mark { display: none; }
+.dexscreener-panel .panel-drag-mark { display: block; position: absolute; top: 3px; left: 50%;
+  transform: translateX(-50%); pointer-events: none; color: var(--ink-3);
+  font: 13px/1 var(--mono); letter-spacing: -.18em; opacity: .72; }
+.dexscreener-panel .panel-drag-handle { cursor: grab; touch-action: none; user-select: none; }
+.dexscreener-panel.dragging .panel-drag-handle { cursor: grabbing; }
 .right { display: flex; align-items: center; gap: 6px; }
 button {
     all: unset; display: inline-grid; width: 26px; height: 26px; place-items: center; cursor: pointer;
     border: 1px solid transparent; border-radius: 8px; color: var(--ink-3); font-size: 16px; line-height: 1;
   }
 button:hover { border-color: var(--line); background: var(--panel-2); color: var(--ink); }
+button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 .bd { padding: 4px 0 11px; }
 .collapsed .bd { display: none; }
+.panel.dexscreener-panel.collapsed {
+  width: fit-content !important; max-width: calc(100vw - 24px); max-height: none !important;
+  overflow: hidden; border-radius: 13px;
+}
+.panel.dexscreener-panel.collapsed .hd {
+  min-height: 42px; padding: 6px 8px; flex-wrap: nowrap; gap: 8px;
+  position: relative; border-bottom: 0; border-radius: 12px;
+}
+.panel.dexscreener-panel.collapsed .tag,
+.panel.dexscreener-panel.collapsed .pill,
+.panel.dexscreener-panel.collapsed .local-experiment-banner,
+.panel.dexscreener-panel.collapsed .grip { display: none; }
+.panel.dexscreener-panel.collapsed .brand { gap: 6px; }
+.panel.dexscreener-panel.collapsed .brand::before { width: 20px; height: 20px; }
+.panel.dexscreener-panel.collapsed .right { gap: 0; }
 .more {
   display: block; width: calc(100% - 24px); height: auto; margin: 9px 12px 4px;
   text-align: center; padding: 7px; border-radius: 8px;
