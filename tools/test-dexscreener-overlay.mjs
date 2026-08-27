@@ -8,6 +8,7 @@ const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url)
 const options = readFileSync(new URL('../extension/options.html', import.meta.url), 'utf8');
 const optionsScript = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+const security = readFileSync(new URL('../SECURITY.md', import.meta.url), 'utf8');
 const privacy = readFileSync(new URL('./licence-worker/worker.js', import.meta.url), 'utf8');
 
 assert.ok(manifest.optional_host_permissions.includes('https://dexscreener.com/*'));
@@ -60,5 +61,12 @@ for (const [name, body] of [['Options', options], ['README', readme], ['privacy 
     `${name} omits the anonymous LP range disclosure`);
   assert.match(body, /no wallet address|without the (?:active )?wallet address/i,
     `${name} omits the wallet-address exclusion`);
+}
+for (const [name, body] of [
+  ['Options', options], ['Options summary', optionsScript], ['README', readme],
+  ['SECURITY', security], ['privacy policy', privacy],
+]) {
+  assert.match(body, /latest public chart close/i,
+    `${name} omits the local experiment's displayed-close disclosure`);
 }
 console.log('Dexscreener overlay: optional permission, active wallet and local chart disclosure pass');

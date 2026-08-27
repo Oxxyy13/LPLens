@@ -78,19 +78,24 @@ assert.equal(sanitize({
 const titleNode = (input) => {
   const spec = typeof input === 'string' ? { title: input } : input;
   const rect = spec.rect || { left: 10, top: 10, width: 24, height: 24 };
-  return {
+  const node = {
     isConnected: spec.connected !== false,
     __style: {
       display: spec.display || 'block',
       visibility: spec.visibility || 'visible',
       opacity: spec.opacity ?? '1',
       contentVisibility: spec.contentVisibility || 'visible',
+      pointerEvents: spec.pointerEvents || 'auto',
     },
     checkVisibility: () => spec.checkVisible !== false,
     getClientRects: () => spec.clientRects === false ? [] : [rect],
     getBoundingClientRect: () => rect,
-    getAttribute: (name) => name === 'title' ? spec.title : null,
+    getAttribute: (name) => name === 'title' ? spec.title
+      : name === 'aria-disabled' ? spec.ariaDisabled || null : null,
   };
+  node.__paintChild = { __style: { ...node.__style } };
+  node.contains = (candidate) => candidate === node || candidate === node.__paintChild;
+  return node;
 };
 function installChart({
   pageHref = href,
@@ -103,8 +108,12 @@ function installChart({
   frameCount = 1,
   frameSpecs = null,
   elementsFromPoint = null,
+  titleElementsFromPoint = null,
   plotRects = null,
   priceToCoordinate = (price) => 200 - price * 10,
+  seriesClose = undefined,
+  seriesLast = undefined,
+  seriesReads = null,
 } = {}) {
   const defaultPlotRects = plotRects || [{ left: 20, top: 40, width: 800, height: 400 }];
   const specs = frameSpecs || Array.from({ length: frameCount }, () => ({}));
@@ -121,6 +130,23 @@ function installChart({
         }),
       }],
     };
+    const resolvedLast = Object.prototype.hasOwnProperty.call(spec, 'seriesLast')
+      ? spec.seriesLast
+      : seriesLast !== undefined
+        ? seriesLast
+        : seriesClose !== undefined
+          ? { value: [0, 0, 0, 0, seriesClose] }
+          : undefined;
+    if (resolvedLast !== undefined) {
+      chart.getSeries = () => ({
+        data: () => ({
+          last: () => {
+            if (seriesReads) seriesReads.count += 1;
+            return resolvedLast;
+          },
+        }),
+      });
+    }
     const plots = (spec.plotRects || defaultPlotRects).map((input) => {
       const plotSpec = input && input.rect ? input : { rect: input };
       const rect = plotSpec.rect;
@@ -144,6 +170,9 @@ function installChart({
       querySelectorAll: (selector) => selector === '[title]' ? frameTitleNodes
         : selector === '.chart-markup-table.pane' ? plots : [],
       querySelector: (selector) => selector === '.chart-markup-table.pane' ? plots[0] : null,
+      ...(titleElementsFromPoint ? {
+        elementsFromPoint: (x, y) => titleElementsFromPoint(x, y, frameTitleNodes),
+      } : {}),
     };
     const frameWindow = {
       innerWidth: spec.innerWidth || 1000,
@@ -291,6 +320,194 @@ assert.equal(measure({
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
   pair: {},
 }).displayMode, 'price-native', 'a visible outer toolbar remains a valid fallback');
+
+const zeroRectTitles = [
+  { title: 'Switch to market cap chart', rect: { left: 0, top: 0, width: 0, height: 0 } },
+  { title: 'Switch to price in WETH', rect: { left: 0, top: 0, width: 0, height: 0 } },
+];
+const inferredPair = { priceNative: 2, priceUsd: 10, marketCap: 1_000 };
+const inferFromClose = (close, now = 2, pair = inferredPair, extra = {}) => {
+  installChart({
+    frameTitles: zeroRectTitles,
+    seriesClose: close,
+    priceToCoordinate: (price) => 200 - Math.log(price) * 10,
+    ...extra,
+  });
+  return plain(measure({
+    href,
+    ranges: [{ id: 'r0', lo: now / 2, now, hi: now * 1.5 }],
+    pair,
+  }));
+};
+
+for (const [displayMode, close] of [
+  ['price-native', 2], ['price-usd', 10], ['mcap-native', 200], ['mcap-usd', 1_000],
+]) {
+  const inferred = inferFromClose(close);
+  assert.equal(inferred.displayMode, displayMode,
+    `a unique latest displayed close must recover ${displayMode} when title nodes have zero size`);
+  assert.deepEqual(Object.keys(inferred).sort(), [
+    'displayMode', 'href', 'inverted', 'ok', 'plot', 'ranges',
+  ], 'the displayed close must not enter the MAIN result contract');
+}
+
+for (const [displayMode, close] of [
+  ['price-native', 4], ['price-usd', 20], ['mcap-native', 400], ['mcap-usd', 2_000],
+]) {
+  assert.equal(inferFromClose(close, 4).displayMode, displayMode,
+    'mode inference must use the on-chain current range value with cached metadata ratios');
+}
+
+for (const close of [2 * 1.19, 2 / 1.19]) {
+  assert.equal(inferFromClose(close).displayMode, 'price-native',
+    'a displayed close within the symmetric 20 percent gate must be accepted');
+}
+for (const close of [2 * 1.21, 2 / 1.21]) {
+  assert.equal(inferFromClose(close).reason, 'unsupported-chart-mode',
+    'a displayed close outside the symmetric 20 percent gate must fail closed');
+}
+
+assert.equal(inferFromClose(2, 2, {
+  priceNative: 2, priceUsd: 2 * 1.49, marketCap: 1_000,
+}).reason, 'unsupported-chart-mode',
+'candidate modes separated by less than the 1.5x runner margin must remain ambiguous');
+assert.equal(inferFromClose(2, 2, {
+  priceNative: 2, priceUsd: 2 * 1.51, marketCap: 1_000,
+}).displayMode, 'price-native',
+'candidate modes beyond the 1.5x runner margin may be resolved');
+assert.equal(inferFromClose(2, 2, {
+  priceNative: 2, priceUsd: 2.02, marketCap: 1_000,
+}).reason, 'unsupported-chart-mode', 'stable-quote-like native and USD modes must not be guessed');
+assert.equal(inferFromClose(2, 2, {
+  priceNative: 2, priceUsd: 10, marketCap: 10.1,
+}).reason, 'unsupported-chart-mode', 'price and market-cap candidates must not be guessed when supply collides');
+
+for (const pair of [
+  { priceUsd: 10, marketCap: 1_000 },
+  { priceNative: 2, marketCap: 1_000 },
+  { priceNative: 2, priceUsd: 10 },
+]) {
+  assert.equal(inferFromClose(2, 2, pair).reason, 'unsupported-chart-mode',
+    'incomplete pair metadata must disable displayed-close mode inference');
+}
+
+installChart({
+  frameTitles: [
+    'Switch to market cap chart',
+    { title: 'Switch to price in WETH', rect: { left: 0, top: 0, width: 0, height: 0 } },
+  ],
+  seriesClose: 10,
+  priceToCoordinate: (price) => 200 - Math.log(price) * 10,
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceNative: 2, priceUsd: 10 },
+}).displayMode, 'price-usd',
+'a known price-chart signal must limit inference to candidates that do not need market cap');
+
+installChart({
+  frameTitles: [
+    { title: 'Switch to market cap chart', rect: { left: 0, top: 0, width: 0, height: 0 } },
+    'Switch to USD price',
+  ],
+  seriesClose: 200,
+  priceToCoordinate: (price) => 200 - Math.log(price) * 10,
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: { priceUsd: 10, marketCap: 1_000 },
+}).displayMode, 'mcap-native',
+'a known native-unit signal must limit inference to candidates that do not need priceNative');
+
+for (const seriesLast of [
+  null, {}, { value: [] }, { value: [0, 0, 0, 0, 0] },
+  { value: [0, 0, 0, 0, NaN] }, { value: [0, 0, 0, 0, Infinity] },
+]) {
+  assert.equal(inferFromClose(undefined, 2, inferredPair, { seriesLast }).reason,
+    'unsupported-chart-mode', 'missing or malformed latest-series values must fail closed');
+}
+
+installChart({ unitTitle: 'Switch to USD price', seriesClose: 10 });
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: inferredPair,
+}).reason, 'chart-mode-conflict',
+'a displayed close must not override an exact contradictory title mode');
+
+const seriesReads = { count: 0 };
+inferFromClose(2, 2, inferredPair, { seriesReads });
+assert.equal(seriesReads.count, 1,
+  'mode inference may read only the latest series item once, never chart history');
+
+const chartRect = { left: 10, top: 10, width: 24, height: 24 };
+const unitRect = { left: 50, top: 10, width: 24, height: 24 };
+installChart({
+  frameTitles: [
+    { title: 'Switch to market cap chart', rect: chartRect, ariaDisabled: 'true' },
+    { title: 'Switch to price in WETH', rect: unitRect },
+    { title: 'Switch to USD price', rect: unitRect, ariaDisabled: 'true' },
+  ],
+  titleElementsFromPoint: (x, _y, nodes) => x < 40 ? [nodes[0]] : [nodes[2], nodes[1]],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}).displayMode, 'price-native',
+'the top-painted replacement control must beat an overlapping stale control');
+
+installChart({
+  frameTitles: [
+    { title: 'Switch to market cap chart', rect: chartRect },
+    { title: 'Switch to USD price', rect: unitRect },
+  ],
+  titleElementsFromPoint: (x, _y, nodes) => [
+    (x < 40 ? nodes[0] : nodes[1]).__paintChild,
+  ],
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: {},
+}).displayMode, 'price-native',
+'a painted descendant must establish that its titled control is visible');
+
+installChart({
+  frameTitles: [
+    { title: 'Switch to market cap chart', rect: chartRect },
+    { title: 'Switch to USD price', rect: unitRect },
+    { title: 'Switch to price in WETH', rect: unitRect },
+  ],
+  titleElementsFromPoint: (x, _y, nodes) => x < 40 ? [nodes[0]] : [nodes[2], nodes[1]],
+  seriesClose: 10,
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: inferredPair,
+}).displayMode, 'price-usd',
+'top-painted mode resolution must work in the reverse unit state');
+
+installChart({
+  frameTitles: [
+    { title: 'Switch to market cap chart', rect: chartRect },
+    { title: 'Switch to USD price', rect: unitRect },
+    { title: 'Switch to price in WETH', rect: { left: 90, top: 10, width: 24, height: 24 } },
+  ],
+  titleElementsFromPoint: (x, _y, nodes) => x < 40 ? [nodes[0]]
+    : x < 80 ? [nodes[1]] : [nodes[2]],
+  seriesClose: 2,
+});
+assert.equal(measure({
+  href,
+  ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
+  pair: inferredPair,
+}).reason, 'unsupported-chart-mode',
+'separate top-painted contradictory controls must remain fail-closed');
+
 installChart({ unitTitle: 'Switch to price in USD', scaleMode: 1 });
 assert.equal(measure({
   href,

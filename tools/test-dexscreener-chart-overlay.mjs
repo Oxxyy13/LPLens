@@ -29,23 +29,29 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 vm.runInContext(`${recoveryPure[1]}
 globalThis.__recovery = planDexscreenerChartRecovery;`, context,
 { filename: 'dexscreener-chart-recovery.js' });
-const recovery = (reason, misses, elapsed, hasVisual) => plain(
-  context.__recovery(reason, misses, elapsed, hasVisual),
+const recovery = (reason, misses, elapsed) => plain(
+  context.__recovery(reason, misses, elapsed),
 );
-assert.deepEqual(recovery('chart-frame-ambiguous', 1, 0, true), {
-  transient: true, keepVisual: true, delay: 100,
+assert.deepEqual(recovery('chart-frame-ambiguous', 1, 0), {
+  transient: true, showFailure: false, showAligning: true, delay: 100,
 });
-assert.deepEqual(recovery('coordinate-unavailable', 3, 300, true), {
-  transient: true, keepVisual: true, delay: 150,
+assert.deepEqual(recovery('coordinate-unavailable', 3, 300), {
+  transient: true, showFailure: false, showAligning: true, delay: 400,
 });
-assert.deepEqual(recovery('coordinate-unavailable', 4, 500, true), {
-  transient: true, keepVisual: false, delay: 400,
+assert.deepEqual(recovery('coordinate-unavailable', 4, 700), {
+  transient: true, showFailure: false, showAligning: true, delay: 750,
+}, 'the bounded retry burst must return to the normal polling cadence');
+assert.deepEqual(recovery('coordinate-unavailable', 5, 1_600), {
+  transient: true, showFailure: true, showAligning: false, delay: 750,
+}, 'a persistent transient failure must become actionable after the notice delay');
+assert.deepEqual(recovery('chart-mode-conflict', 1, 0), {
+  transient: true, showFailure: false, showAligning: true, delay: 100,
 });
-assert.deepEqual(recovery('unsupported-price-scale', 1, 0, true), {
-  transient: false, keepVisual: false, delay: 750,
+assert.deepEqual(recovery('unsupported-price-scale', 1, 0), {
+  transient: false, showFailure: true, showAligning: false, delay: 750,
 });
-assert.deepEqual(recovery('no-response', 1, 0, false), {
-  transient: true, keepVisual: false, delay: 100,
+assert.deepEqual(recovery('no-response', 1, 0), {
+  transient: true, showFailure: false, showAligning: true, delay: 100,
 });
 
 const href = 'https://dexscreener.com/robinhood/0x2b0d0183d017c58b924401ca8ac362f6e01f0e9e';
@@ -209,14 +215,17 @@ assert.match(overlay, /attachShadow\(\{ mode: 'closed' \}\)/);
 assert.match(overlay, /pointerEvents:\s*'none'/);
 assert.match(overlay, /DEXSCREENER_CHART_POLL_MS = 750/);
 assert.match(overlay, /DEXSCREENER_CHART_RETRY_MS = \[100, 200, 400\]/);
-assert.match(overlay, /DEXSCREENER_CHART_GRACE_MS = 450/);
+assert.match(overlay, /DEXSCREENER_CHART_NOTICE_MS = 1_500/);
 assert.match(refresh, /session\.misses \+= 1/);
 assert.match(refresh, /session\.firstMissAt/);
-assert.match(refresh, /markDexscreenerChartRealigning\(\)/);
+assert.match(refresh, /showDexscreenerChartAligning\(\)/);
 assert.match(refresh, /isolated-validation-failed/);
 assert.match(refresh, /paint-failed/);
-assert.match(refresh, /showDexscreenerChartFailure\(reason\)/,
+assert.match(refresh, /if \(recovery\.showFailure\) showDexscreenerChartFailure\(reason\)/,
   'a stable local experiment failure must name its reason in the card');
+assert.match(refresh,
+  /clearDexscreenerChartVisual\(\);[\s\S]*recovery\.showFailure[\s\S]*recovery\.showAligning/,
+  'the first miss must remove stale chart geometry before showing a neutral recovery state');
 assert.match(refresh, /scheduleDexscreenerChartGeometry\(session, recovery\.delay\)/);
 assert.match(overlay, /if \(!panelShadow\) return true;/,
   'a successful SVG paint must survive a temporary panel rerender');

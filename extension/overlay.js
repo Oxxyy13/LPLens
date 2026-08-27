@@ -621,28 +621,27 @@ async function syncProjectXPortfolio() {
 // BEGIN PURE DEXSCREENER CHART RECOVERY
 const DEXSCREENER_CHART_POLL_MS = 750;
 const DEXSCREENER_CHART_RETRY_MS = [100, 200, 400];
-const DEXSCREENER_CHART_GRACE_MS = 450;
+const DEXSCREENER_CHART_NOTICE_MS = 1_500;
 const DEXSCREENER_CHART_TRANSIENT_FAILURES = new Set([
   'chart-frame-ambiguous', 'chart-frame-unavailable', 'chart-api-unavailable',
-  'unsupported-chart-mode', 'chart-geometry-unavailable', 'coordinate-unavailable',
+  'unsupported-chart-mode', 'chart-mode-conflict',
+  'chart-geometry-unavailable', 'coordinate-unavailable',
   'measurement-failed', 'execution-timeout', 'execution-failed', 'invalid-result',
   'isolated-validation-failed', 'paint-failed',
 ]);
 
-function planDexscreenerChartRecovery(reason, misses, elapsed, hasVisual) {
+function planDexscreenerChartRecovery(reason, misses, elapsed) {
   const transient = reason === 'no-response'
     || DEXSCREENER_CHART_TRANSIENT_FAILURES.has(reason);
-  const retry = transient
-    ? DEXSCREENER_CHART_RETRY_MS[Math.min(Math.max(0, misses - 1),
-      DEXSCREENER_CHART_RETRY_MS.length - 1)]
+  const retryIndex = Math.max(0, misses - 1);
+  const retry = transient && retryIndex < DEXSCREENER_CHART_RETRY_MS.length
+    ? DEXSCREENER_CHART_RETRY_MS[retryIndex]
     : DEXSCREENER_CHART_POLL_MS;
-  const keepVisual = transient && hasVisual && elapsed < DEXSCREENER_CHART_GRACE_MS;
   return {
     transient,
-    keepVisual,
-    delay: keepVisual
-      ? Math.min(retry, Math.max(50, DEXSCREENER_CHART_GRACE_MS - elapsed))
-      : retry,
+    showFailure: !transient || elapsed >= DEXSCREENER_CHART_NOTICE_MS,
+    showAligning: transient && elapsed < DEXSCREENER_CHART_NOTICE_MS,
+    delay: retry,
   };
 }
 // END PURE DEXSCREENER CHART RECOVERY
@@ -826,6 +825,7 @@ function resetDexscreenerAlignedCards() {
     if (mode) mode.textContent = 'chart scale pending';
     const status = card.querySelector('.dex-chart-status');
     if (status) {
+      status.classList.remove('is-aligning');
       status.hidden = true;
       status.textContent = '';
     }
@@ -841,6 +841,7 @@ function showDexscreenerChartFailure(reason) {
   for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
     const status = card.querySelector('.dex-chart-status');
     if (!status) continue;
+    status.classList.remove('is-aligning');
     status.textContent = `chart: ${safeReason}`;
     status.hidden = false;
   }
@@ -852,15 +853,16 @@ function clearDexscreenerChartVisual() {
   resetDexscreenerAlignedCards();
 }
 
-function markDexscreenerChartRealigning() {
-  const host = document.getElementById(DEXSCREENER_CHART_HOST_ID);
-  if (host && host.__shadow) host.style.setProperty('opacity', '.35', 'important');
+function showDexscreenerChartAligning() {
   const panelHost = document.getElementById(HOST_ID);
   const panelShadow = panelHost && panelHost.__shadow;
   if (!panelShadow) return;
-  for (const card of panelShadow.querySelectorAll('.portfolio-card.chart-range-aligned')) {
-    const mode = card.querySelector('.dex-range-aligned-mode');
-    if (mode) mode.textContent = 'chart realigning';
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    const status = card.querySelector('.dex-chart-status');
+    if (!status) continue;
+    status.classList.add('is-aligning');
+    status.textContent = 'chart aligning';
+    status.hidden = false;
   }
 }
 
@@ -994,6 +996,7 @@ function paintDexscreenerChartGeometry(geometry) {
     if (mode && aligned) mode.textContent = alignedMode;
     const status = card.querySelector('.dex-chart-status');
     if (status) {
+      status.classList.remove('is-aligning');
       status.hidden = true;
       status.textContent = '';
     }
@@ -1058,16 +1061,10 @@ async function refreshDexscreenerChartGeometry(session) {
   const now = Date.now();
   if (!session.firstMissAt) session.firstMissAt = now;
   const elapsed = now - session.firstMissAt;
-  const visual = document.getElementById(DEXSCREENER_CHART_HOST_ID);
-  const recovery = planDexscreenerChartRecovery(
-    reason, session.misses, elapsed, Boolean(visual && visual.__shadow),
-  );
-  if (recovery.keepVisual) {
-    markDexscreenerChartRealigning();
-  } else {
-    clearDexscreenerChartVisual();
-    showDexscreenerChartFailure(reason);
-  }
+  const recovery = planDexscreenerChartRecovery(reason, session.misses, elapsed);
+  clearDexscreenerChartVisual();
+  if (recovery.showFailure) showDexscreenerChartFailure(reason);
+  else if (recovery.showAligning) showDexscreenerChartAligning();
   scheduleDexscreenerChartGeometry(session, recovery.delay);
 }
 

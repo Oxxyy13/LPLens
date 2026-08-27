@@ -136,7 +136,7 @@ async function paintPermissions() {
     It sends those two route values, without the wallet address, to api.dexscreener.com to match
     token orientation. It uses the active overlay wallet selected in LPLens. This local experiment
     also gives a one-shot MAIN-world function up to three anonymous ranges so it can read only the
-    chart mode, plot geometry and numeric price coordinates. It does not give that function the
+    chart mode, latest public chart close, plot geometry and numeric price coordinates. It does not give that function the
     wallet address, position ID, PnL, access key, endpoint or provider key.</li>`);
   const pageAccess = pageRows.length ? pageRows.join('')
     : `<li class="no"><b>No web page at all.</b> All overlays are off, so no

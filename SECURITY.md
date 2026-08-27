@@ -60,8 +60,9 @@ addresses used to orient the independent LPLens range display.
 **LOCAL-ONLY EXPERIMENT:** This branch also tests chart-aligned range graphics.
 For one measurement at a time, the service worker passes anonymous LP range
 numbers to a narrowly scoped function in Dexscreener's MAIN world. The function
-reads chart mode, plot geometry, and price-to-coordinate results through a
-private TradingView interface. It receives no wallet address, token ID, PnL,
+reads chart mode, the latest public chart close, plot geometry, and
+price-to-coordinate results through a private TradingView interface. It receives
+no wallet address, token ID, PnL,
 access key, custom endpoint, or provider key. Its implementation does not read
 or call the wallet provider, create a TradingView drawing, alter autoscale, move
 the visible range, or otherwise change chart state. The persistent isolated

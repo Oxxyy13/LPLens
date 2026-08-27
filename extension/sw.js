@@ -489,6 +489,38 @@ function measureDexscreenerChart(payload) {
             ? rootWindow.innerHeight : rect.top + rect.height;
           if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0
               || rect.left >= viewportWidth || rect.top >= viewportHeight) continue;
+          if (typeof root.elementsFromPoint === 'function') {
+            const left = Math.max(0, rect.left);
+            const top = Math.max(0, rect.top);
+            const right = Math.min(viewportWidth, rect.left + rect.width);
+            const bottom = Math.min(viewportHeight, rect.top + rect.height);
+            const width = right - left;
+            const height = bottom - top;
+            if (width <= 0 || height <= 0) continue;
+            const points = [[.5, .5], [.2, .5], [.8, .5]];
+            let painted = false;
+            for (const [xRatio, yRatio] of points) {
+              const hits = Array.from(root.elementsFromPoint(
+                left + width * xRatio, top + height * yRatio,
+              ) || []);
+              const topHit = hits.find((candidate) => {
+                try {
+                  if (!styleReader) return true;
+                  const style = styleReader(candidate);
+                  return style.pointerEvents !== 'none' && style.display !== 'none'
+                    && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+                } catch {
+                  return true;
+                }
+              });
+              if (topHit && (topHit === node
+                  || (typeof node.contains === 'function' && node.contains(topHit)))) {
+                painted = true;
+                break;
+              }
+            }
+            if (!painted) continue;
+          }
           const title = String(node.getAttribute('title') || '').trim();
           if (title) found.push(title);
         } catch {
@@ -505,10 +537,11 @@ function measureDexscreenerChart(payload) {
     };
     const chartTitles = chooseTitles((title) => /^switch to (?:market cap|price) chart$/i.test(title));
     const normalizedChartTitles = chartTitles.map((title) => title.toLowerCase());
-    const priceSignal = normalizedChartTitles.includes('switch to market cap chart');
-    const marketCapSignal = normalizedChartTitles.includes('switch to price chart');
-    if (priceSignal === marketCapSignal) return fail('unsupported-chart-mode');
-    const chartKind = priceSignal ? 'price' : 'mcap';
+    const chartSignals = new Set();
+    if (normalizedChartTitles.includes('switch to market cap chart')) chartSignals.add('price');
+    if (normalizedChartTitles.includes('switch to price chart')) chartSignals.add('mcap');
+    if (chartSignals.size > 1) return fail('unsupported-chart-mode');
+    const chartKind = chartSignals.size === 1 ? chartSignals.values().next().value : null;
 
     const unitSignals = new Set();
     const unitTitles = chooseTitles((title) => /^switch to (?:usd price|price in\s+.+)$/i.test(title));
@@ -522,16 +555,60 @@ function measureDexscreenerChart(payload) {
       const target = match[1].trim().toLowerCase();
       unitSignals.add(target === 'usd' ? 'native' : 'usd');
     }
-    if (unitSignals.size !== 1) return fail('unsupported-chart-mode');
+    if (unitSignals.size > 1) return fail('unsupported-chart-mode');
     // The control title names the unit a click would switch *to*. Dexscreener's
     // live native-mode control currently says "Switch to USD price"; an older
     // layout said "Switch to price in USD". Both are the same native signal.
-    const currentUnit = unitSignals.values().next().value;
-    const displayMode = `${chartKind}-${currentUnit}`;
+    const currentUnit = unitSignals.size === 1 ? unitSignals.values().next().value : null;
+    const titleMode = chartKind && currentUnit ? `${chartKind}-${currentUnit}` : null;
 
     const priceNative = pairValue('priceNative');
     const priceUsd = pairValue('priceUsd');
     const marketCap = pairValue('marketCap') || pairValue('fdv');
+    let seriesMode = null;
+    const now = ranges[0].now;
+    const expectedModes = [
+      { mode: 'price-native', kind: 'price', unit: 'native', value: now },
+      { mode: 'price-usd', kind: 'price', unit: 'usd',
+        value: priceNative && priceUsd ? now * priceUsd / priceNative : null },
+      { mode: 'mcap-native', kind: 'mcap', unit: 'native',
+        value: priceUsd && marketCap ? now * marketCap / priceUsd : null },
+      { mode: 'mcap-usd', kind: 'mcap', unit: 'usd',
+        value: priceNative && marketCap ? now * marketCap / priceNative : null },
+    ].filter((candidate) => (titleMode || !chartKind || candidate.kind === chartKind)
+      && (titleMode || !currentUnit || candidate.unit === currentUnit));
+    if (expectedModes.length && expectedModes.every((candidate) => positive(candidate.value))) {
+      let displayedClose = null;
+      try {
+        const series = typeof chart.getSeries === 'function' ? chart.getSeries() : null;
+        const seriesData = series && typeof series.data === 'function' ? series.data() : null;
+        const last = seriesData && typeof seriesData.last === 'function' ? seriesData.last() : null;
+        if (last && Array.isArray(last.value) && positive(last.value[4])) {
+          displayedClose = last.value[4];
+        }
+      } catch {
+        // A rebuilding chart may not expose a current candle yet.
+      }
+      if (displayedClose) {
+        const ranked = expectedModes.map((candidate) => ({
+          ...candidate,
+          distance: Math.abs(Math.log(displayedClose / candidate.value)),
+        })).sort((a, b) => a.distance - b.distance);
+        const best = ranked[0];
+        const runner = ranked[1];
+        if (best && best.distance <= Math.log(1.2)
+            && (!runner || runner.distance - best.distance >= Math.log(1.5))) {
+          seriesMode = best.mode;
+        }
+      }
+    }
+
+    if (titleMode && seriesMode && titleMode !== seriesMode) {
+      return fail('chart-mode-conflict');
+    }
+    const displayMode = titleMode || seriesMode;
+    if (!displayMode) return fail('unsupported-chart-mode');
+
     let factor = 1;
     if (displayMode === 'price-usd') {
       if (!priceNative || !priceUsd) return fail('pair-conversion-unavailable');
@@ -666,7 +743,7 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
   const reasons = new Set([
     'stale-route', 'invalid-ranges', 'chart-frame-ambiguous',
     'chart-frame-unavailable', 'chart-api-unavailable',
-    'unsupported-price-scale', 'unsupported-chart-mode',
+    'unsupported-price-scale', 'unsupported-chart-mode', 'chart-mode-conflict',
     'pair-conversion-unavailable', 'chart-geometry-unavailable',
     'coordinate-unavailable', 'measurement-failed',
   ]);

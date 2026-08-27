@@ -31,8 +31,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 > **LOCAL-ONLY EXPERIMENT:** This branch tests chart-aligned LP ranges on
 > Dexscreener. It is not the Store candidate described below and cannot be
 > packaged. For one measurement at a time, the service worker gives a narrowly
-> scoped MAIN-world function anonymous LP range numbers and reads the chart mode
-> and geometry through Dexscreener's private TradingView interface. It does not
+> scoped MAIN-world function anonymous LP range numbers and reads the chart mode,
+> latest public chart close, and geometry through Dexscreener's private TradingView interface. It does not
 > provide a wallet address, token ID, PnL, access key, endpoint, or provider key.
 > It does not read or call the wallet provider and does not change chart state.
 > The persistent isolated content script draws LPLens's own overlay from the
@@ -321,8 +321,9 @@ understanding rather than skimming:
   that script by construction. The local chart experiment is a disclosed,
   narrow exception: the service worker executes a one-shot MAIN-world function
   on Dexscreener. That function receives at most anonymous LP low, current, and
-  high range numbers. It reads only chart mode, plot geometry, and the numeric
-  price-to-coordinate mapping from Dexscreener's private TradingView interface.
+  high range numbers. It reads only chart mode, the latest public chart close,
+  plot geometry, and the numeric price-to-coordinate mapping from Dexscreener's
+  private TradingView interface.
   It receives no wallet address, token ID, PnL, access key, custom endpoint, or
   provider key. Its code does not read or call a wallet provider and does not
   create drawings, change the visible range, alter autoscale, or otherwise
