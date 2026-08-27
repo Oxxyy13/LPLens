@@ -1,6 +1,7 @@
 import { CHAINS, PUBLIC_RPC } from './lib/chains.js';
 import { GATING_ENABLED, TRIAL_LENGTH_DAYS, entitlement } from './lib/license.js';
 import { RPC_METHODS } from './lib/rpc.js';
+import { TELEMETRY_SETTING_KEY } from './lib/telemetry.js';
 
 const escape = (s) => String(s).replace(/[&<>"]/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -31,7 +32,7 @@ if (GATING_ENABLED) {
   licenseSection.hidden = true;
 }
 
-chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey'], (s) => {
+chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey', TELEMETRY_SETTING_KEY], (s) => {
   const o = s.rpcOverrides || {};
   for (const k of keys) {
     // Only the user's saved override goes in the field. Never the live
@@ -40,6 +41,7 @@ chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey'], (s) => 
   }
   if (s.etherscanKey) document.getElementById('etherscanKey').value = s.etherscanKey;
   if (GATING_ENABLED && s.licenseKey) document.getElementById('licenseKey').value = s.licenseKey;
+  document.getElementById('telemetryEnabled').checked = s[TELEMETRY_SETTING_KEY] !== false;
 });
 
 const showLicense = document.getElementById('showLicense');
@@ -56,6 +58,11 @@ if (showEtherscan) {
   });
 }
 
+const telemetryBox = document.getElementById('telemetryEnabled');
+telemetryBox.addEventListener('change', () => {
+  chrome.storage.local.set({ [TELEMETRY_SETTING_KEY]: telemetryBox.checked });
+});
+
 document.getElementById('save').addEventListener('click', () => {
   const rpcOverrides = {};
   for (const k of keys) {
@@ -63,7 +70,11 @@ document.getElementById('save').addEventListener('click', () => {
     if (v) rpcOverrides[k] = v;
   }
   const etherscanKey = document.getElementById('etherscanKey').value.trim();
-  const payload = { rpcOverrides, etherscanKey };
+  const payload = {
+    rpcOverrides,
+    etherscanKey,
+    [TELEMETRY_SETTING_KEY]: document.getElementById('telemetryEnabled').checked,
+  };
   // While gating is off, do not write licenseKey / licenseSeen — leftover
   // values from earlier testing stay in storage, ignored.
   if (GATING_ENABLED) {
@@ -89,8 +100,10 @@ document.getElementById('save').addEventListener('click', () => {
 
 const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
 const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
+const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
 const permBox = document.getElementById('overlayPerm');
 const projectxPermBox = document.getElementById('projectxOverlayPerm');
+const dexscreenerPermBox = document.getElementById('dexscreenerOverlayPerm');
 const report = document.getElementById('permReport');
 
 /** Oxford-comma join of RPC method names as <code> tags. Driven by RPC_METHODS. */
@@ -103,12 +116,14 @@ function rpcMethodList(methods) {
 
 async function paintPermissions() {
   const mf = chrome.runtime.getManifest();
-  const [granted, projectxGranted] = await Promise.all([
+  const [granted, projectxGranted, dexscreenerGranted] = await Promise.all([
     chrome.permissions.contains({ origins: [OVERLAY_ORIGIN] }),
     chrome.permissions.contains({ origins: [PROJECTX_OVERLAY_ORIGIN] }),
+    chrome.permissions.contains({ origins: [DEXSCREENER_OVERLAY_ORIGIN] }),
   ]);
   permBox.checked = granted;
   projectxPermBox.checked = projectxGranted;
+  dexscreenerPermBox.checked = dexscreenerGranted;
 
   const pageRows = [];
   if (granted) pageRows.push(`<li class="yes"><b>app.uniswap.org position pages</b> — can read and add
@@ -116,8 +131,11 @@ async function paintPermissions() {
   if (projectxGranted) pageRows.push(`<li class="yes"><b>www.prjx.com/portfolio</b> — can add the
     ProjectX panel. It uses the last address loaded in LPLens and does not read
     the connected wallet or ProjectX page content.</li>`);
+  if (dexscreenerGranted) pageRows.push(`<li class="yes"><b>dexscreener.com pair pages</b> - can read
+    the chain and pool identifier in the URL and append a matching-position panel.
+    It uses the last address loaded in LPLens and reads no Dexscreener page content.</li>`);
   const pageAccess = pageRows.length ? pageRows.join('')
-    : `<li class="no"><b>No web page at all.</b> Both overlays are off, so no
+    : `<li class="no"><b>No web page at all.</b> All overlays are off, so no
          content script is registered anywhere.</li>`;
 
   const hosts = (mf.host_permissions || []).map((h) =>
@@ -162,6 +180,16 @@ projectxPermBox.addEventListener('change', async () => {
     if (!ok) projectxPermBox.checked = false;
   } else {
     await chrome.permissions.remove({ origins: [PROJECTX_OVERLAY_ORIGIN] });
+  }
+  paintPermissions();
+});
+
+dexscreenerPermBox.addEventListener('change', async () => {
+  if (dexscreenerPermBox.checked) {
+    const ok = await chrome.permissions.request({ origins: [DEXSCREENER_OVERLAY_ORIGIN] });
+    if (!ok) dexscreenerPermBox.checked = false;
+  } else {
+    await chrome.permissions.remove({ origins: [DEXSCREENER_OVERLAY_ORIGIN] });
   }
   paintPermissions();
 });

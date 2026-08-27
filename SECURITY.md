@@ -29,9 +29,9 @@ The extension has no wallet-provider or signing integration. It does not call
 - `eth_getBlockByNumber`
 - `eth_getTransactionReceipt`
 
-The optional Uniswap and ProjectX page scripts run in Chrome's isolated world.
-Their site permissions are separately granted, off at install, and revocable.
-Neither script can access another extension's storage or wallet keys.
+The optional Uniswap, ProjectX, and Dexscreener page scripts run in Chrome's
+isolated world. Their site permissions are separately granted, off at install,
+and revocable. None can access another extension's storage or wallet keys.
 
 ## Permissions and data flow
 
@@ -50,6 +50,13 @@ access codes and random installation identifiers plus operational request
 counts. See the live policy for the complete disclosure:
 <https://lplens-beta.licence-worker.workers.dev/privacy>.
 
+When enabled in Settings, anonymous scan telemetry is limited to extension
+version, popup or side-panel surface, coarse outcome/count/duration buckets,
+and allowlisted per-chain error categories. Those aggregate database rows have
+no access-code hash, installation hash, wallet, token, pool, position, custom
+endpoint, provider key, or raw error. The local Copy diagnostics report follows
+the same exclusion boundary and leaves the browser only by explicit user action.
+
 ## Reproduce the Store package
 
 Each release identifies the exact source commit, Store ZIP, size, and SHA-256
@@ -57,10 +64,10 @@ digest. There is no bundler or minifier: the packaged extension tree must be
 byte-identical to `extension/`.
 
 ```bash
-git checkout v0.29.0
+git checkout v0.30.0
 node tools/check-repo-secrets.mjs
 node tools/package.mjs
-diff -r extension build/lplens-0.29.0
+diff -r extension build/lplens-0.30.0
 ```
 
 The final `diff` must print nothing. `tools/package.mjs` also parses every

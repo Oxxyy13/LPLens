@@ -314,6 +314,32 @@ body:not(.sidepanel) .hide-position { display: none; }
 }
 .notice strong { color: var(--ink); }
 footer { padding: 0 14px 14px; background: var(--ground); }
+.diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: -3px 0 10px;
+  color: var(--ink-3);
+  font: 9.5px/1.25 var(--mono);
+}
+.diagnostic-actions .text-button,
+.diagnostic-actions a {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--signal-strong);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.diagnostic-actions .text-button:hover,
+.diagnostic-actions a:hover { background: transparent; color: var(--signal); }
+.diagnostic-actions #diagnosticState { color: var(--ink-3); }
 .security-note { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; align-items: center; box-shadow: var(--shadow-sm); }
 .security-note a { white-space: nowrap; }
 .security-icon { display: grid; width: 20px; height: 20px; place-items: center; border-radius: 6px; background: var(--good-soft); color: var(--good); font-size: 11px; font-weight: 800; }

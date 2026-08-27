@@ -26,9 +26,9 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.29.0 candidate - persistent portfolio panel
+## Status: 0.30.0 candidate - support diagnostics and Dexscreener context
 
-The Chrome Web Store currently serves 0.28.0. The 0.29.0 candidate adds a
+The Chrome Web Store currently serves 0.28.0. This 0.30.0 candidate includes the
 browser-managed portfolio side panel that can stay open while the user changes
 tabs. It restores the most recent rendered portfolio view immediately, then
 refreshes only when the user asks. The snapshot stays in
@@ -39,7 +39,11 @@ shows both dollars and percentage when available. Unwanted or unsolicited LP
 NFTs can be hidden locally from the side panel; hidden cards are excluded from
 portfolio counts and totals and can be restored at any time. Multi-wallet scan
 progress stays compact, while per-wallet and per-chain outcomes remain available
-under an expandable `Scan details` control.
+under an expandable `Scan details` control. Version 0.30 also adds a sanitized
+Copy diagnostics control, optional anonymous aggregate scan outcomes, and a
+separately optional Dexscreener pair-page overlay. Diagnostics and aggregate
+events contain no wallet, token, pool, position, access-code, installation, or
+raw-error values.
 
 Access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
@@ -50,7 +54,10 @@ tester supplies no RPC or explorer key: paste the LPLens access key, paste a
 wallet address, and scan. The source is
 in this repo at `tools/licence-worker/worker.js`. It stores hashes of access
 codes and random browser-installation identifiers plus aggregate request counts;
-it does not store wallet addresses, log filters, IP addresses or API responses.
+when enabled in Settings, it also stores anonymous daily scan outcomes and
+allowlisted error-category totals in rows that have no access-code or
+installation hash. It does not store wallet addresses, log filters, IP
+addresses or API responses.
 The relay necessarily processes each allowlisted log filter long enough to send
 it to Blockscout; v4 ownership filters can contain the public address being read.
 The saved access key is masked whenever Options opens and is revealed only when
@@ -69,7 +76,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.29.0
+diff -r extension build/lplens-0.30.0
 ```
 
 That diff is empty. `tools/package.mjs` also refuses to produce a package if it
@@ -88,9 +95,9 @@ Two claims worth checking directly, because they are the ones that matter:
   and LPLens service hosts. `sidePanel` provides the persistent portfolio
   surface and does not grant access to browsing data or page content. No
   `tabs`, no `cookies`, no `webRequest`, no `<all_urls>`. Note that
-  `app.uniswap.org` and `www.prjx.com` appear under
+  `app.uniswap.org`, `www.prjx.com`, and `dexscreener.com` appear under
   `optional_host_permissions`, not `host_permissions` — LPLens ships with
-  **no** access to either site and cannot run there unless you explicitly grant
+  **no** access to any of those sites and cannot run there unless you explicitly grant
   each one.
 
 ## What it does
@@ -259,16 +266,20 @@ against, and an unlisted method throws. Chrome also isolates extensions from
 each other, so LPLens cannot reach MetaMask's storage or keys even in principle.
 
 **Cannot see your general browsing.** No `tabs`, no `activeTab`, no `cookies`,
-no `webRequest`, no `<all_urls>`. The only page permission is the optional,
-user-granted Uniswap scope described below.
+no `webRequest`, no `<all_urls>`. The only page permissions are the optional,
+user-granted scopes described below.
 
-**Both on-page overlays are independently opt-in and off by default.**
-`app.uniswap.org` and `www.prjx.com` are in `optional_host_permissions`, not
-`host_permissions`, so a freshly installed LPLens has no access to either site.
+**All on-page overlays are independently opt-in and off by default.**
+`app.uniswap.org`, `www.prjx.com`, and `dexscreener.com` are in
+`optional_host_permissions`, not `host_permissions`, so a freshly installed
+LPLens has no access to those sites.
 The Uniswap toggle registers only the exact
 `https://app.uniswap.org/positions` list and its `/positions/*` descendants.
 The ProjectX toggle registers only `https://www.prjx.com/portfolio` and its
-descendants. Turning either one off unregisters only that site's content script.
+descendants. The Dexscreener toggle registers only `https://dexscreener.com/*`;
+the script acts only on a route containing a supported chain slug and a 20-byte
+pool address or 32-byte v4 pool id. Turning any toggle off unregisters only that
+site's content script.
 
 Once granted, that is a real widening of the surface, and it is worth
 understanding rather than skimming:
@@ -277,7 +288,11 @@ understanding rather than skimming:
   the position-page URL; on the positions list it reads semantic position links
   and the first line of visible row text to discover and label positions. On
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
-  the panel uses only the last address explicitly loaded in LPLens. It never
+  the panel uses only the last address explicitly loaded in LPLens. On
+  Dexscreener it reads only the chain and pool identifier in the pair-page URL,
+  then checks the last address loaded in LPLens for a matching position. It
+  reads no Dexscreener text, chart state, connected-wallet state, or provider
+  object. It never
   reads balances, forms, connected-wallet state, wallet-provider objects, or
   signing prompts. Its only page write is adding its own closed-shadow-root
   panel; it never moves or rewrites anything either site rendered.
@@ -321,7 +336,14 @@ split exact without sending wallet credentials or requesting a signature.
 Saved addresses and the most recently rendered portfolio view are stored with
 `chrome.storage.local`, deliberately **not** `chrome.storage.sync`, so they are
 never carried into a Google account. The saved view is local display output,
-not accounting input, and is replaced after a successful refresh.
+not accounting input, and is replaced after a successful refresh. The Copy
+diagnostics control saves only version, UI surface, coarse scan counts,
+allowlisted error categories, and local feature state. It excludes wallets,
+labels, tokens, pools, positions, keys, custom endpoints, and raw errors, and it
+leaves the browser only when the user copies it. If anonymous scan outcomes are
+enabled in Settings, the extension sends the same coarse version/surface,
+outcome, count bucket, duration bucket, and per-chain error categories. Worker
+storage has no access-code hash or installation hash on those aggregate rows.
 
 ### The one real risk: never load unpacked from a synced or shared folder
 
@@ -465,10 +487,12 @@ extension/
   lib/logs.js        log retrieval; Etherscan V2, Blockscout, or eth_getLogs
   lib/cache.js       bounded persistent caches
   lib/dashboard-snapshot.js  bounded last-rendered side-panel view
+  lib/diagnostics.js  sanitized local support report and error categories
+  lib/telemetry.js    optional anonymous aggregate scan outcomes
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync
   lib/aggregate.js   all-wallets totals, with explicit exclusion reporting
   lib/license.js     beta access gate
-  overlay.js         optional Uniswap and ProjectX overlays
+  overlay.js         optional Uniswap, ProjectX, and Dexscreener overlays
   sw.js              service worker; holds all network access for the overlay
 tools/
   package.mjs        builds the distributable zip; refuses to ship a credential

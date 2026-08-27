@@ -4,6 +4,7 @@
  * POST / { key, installationId? } -> { valid, expires, reason }
  * POST /history { key, installationId, chainId, fields } -> provider logs
  * POST /blockscout remains a backwards-compatible alias for 0.27 clients.
+ * POST /telemetry { key, version, surface, outcome, buckets, errors } -> ok
  *
  * Keys are stored as SHA-256 hex hashes, never plaintext. Add or revoke a
  * tester by editing KEYS and redeploying. Unknown hashes and expired keys
@@ -31,6 +32,18 @@ const RELAY_REQUESTS_PER_LICENCE_PER_DAY = 1000;
 const BLOCKSCOUT_PRO = 'https://api.blockscout.com/v2/api';
 const ETHERSCAN_V2 = 'https://api.etherscan.io/v2/api';
 const MAX_BODY_BYTES = 8192;
+const TELEMETRY_VERSION = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const TELEMETRY_SURFACES = new Set(['popup', 'sidepanel']);
+const TELEMETRY_OUTCOMES = new Set(['success', 'empty', 'partial', 'failed']);
+const TELEMETRY_POSITION_BUCKETS = new Set(['0', '1', '2-5', '6-20', '21+']);
+const TELEMETRY_DURATION_BUCKETS = new Set(['<5s', '5-15s', '15-30s', '30-60s', '60s+']);
+const TELEMETRY_CHAINS = new Set([
+  'ethereum', 'base', 'arbitrum', 'polygon', 'hyperevm', 'robinhood',
+]);
+const TELEMETRY_ERROR_CODES = new Set([
+  'rate_limit', 'timeout', 'network', 'history', 'ownership', 'unreadable', 'rpc', 'unknown',
+]);
+const MAX_TELEMETRY_ERRORS = 16;
 
 // The relay is deliberately not a general Blockscout proxy. Only the exact
 // contracts and chains LPLens reads for v3 history, v4 ownership replay and
@@ -106,7 +119,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>LPLens privacy policy</h1>
-<p class="meta">Effective 21 August 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
+<p class="meta">Effective 27 August 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
 <p>LPLens is a read-only Chrome extension that inspects Uniswap v3/v4 and ProjectX concentrated-liquidity positions for an Ethereum-style address you paste. It never connects a wallet, never asks for a signature, and never sees a private key.</p>
 <p>This policy uses the Chrome Web Store data-category names so the store listing and this page say the same things.</p>
 
@@ -119,11 +132,11 @@ const PRIVACY_HTML = `<!DOCTYPE html>
   <dt>Financial and payment information</dt>
   <dd>We do not collect bank details, cards, or payment credentials. We do retrieve publicly recorded on-chain token balances, pool state, and Uniswap or ProjectX position events for the address you paste. Those figures are financial in nature. They come from public chain data, not from a payment processor.</dd>
   <dt>Web history</dt>
-  <dd>Only if you independently turn on an optional overlay: the extension reads whether you opened the Uniswap positions list or an individual position page (<code>app.uniswap.org/positions</code> and its position-detail paths), or the ProjectX portfolio page (<code>www.prjx.com/portfolio</code>). Each site permission is off until you grant it in options. We do not collect browsing history for any other site, and we do not store or transmit your Uniswap or ProjectX browsing history.</dd>
+  <dd>Only if you independently turn on an optional overlay: the extension reads whether you opened the Uniswap positions list or an individual position page (<code>app.uniswap.org/positions</code> and its position-detail paths), the ProjectX portfolio page (<code>www.prjx.com/portfolio</code>), or a Dexscreener pair page (<code>dexscreener.com</code>). Each site permission is off until you grant it in options. We do not collect browsing history for any other site, and we do not store or transmit browsing history from these sites.</dd>
   <dt>Website content</dt>
-  <dd>On an individual Uniswap position page, the overlay uses the URL. On the Uniswap positions list, it reads position links whose paths identify v3 or v4 positions and the first line of visible row text so it can discover positions, label its panels, and place each panel beside the matching row. This page-derived label stays in the tab and is not sent to LPLens or a third party. ProjectX does not expose stable position-NFT links, so its overlay does not read ProjectX page content or the connected wallet; it displays the HyperEVM positions for the last address you explicitly loaded in LPLens. Neither overlay reads balances, form fields, wallet-provider state, or signing prompts; neither alters site content, and each only appends its own panel. Position amounts and history are loaded from public chain data through the extension’s background worker, not scraped from the page.</dd>
+  <dd>On an individual Uniswap position page, the overlay uses the URL. On the Uniswap positions list, it reads position links whose paths identify v3 or v4 positions and the first line of visible row text so it can discover positions, label its panels, and place each panel beside the matching row. This page-derived label stays in the tab and is not sent to LPLens or a third party. ProjectX does not expose stable position-NFT links, so its overlay does not read ProjectX page content or the connected wallet; it displays the HyperEVM positions for the last address you explicitly loaded in LPLens. On Dexscreener, the overlay uses only the chain and pool identifier in the pair-page URL and does not read Dexscreener page content or its connected wallet. The overlays do not read balances, form fields, wallet-provider state, or signing prompts; they do not alter site content, and each only appends its own panel. Position amounts and history are loaded from public chain data through the extension’s background worker, not scraped from the page.</dd>
   <dt>User activity</dt>
-  <dd>The chain you select and the address you look up are stored locally so you do not have to retype them. We do not run behavioural analytics or advertising. The limited operational installation and request counters are described below.</dd>
+  <dd>The address you look up is stored locally so you do not have to retype it. We do not run advertising analytics. If “Share anonymous scan outcomes” is on, the extension sends its version, popup or side-panel surface, success/empty/partial/failed outcome, coarse position-count and duration buckets, and allowlisted per-chain error categories. It never sends raw error text, wallet addresses, labels, token names, pool or position identifiers, custom endpoints, provider keys, or the random installation identifier with these scan events. The Worker stores only daily aggregate rows that have no access-code hash or installation hash column. You can turn this off in Settings.</dd>
   <dt>Health information</dt>
   <dd>Not collected.</dd>
   <dt>Personal communications</dt>
@@ -142,24 +155,24 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <p>Those hosts are not operated by LPLens. They see ordinary HTTPS request metadata (including IP address) under their own policies.</p>
 
 <h2>What this Worker receives</h2>
-<p>This site provides the access check and the authenticated history relay. It receives the access key and random installation identifier when access is checked. For history requests it also receives a chain id, an allowlisted Uniswap or ProjectX position-manager or PoolManager contract and event-log filters. A v3-family filter identifies a public position NFT; a v4 ownership filter can contain the public address being inspected; and a v4 history filter identifies a public pool and PositionManager. The Worker forwards those filters to Blockscout Pro or Etherscan V2 but does not store wallet addresses, token ids, contract filters, response bodies or IP addresses.</p>
-<p>We retain hashed installation records and per-licence daily request totals to operate the beta, diagnose sharing and protect the shared API allowance. These are operational counters, not advertising or behavioural analytics. Cloudflare, which hosts the Worker, processes the HTTPS requests.</p>
+<p>This site provides the access check, authenticated history relay and optional anonymous scan counters. It receives the access key and random installation identifier when access is checked. For history requests it also receives a chain id, an allowlisted Uniswap or ProjectX position-manager or PoolManager contract and event-log filters. A v3-family filter identifies a public position NFT; a v4 ownership filter can contain the public address being inspected; and a v4 history filter identifies a public pool and PositionManager. The Worker forwards those filters to Blockscout Pro or Etherscan V2 but does not store wallet addresses, token ids, contract filters, response bodies or IP addresses. A telemetry request includes the access key only for validation; it does not include the random installation identifier, and the stored aggregate scan rows contain neither the access-code hash nor an installation hash.</p>
+<p>We retain hashed installation records and per-licence daily request totals to operate the beta, diagnose sharing and protect the shared API allowance. Separately, when enabled, we retain anonymous daily scan outcomes and allowlisted error-category totals to improve reliability. These are operational and product-quality counters, not advertising analytics. Cloudflare, which hosts the Worker, processes the HTTPS requests.</p>
 
 <h2>What stays on your machine</h2>
-<p><code>chrome.storage.local</code> may hold: saved addresses, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay layout preferences, a cache of immutable position event history, and the most recent rendered portfolio view used by the browser side panel. That data does not sync through LPLens servers. Completed portfolio views are not sent to or stored by LPLens. Clearing site data for the extension, or uninstalling it, removes the local data from the computer.</p>
+<p><code>chrome.storage.local</code> may hold: saved addresses, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay layout preferences, the anonymous-scan setting, a sanitized most-recent diagnostic summary, a cache of immutable position event history, and the most recent rendered portfolio view used by the browser side panel. The diagnostic summary contains no wallet address, token name, pool id, position id, key or raw error text, and it leaves the browser only if you explicitly copy and share it. Local data does not sync through LPLens servers. Completed portfolio views are not sent to or stored by LPLens. Clearing site data for the extension, or uninstalling it, removes the local data from the computer.</p>
 
 <h2>What we do not do</h2>
 <ul>
-  <li>No advertising analytics, tracking pixels, browser fingerprinting, crash reporters, or ad networks. Operational counts are limited to hashed browser installations and per-licence relay-request totals.</li>
+  <li>No advertising analytics, tracking pixels, browser fingerprinting, crash reporters, or ad networks. Operational data is limited to hashed browser installations, per-licence relay-request totals, and optional anonymous aggregate scan outcomes and error categories.</li>
   <li>No sale of data. No server-side user account. No mailing list built from extension use.</li>
   <li>No wallet connection: the extension never calls <code>eth_requestAccounts</code>, <code>eth_sendTransaction</code>, or <code>personal_sign</code>, and the optional content script cannot reach <code>window.ethereum</code>.</li>
 </ul>
 
 <h2>Optional on-page overlays</h2>
-<p>Access to <code>app.uniswap.org</code> and <code>www.prjx.com</code> is separately optional and off at install. Before Chrome asks for either permission, options explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show a last-loaded-address panel only on the ProjectX portfolio. Revoking either permission unregisters only that site's content script immediately.</p>
+<p>Access to <code>app.uniswap.org</code>, <code>www.prjx.com</code> and <code>dexscreener.com</code> is separately optional and off at install. Before Chrome asks for a permission, Settings explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show a last-loaded-address panel only on the ProjectX portfolio; granting Dexscreener access lets it show matching positions for the last-loaded address on pair pages. Revoking a permission unregisters only that site's content script immediately.</p>
 
 <h2>Limited Use</h2>
-<p>Data listed above is used only to provide LPLens’s single purpose: showing Uniswap and ProjectX concentrated-liquidity positions and lifetime figures for an address you choose, controlling beta access and protecting the shared history allowance. It is not used or transferred for advertising, credit, or unrelated profiling. Transfers to RPC providers, DexScreener, Etherscan, Blockscout, and this Worker happen only as needed for that purpose, or as required by law.</p>
+<p>Data listed above is used only to provide LPLens’s single purpose: showing Uniswap and ProjectX concentrated-liquidity positions and lifetime figures for an address you choose, placing that context on optional protocol and Dexscreener pages, controlling beta access, protecting the shared history allowance, and improving scan reliability through the optional anonymous counters described above. It is not used or transferred for advertising, credit, or unrelated profiling. Transfers to RPC providers, DexScreener, Etherscan, Blockscout, and this Worker happen only as needed for that purpose, or as required by law.</p>
 
 <h2>Changes</h2>
 <p>If this policy changes, the effective date at the top will change. There is no in-product mailing list; check this URL.</p>
@@ -453,6 +466,103 @@ async function relayRequest(payload, env) {
   }
 }
 
+/** Copy only the anonymous, allowlisted telemetry shape. */
+export function telemetryEvent(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('invalid telemetry event');
+  }
+  const allowedTop = new Set([
+    'key', 'version', 'surface', 'outcome', 'positionBucket', 'durationBucket', 'errors',
+  ]);
+  if (Object.keys(payload).some((name) => !allowedTop.has(name))) {
+    throw new Error('unsupported telemetry field');
+  }
+  const version = String(payload.version || '');
+  const surface = String(payload.surface || '');
+  const outcome = String(payload.outcome || '');
+  const positionBucket = String(payload.positionBucket || '');
+  const durationBucket = String(payload.durationBucket || '');
+  if (!TELEMETRY_VERSION.test(version)
+      || !TELEMETRY_SURFACES.has(surface)
+      || !TELEMETRY_OUTCOMES.has(outcome)
+      || !TELEMETRY_POSITION_BUCKETS.has(positionBucket)
+      || !TELEMETRY_DURATION_BUCKETS.has(durationBucket)) {
+    throw new Error('invalid telemetry event');
+  }
+
+  const rawErrors = payload.errors === undefined ? [] : payload.errors;
+  if (!Array.isArray(rawErrors) || rawErrors.length > MAX_TELEMETRY_ERRORS) {
+    throw new Error('invalid telemetry errors');
+  }
+  const merged = new Map();
+  for (const row of rawErrors) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)
+        || Object.keys(row).some((name) => !['chain', 'code', 'count'].includes(name))) {
+      throw new Error('invalid telemetry error');
+    }
+    const chain = String(row.chain || '');
+    const code = String(row.code || '');
+    const count = Number(row.count);
+    if (!TELEMETRY_CHAINS.has(chain) || !TELEMETRY_ERROR_CODES.has(code)
+        || !Number.isInteger(count) || count < 1 || count > 20) {
+      throw new Error('invalid telemetry error');
+    }
+    const key = `${chain}:${code}`;
+    merged.set(key, Math.min(20, (merged.get(key) || 0) + count));
+  }
+  const errors = [...merged.entries()].map(([key, count]) => {
+    const [chain, code] = key.split(':');
+    return { chain, code, count };
+  });
+  return { version, surface, outcome, positionBucket, durationBucket, errors };
+}
+
+async function telemetryRequest(payload, env) {
+  const key = String(payload && payload.key != null ? payload.key : '').trim();
+  if (!key) return json({ error: 'Access not granted.' }, 401);
+
+  let auth;
+  try { auth = await authorise(key, '', env); }
+  catch { return json({ error: 'Access verification is temporarily unavailable.' }, 503); }
+  if (!auth.valid) return json({ error: auth.reason || GENERIC }, 403);
+
+  let event;
+  try { event = telemetryEvent(payload); }
+  catch (err) { return json({ error: err.message || 'Invalid telemetry event.' }, 400); }
+  if (!env || !env.DB) return json({ error: 'Telemetry database is unavailable.' }, 503);
+
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  const at = iso(now);
+  try {
+    await env.DB.prepare(`
+      INSERT INTO scan_outcomes_daily
+        (day, extension_version, surface, outcome, position_bucket, duration_bucket, scans, last_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
+      ON CONFLICT (day, extension_version, surface, outcome, position_bucket, duration_bucket)
+      DO UPDATE SET scans = scans + 1, last_at = excluded.last_at
+    `).bind(
+      day, event.version, event.surface, event.outcome,
+      event.positionBucket, event.durationBucket, at,
+    ).run();
+    for (const error of event.errors) {
+      await env.DB.prepare(`
+        INSERT INTO scan_errors_daily
+          (day, extension_version, surface, chain_key, error_code, occurrences, last_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT (day, extension_version, surface, chain_key, error_code)
+        DO UPDATE SET occurrences = occurrences + excluded.occurrences,
+                      last_at = excluded.last_at
+      `).bind(
+        day, event.version, event.surface, error.chain, error.code, error.count, at,
+      ).run();
+    }
+  } catch {
+    return json({ error: 'Telemetry database is temporarily unavailable.' }, 503);
+  }
+  return json({ ok: true });
+}
+
 export default {
   async fetch(request, env = {}) {
     const path = new URL(request.url).pathname.replace(/\/+$/, '') || '/';
@@ -468,13 +578,14 @@ export default {
     let payload;
     try { payload = await readPayload(request); }
     catch {
-      return path === '/blockscout' || path === '/history'
+      return path === '/blockscout' || path === '/history' || path === '/telemetry'
         ? json({ error: 'Invalid request.' }, 400)
         : json({ valid: false, expires: null, reason: GENERIC }, 400);
     }
 
     if (path === '/') return validateRequest(payload, env);
     if (path === '/blockscout' || path === '/history') return relayRequest(payload, env);
+    if (path === '/telemetry') return telemetryRequest(payload, env);
     return json({ error: 'Not found.' }, 404);
   },
 };

@@ -12,7 +12,7 @@ const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
 const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
 
-assert.equal(manifest.version, '0.29.0');
+assert.equal(manifest.version, '0.30.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -24,6 +24,8 @@ assert.match(panel, /data-position-filter="issues"/);
 assert.match(panel, /id="showHidden"/);
 assert.match(panel, /id="scanDetails"/);
 assert.match(panel, /id="scanDetailsBody"/);
+assert.match(panel, /id="copyDiagnostics"/);
+assert.match(panel, /What did LPLens get wrong\?/);
 assert.match(controller, /chrome\.sidePanel\.open\(\{ windowId: currentWindowId \}\)/);
 assert.match(controller, /function legacyScanPresentation/);
 assert.match(controller, /refresh to enable card controls/);

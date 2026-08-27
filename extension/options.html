@@ -1,6 +1,6 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="popup.css?v=0.29"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="popup.css?v=0.30"></head>
 <body class="options">
   <main class="options-shell">
     <header class="options-hero">
@@ -35,8 +35,13 @@
         <span class="section-icon privacy" aria-hidden="true">✓</span>
         <div><h2>Privacy by construction</h2><p>The extension only asks for what it needs.</p></div>
       </div>
-      <p class="section-copy">Your saved wallet addresses, settings, locally hidden-position choices, immutable event-history cache, and most recent rendered portfolio view stay in <code>chrome.storage.local</code>. The saved portfolio view is used only to make the browser side panel appear immediately and is replaced after a successful refresh. When you scan, LPLens sends the address and public-chain query data to the named RPC, price, and history services needed to return results. For a v4 position with later additions, the public transaction hashes are also sent to the chain's public Blockscout trace endpoint so principal and already-earned fees can be separated exactly. The LPLens service processes allowlisted Blockscout log filters; it does not store wallet addresses, filters, responses, or completed portfolio views.</p>
-      <p class="section-copy">There is no wallet connection, private key, or signing access. The beta service stores hashes of the access code and a random browser-installation identifier, plus first/last seen and daily relay-request totals. It does not store IP addresses or fingerprint the browser. Optional Uniswap and ProjectX page access is off at install and disclosed immediately below.</p>
+      <p class="section-copy">Your saved wallet addresses, settings, locally hidden-position choices, immutable event-history cache, most recent rendered portfolio view, and sanitized most-recent diagnostic summary stay in <code>chrome.storage.local</code>. The saved portfolio view is used only to make the browser side panel appear immediately and is replaced after a successful refresh. The diagnostic summary contains no wallet, label, token, pool, position, key, endpoint, or raw error, and it leaves the browser only if you press Copy diagnostics. When you scan, LPLens sends the address and public-chain query data to the named RPC, price, and history services needed to return results. For a v4 position with later additions, the public transaction hashes are also sent to the chain's public Blockscout trace endpoint so principal and already-earned fees can be separated exactly. The LPLens service processes allowlisted Blockscout log filters; it does not store wallet addresses, filters, responses, or completed portfolio views.</p>
+      <p class="section-copy">There is no wallet connection, private key, or signing access. The beta service stores hashes of the access code and a random browser-installation identifier, plus first/last seen and daily relay-request totals. If the control below is on, it also stores anonymous daily scan totals by extension version, surface, outcome, coarse position-count and duration buckets, and allowlisted per-chain error categories. Those scan totals are not linked to an access code, installation, wallet, token, pool, or position. Raw error messages are never sent. The service does not store IP addresses or fingerprint the browser. Optional page access is off at install and disclosed immediately below.</p>
+      <label class="perm switch-row">
+        <span><b>Share anonymous scan outcomes</b><small>On by default during beta. Helps identify empty, partial, failed, and rate-limited scans. No wallet or position data.</small></span>
+        <input type="checkbox" id="telemetryEnabled">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
       <div class="privacy-grid">
         <span><b>Stored locally</b><small>Wallets and display preferences</small></span>
         <span><b>Sent only to</b><small>RPC, price &amp; history APIs</small></span>
@@ -49,7 +54,7 @@
         <span class="section-icon" aria-hidden="true">U</span>
         <div><h2>On-page overlays</h2><p>Bring position context onto the protocol page where you use it.</p></div>
       </div>
-      <p class="section-copy">LPLens has <b>no access to any web page when installed</b>. Each site below is independently optional. On Uniswap it reads the position-page URL; on the positions list it reads position links and the first line of visible row text to discover and label positions. On ProjectX it runs only on <code>www.prjx.com/portfolio</code> and uses the last address you loaded in LPLens; it does not read ProjectX page content or the connected wallet. It never reads balances, forms, signing prompts, or wallet-provider state, and it only appends its own panel. Turning a site off removes that permission and content script.</p>
+      <p class="section-copy">LPLens has <b>no access to any web page when installed</b>. Each site below is independently optional. On Uniswap it reads the position-page URL; on the positions list it reads position links and the first line of visible row text to discover and label positions. On ProjectX it runs only on <code>www.prjx.com/portfolio</code> and uses the last address you loaded in LPLens; it does not read ProjectX page content or the connected wallet. On Dexscreener it reads only the chain and pool identifier in a pair-page URL, then checks the last address loaded in LPLens for a matching position. It never reads balances, forms, signing prompts, wallet-provider state, or Dexscreener page content, and it only appends its own panel. Turning a site off removes that permission and content script.</p>
       <label class="perm switch-row">
         <span><b>Show the position overlay</b><small>On <code>app.uniswap.org</code> position pages</small></span>
         <input type="checkbox" id="overlayPerm">
@@ -58,6 +63,11 @@
       <label class="perm switch-row">
         <span><b>Show the ProjectX overlay</b><small>On <code>www.prjx.com/portfolio</code> only</small></span>
         <input type="checkbox" id="projectxOverlayPerm">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+      <label class="perm switch-row">
+        <span><b>Show the Dexscreener overlay</b><small>On <code>dexscreener.com</code> pair pages</small></span>
+        <input type="checkbox" id="dexscreenerOverlayPerm">
         <span class="switch" aria-hidden="true"></span>
       </label>
     </section>

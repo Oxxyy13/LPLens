@@ -1,6 +1,6 @@
 /**
- * On-page overlay for app.uniswap.org position pages and the ProjectX
- * portfolio at www.prjx.com.
+ * On-page overlay for app.uniswap.org position pages, the ProjectX portfolio
+ * at www.prjx.com, and Dexscreener pair pages.
  *
  * SECURITY POSTURE — read this before changing anything here.
  *
@@ -50,6 +50,17 @@ const LIST_HOST_ID = 'lplens-list-host';
 // The list route is /positions with no position id after it.
 const LIST_ROUTE = /^\/positions\/?$/;
 const PROJECTX_ROUTE = /^\/portfolio\/?$/;
+const ON_DEXSCREENER = location.hostname === 'dexscreener.com';
+const DEXSCREENER_CHAIN_SLUGS = Object.freeze({
+  ethereum: 'ethereum',
+  base: 'base',
+  arbitrum: 'arbitrum',
+  polygon: 'polygon',
+  hyperevm: 'hyperevm',
+  hyperliquid: 'hyperevm',
+  robinhood: 'robinhood',
+  robinhoodchain: 'robinhood',
+});
 let lastKey = null;
 
 
@@ -506,9 +517,14 @@ function portfolioCard(position) {
  * is needed or sent anywhere.
  */
 let projectxBusy = false;
+let projectxPending = false;
 async function syncProjectXPortfolio() {
   const key = 'projectx:portfolio';
-  if (projectxBusy || lastKey === key) return;
+  if (projectxBusy) {
+    projectxPending = true;
+    return;
+  }
+  if (lastKey === key) return;
   projectxBusy = true;
   lastKey = key;
   teardownList();
@@ -552,6 +568,99 @@ async function syncProjectXPortfolio() {
     </div>`, true);
   } finally {
     projectxBusy = false;
+    if (projectxPending) {
+      projectxPending = false;
+      lastKey = null;
+      void syncProjectXPortfolio();
+    }
+  }
+}
+
+/**
+ * Dexscreener pair pages.
+ *
+ * Only the route is used: /<chain>/<pool-address-or-v4-pool-id>. The address
+ * still comes from LPLens local storage through the service worker. No page
+ * text, token name, chart state, connected wallet or provider object is read.
+ */
+let dexscreenerBusy = false;
+let dexscreenerPending = false;
+let dexscreenerGeneration = 0;
+function dexscreenerRoute() {
+  if (!ON_DEXSCREENER) return null;
+  const parts = location.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  const chain = DEXSCREENER_CHAIN_SLUGS[String(parts[0] || '').toLowerCase()];
+  const poolRef = String(parts[1] || '').toLowerCase();
+  if (!chain || !/^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(poolRef)) return null;
+  return { chain, poolRef };
+}
+
+async function syncDexscreener() {
+  const route = dexscreenerRoute();
+  if (!route) return teardown();
+  const key = `dexscreener:${route.chain}:${route.poolRef}`;
+  if (dexscreenerBusy) {
+    if (lastKey !== key) {
+      lastKey = key;
+      dexscreenerPending = true;
+    }
+    return;
+  }
+  if (lastKey === key) return;
+  dexscreenerBusy = true;
+  lastKey = key;
+  const generation = dexscreenerGeneration;
+  teardownList();
+  render(head('<span class="pill">Dexscreener</span>')
+    + '<div class="bd"><div class="note">Checking the last address loaded in LPLens for this pool…</div></div>');
+
+  try {
+    if (!contextAlive()) return shutdownOrphan();
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({
+        type: 'LPLENS_DEXSCREENER_POOL',
+        chain: route.chain,
+        poolRef: route.poolRef,
+      });
+    } catch (err) {
+      if (isOrphanError(err)) return shutdownOrphan();
+      res = { ok: false, error: err.message || String(err) };
+    }
+    if (lastKey !== key || generation !== dexscreenerGeneration) return;
+
+    if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+      const e = res.entitlement || {};
+      render(head('<span class="pill">Dexscreener</span>') + `<div class="bd">
+        <div class="note">${esc(e.reason || 'LPLens access is required.')} Check Settings or ask Dan.</div>
+      </div>`);
+      return;
+    }
+    if (!res || !res.ok) {
+      render(head('<span class="pill">Dexscreener</span>') + `<div class="bd">
+        <div class="err note">${esc(res && res.error || 'no response')}</div>
+      </div>`);
+      return;
+    }
+
+    const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
+    const address = String(res.data && res.data.address || '');
+    const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+    const content = positions.length
+      ? positions.map(portfolioCard).join('')
+      : '<div class="note">No open matching position for the last address loaded in LPLens.</div>';
+    render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
+      <div class="note">LPLens address: <span class="num">${esc(short)}</span>. Dexscreener page content and wallet data are not read.</div>
+      ${content}
+    </div>`);
+  } finally {
+    dexscreenerBusy = false;
+    if (dexscreenerPending) {
+      dexscreenerPending = false;
+      lastKey = null;
+      void syncDexscreener();
+    }
   }
 }
 
@@ -723,6 +832,9 @@ function shutdownOrphan(target) {
 }
 
 async function sync() {
+  if (ON_DEXSCREENER) {
+    return syncDexscreener();
+  }
   if (PROJECTX_ROUTE.test(location.pathname)) {
     return syncProjectXPortfolio();
   }
@@ -819,7 +931,12 @@ window.addEventListener('popstate', () => {
 // panel follows that explicit choice without reading the site's wallet state.
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes.address || !PROJECTX_ROUTE.test(location.pathname)) return;
+    if (area !== 'local' || !changes.address
+        || (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER)) return;
+    if (ON_DEXSCREENER) {
+      dexscreenerGeneration++;
+      if (dexscreenerBusy) dexscreenerPending = true;
+    }
     lastKey = null;
     sync();
   });

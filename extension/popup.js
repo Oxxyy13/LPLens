@@ -15,6 +15,12 @@ import {
 import {
   loadHiddenPositions, positionHideKey, setPositionHidden,
 } from './lib/hidden-positions.js';
+import {
+  buildScanDiagnostic, copyDiagnosticReport, readDiagnosticReport, saveDiagnosticReport,
+} from './lib/diagnostics.js';
+import {
+  sendScanTelemetry, telemetryEnabled as scanTelemetryEnabled,
+} from './lib/telemetry.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
@@ -50,6 +56,73 @@ let latestSweepText = '';
 let latestSweepSummary = '';
 let latestSweepDetails = '';
 let latestSweepIssues = 0;
+let latestAccessState = 'unknown';
+
+const OPTIONAL_PAGE_ORIGINS = Object.freeze({
+  uniswap: 'https://app.uniswap.org/*',
+  projectx: 'https://www.prjx.com/*',
+  dexscreener: 'https://dexscreener.com/*',
+});
+
+async function optionalPageAccess() {
+  const entries = await Promise.all(Object.entries(OPTIONAL_PAGE_ORIGINS).map(async ([name, origin]) => [
+    name,
+    await chrome.permissions.contains({ origins: [origin] }).catch(() => false),
+  ]));
+  return Object.fromEntries(entries);
+}
+
+async function recordScanDiagnostic(startedAt, final, includeClosed) {
+  try {
+    const enabled = await scanTelemetryEnabled();
+    const report = buildScanDiagnostic({
+      surface: SIDE_PANEL ? 'sidepanel' : 'popup',
+      startedAt,
+      jobs: final.jobs,
+      states: final.states,
+      positionCount: final.allPositions.length,
+      hiddenCount: final.hiddenPositions.length,
+      includeClosed,
+      savedWalletCount: book.length,
+      accessState: latestAccessState,
+      telemetryEnabled: enabled,
+      optionalPageAccess: await optionalPageAccess(),
+    });
+    await saveDiagnosticReport(report);
+    void sendScanTelemetry(report);
+  } catch {
+    // Diagnostics and aggregate telemetry must never alter a portfolio result.
+  }
+}
+
+const diagnosticStateEl = $('diagnosticState');
+const copyDiagnosticsButton = $('copyDiagnostics');
+if (copyDiagnosticsButton) {
+  copyDiagnosticsButton.addEventListener('click', async () => {
+    diagnosticStateEl.textContent = '';
+    try {
+      const report = await readDiagnosticReport();
+      if (!report) {
+        diagnosticStateEl.textContent = 'Run a scan first.';
+        return;
+      }
+      await copyDiagnosticReport(report);
+      diagnosticStateEl.textContent = 'Copied. No wallets or position IDs included.';
+    } catch {
+      diagnosticStateEl.textContent = 'Could not copy.';
+    }
+  });
+}
+
+const reportIssueLink = $('reportIssue');
+if (reportIssueLink) {
+  const version = chrome.runtime.getManifest().version;
+  const params = new URLSearchParams({
+    title: `[${version}] `,
+    body: 'What happened?\n\nPaste the output from Copy diagnostics below. It contains no wallet addresses, token names, pool IDs, position IDs, access keys, or raw provider errors.\n\n',
+  });
+  reportIssueLink.href = `https://github.com/Oxxyy13/LPLens/issues/new?${params}`;
+}
 
 const hiddenReady = loadHiddenPositions().then((keys) => {
   hiddenPositionKeys = new Set(keys);
@@ -362,12 +435,14 @@ async function restoreDashboard() {
 // yank it. The verdict replaces that: a gate card, or the ordinary form.
 (async function gateOnOpen() {
   if (!GATING_ENABLED) {
+    latestAccessState = 'free';
     setFormInteractive(true);
     statusEl.textContent = '';
     return;
   }
   try {
     const ent = await entitlement();
+    latestAccessState = ent.state || 'unknown';
     if (!ent.allowed) {
       showGate(ent);
       return;
@@ -389,6 +464,7 @@ async function restoreDashboard() {
 })();
 
 async function startScan(owners, includeClosed) {
+  const scanStartedAt = Date.now();
   chrome.storage.local.set({
     address: owners.length === 1 ? owners[0].address : ($('address').value || ''),
   });
@@ -409,6 +485,7 @@ async function startScan(owners, includeClosed) {
     // cheap — licenseSeen caches for RECHECK_HOURS, so this is not a second
     // network round-trip on the normal path.
     const ent = await entitlement();
+    latestAccessState = ent.state || 'unknown';
     if (GATING_ENABLED && !ent.allowed) {
       showGate(ent);
       return;
@@ -436,6 +513,7 @@ async function startScan(owners, includeClosed) {
       wallets: owners.length,
       includeClosed,
     });
+    await recordScanDiagnostic(scanStartedAt, final, includeClosed);
     if (SIDE_PANEL) {
       const scope = `${owners.length} wallet${owners.length === 1 ? '' : 's'} · `
         + `${final.positions.length} position${final.positions.length === 1 ? '' : 's'}`;
@@ -697,7 +775,7 @@ async function runSweep(owners, chainKeys, opts) {
       paint();
     },
   });
-  return paint();
+  return { ...paint(), jobs, states };
 }
 
 /**

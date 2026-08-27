@@ -231,6 +231,19 @@ export async function historyRelayCredentials() {
   };
 }
 
+/**
+ * Authenticate a coarse telemetry event without attaching the random browser
+ * installation id. The Worker validates the key in memory, then stores only
+ * anonymous daily aggregate counters.
+ */
+export async function telemetryCredentials() {
+  if (!GATING_ENABLED || urlIsPlaceholder(VALIDATE_URL)) return null;
+  const s = await store(['licenseKey']);
+  const key = String(s.licenseKey || '').trim();
+  if (!key) return null;
+  return { url: new URL('telemetry', VALIDATE_URL).href, key };
+}
+
 /** Compatibility for 0.27 callers and local test harnesses. */
 export const blockscoutRelayCredentials = historyRelayCredentials;
 

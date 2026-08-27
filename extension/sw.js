@@ -14,8 +14,11 @@
  */
 import { loadPositionByVersion, loadPositions } from './lib/positions.js';
 import { entitlement, historyRelayCredentials } from './lib/license.js';
+import { CHAINS } from './lib/chains.js';
 
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
+const dexscreenerScanCache = new Map();
+const DEXSCREENER_CACHE_MS = 60_000;
 
 // Concurrency limit across ALL callers. One position load issues 6-10 fetches,
 // so an unexpected burst of requests multiplies straight into the network
@@ -33,6 +36,43 @@ function slot() {
 function release() {
   const next = waiting.shift();
   if (next) next(); else active--;
+}
+
+async function cachedDexscreenerPositions(chainKey, address, store) {
+  const key = `${chainKey}:${address}`;
+  const existing = dexscreenerScanCache.get(key);
+  if (existing && existing.data && Date.now() - existing.at < DEXSCREENER_CACHE_MS) {
+    return existing.data;
+  }
+  if (existing && existing.promise) return existing.promise;
+
+  const promise = (async () => {
+    await slot();
+    try {
+      const overrides = store.rpcOverrides || {};
+      const historyRelay = await historyRelayCredentials();
+      const result = await loadPositions(chainKey, address, {
+        includeClosed: false,
+        withUsd: true,
+        rpcOverride: overrides[chainKey] || undefined,
+        rpcOverrides: overrides,
+        etherscanKey: store.etherscanKey || undefined,
+        historyRelay,
+      });
+      return result.positions || [];
+    } finally {
+      release();
+    }
+  })();
+  dexscreenerScanCache.set(key, { promise });
+  try {
+    const data = await promise;
+    dexscreenerScanCache.set(key, { data, at: Date.now() });
+    return data;
+  } catch (err) {
+    dexscreenerScanCache.delete(key);
+    throw err;
+  }
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -90,6 +130,48 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   );
 
   return true; // keep the message channel open for the async reply
+});
+
+// Dexscreener pair pages expose a chain slug and pool identifier in the URL.
+// The content script passes only those two route values. As with ProjectX, the
+// address comes exclusively from the last explicit LPLens load, never from the
+// page or a connected wallet.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || msg.type !== 'LPLENS_DEXSCREENER_POOL') return false;
+
+  (async () => {
+    const ent = await entitlement();
+    if (!ent.allowed) return { ok: false, gated: true, entitlement: ent };
+
+    const chainKey = String(msg.chain || '').toLowerCase();
+    const poolRef = String(msg.poolRef || '').toLowerCase();
+    if (!CHAINS[chainKey] || !/^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(poolRef)) {
+      return { ok: false, error: 'This Dexscreener pair route is not supported.' };
+    }
+
+    const store = await chrome.storage.local.get([
+      'address', 'rpcOverrides', 'etherscanKey',
+    ]);
+    const address = String(store.address || '').trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) {
+      return { ok: false, error: 'Open LPLens and load an address first.' };
+    }
+
+    const allPositions = await cachedDexscreenerPositions(chainKey, address, store);
+    const positions = allPositions.filter((position) => {
+      const id = String(position.version === 'v4' ? position.poolId : position.pool || '')
+        .toLowerCase();
+      return id === poolRef;
+    });
+    const safe = JSON.parse(JSON.stringify({ address, positions }, (_key, value) =>
+      typeof value === 'bigint' ? value.toString() : value));
+    return { ok: true, data: safe };
+  })().then(
+    (result) => sendResponse(result),
+    (err) => sendResponse({ ok: false, error: err.message || String(err) }),
+  );
+
+  return true;
 });
 
 // ProjectX does not expose position NFT ids in stable portfolio links. Its
@@ -160,6 +242,8 @@ const OVERLAY_ID = 'lplens-overlay';
 const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
 const PROJECTX_OVERLAY_ID = 'lplens-projectx-overlay';
 const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
+const DEXSCREENER_OVERLAY_ID = 'lplens-dexscreener-overlay';
+const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
 // `/positions/*` does not match the bare `/positions` list route. Keep the
 // exact list URL and its detail descendants explicit so the optional content
 // script never widens beyond Uniswap's position surfaces.
@@ -171,6 +255,9 @@ const OVERLAY_JS = Object.freeze(['render.js', 'overlay.js']);
 const PROJECTX_OVERLAY_MATCHES = Object.freeze([
   'https://www.prjx.com/portfolio',
   'https://www.prjx.com/portfolio/*',
+]);
+const DEXSCREENER_OVERLAY_MATCHES = Object.freeze([
+  'https://dexscreener.com/*',
 ]);
 
 async function overlayRegistration(id) {
@@ -221,10 +308,22 @@ async function syncOverlayRegistration() {
     origin: PROJECTX_OVERLAY_ORIGIN,
     matches: PROJECTX_OVERLAY_MATCHES,
   });
+  await syncOneOverlay({
+    id: DEXSCREENER_OVERLAY_ID,
+    origin: DEXSCREENER_OVERLAY_ORIGIN,
+    matches: DEXSCREENER_OVERLAY_MATCHES,
+  });
 }
 
 chrome.runtime.onInstalled.addListener(syncOverlayRegistration);
 chrome.runtime.onStartup.addListener(syncOverlayRegistration);
 chrome.permissions.onAdded.addListener(syncOverlayRegistration);
 chrome.permissions.onRemoved.addListener(syncOverlayRegistration);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (['address', 'rpcOverrides', 'etherscanKey', 'licenseKey']
+    .some((key) => Object.prototype.hasOwnProperty.call(changes, key))) {
+    dexscreenerScanCache.clear();
+  }
+});
 syncOverlayRegistration();
