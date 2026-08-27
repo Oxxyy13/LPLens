@@ -174,6 +174,18 @@
 .dex-range-price.now-label b { color: var(--signal-strong); }
 .dex-range-foot { margin-top: 5px; font: 10px/1.4 var(--mono); color: var(--ink-3); }
 .dex-range-unavailable { padding: 9px; border: 1px dashed var(--line); border-radius: 8px; }
+.dex-range-aligned {
+  display: none; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 10px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--signal) 35%, var(--line));
+  border-radius: 8px; background: color-mix(in srgb, var(--signal-soft) 58%, transparent);
+  color: var(--signal-strong); font: 600 10px/1.35 var(--mono);
+}
+.dex-range-aligned::before { content: ""; width: 7px; height: 7px; flex: none;
+  border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 14%, transparent); }
+.dex-range-aligned-copy { flex: 1; }
+.dex-range-aligned-mode { color: var(--ink-3); font-size: 8.5px; letter-spacing: .04em; text-transform: uppercase; }
+.portfolio-card.chart-range-aligned .dex-range { display: none; }
+.portfolio-card.chart-range-aligned .dex-range-aligned { display: flex; }
 .hero, .herolbl, .heroval, .herosub { } /* kept as aliases for older call sites */
 .herolbl { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em;
   text-transform: uppercase; color: var(--ink-3); }
@@ -212,6 +224,11 @@
     var(--signal); box-shadow: 0 3px 9px color-mix(in srgb, var(--signal) 22%, transparent); }
 .tag { padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--panel) 70%, transparent);
   font-size: 8.5px; color: var(--ink-3); font-weight: 500; font-family: var(--mono); letter-spacing: .055em; text-transform: uppercase; }
+.hd.local-experiment-header { flex-wrap: wrap; row-gap: 6px; }
+.local-experiment-banner { flex: 1 0 100%; padding: 3px 7px; box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--signal) 55%, var(--line)); border-radius: 6px;
+  background: color-mix(in srgb, var(--signal-soft) 72%, var(--panel)); color: var(--signal-strong);
+  font: 700 8.5px/1.25 var(--mono); letter-spacing: .08em; text-align: center; text-transform: uppercase; }
 .right { display: flex; align-items: center; gap: 6px; }
 button {
     all: unset; display: inline-grid; width: 26px; height: 26px; place-items: center; cursor: pointer;

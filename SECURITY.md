@@ -29,9 +29,11 @@ The extension has no wallet-provider or signing integration. It does not call
 - `eth_getBlockByNumber`
 - `eth_getTransactionReceipt`
 
-The optional Uniswap, ProjectX, and Dexscreener page scripts run in Chrome's
-isolated world. Their site permissions are separately granted, off at install,
-and revocable. None can access another extension's storage or wallet keys.
+The persistent optional Uniswap, ProjectX, and Dexscreener page scripts run in
+Chrome's isolated world. Their site permissions are separately granted, off at
+install, and revocable. None can access another extension's storage or wallet
+keys. The local-only Dexscreener chart experiment described below has one
+narrow, explicitly disclosed MAIN-world measurement step.
 
 ## Permissions and data flow
 
@@ -55,6 +57,21 @@ Dexscreener contains only the pair page's URL-derived chain and pool identifier.
 It does not include the active wallet. The response supplies base/quote token
 addresses used to orient the independent LPLens range display.
 
+**LOCAL-ONLY EXPERIMENT:** This branch also tests chart-aligned range graphics.
+For one measurement at a time, the service worker passes anonymous LP range
+numbers to a narrowly scoped function in Dexscreener's MAIN world. The function
+reads chart mode, plot geometry, and price-to-coordinate results through a
+private TradingView interface. It receives no wallet address, token ID, PnL,
+access key, custom endpoint, or provider key. Its implementation does not read
+or call the wallet provider, create a TradingView drawing, alter autoscale, move
+the visible range, or otherwise change chart state. The persistent isolated
+content script validates the returned numbers and draws the LPLens SVG. Because
+the function runs in the page's world, Dexscreener page code could technically
+observe the anonymous range numbers. The private interface is brittle and may
+stop working when Dexscreener changes. This experiment is marked
+`LPLENS_LOCAL_CHART_EXPERIMENT`, and release packaging aborts while that marker
+exists anywhere in `extension/`.
+
 When enabled in Settings, anonymous scan telemetry is limited to extension
 version, popup or side-panel surface, coarse outcome/count/duration buckets,
 and allowlisted per-chain error categories. Those aggregate database rows have
@@ -75,9 +92,11 @@ node tools/package.mjs
 diff -r extension build/lplens-0.30.0
 ```
 
-The final `diff` must print nothing. `tools/package.mjs` also parses every
-JavaScript file, runs a live public-history probe, and aborts if it detects a
-credential-shaped value or a development-key fence.
+The final `diff` must print nothing on a release commit. `tools/package.mjs`
+also parses every JavaScript file, runs a live public-history probe, and aborts
+if it detects a credential-shaped value or a development-key fence. This local
+experiment branch is intentionally not reproducible as a release package:
+packaging aborts before touching `build/` while the local chart marker remains.
 
 ## Secrets
 

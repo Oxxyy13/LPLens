@@ -134,8 +134,10 @@ async function paintPermissions() {
   if (dexscreenerGranted) pageRows.push(`<li class="yes"><b>dexscreener.com pair pages</b> - can read
     the chain and pool identifier in the URL and append a matching-position panel.
     It sends those two route values, without the wallet address, to api.dexscreener.com to match
-    token orientation. It uses the active overlay wallet selected in LPLens and reads no
-    Dexscreener page content.</li>`);
+    token orientation. It uses the active overlay wallet selected in LPLens. This local experiment
+    also gives a one-shot MAIN-world function up to three anonymous ranges so it can read only the
+    chart mode, plot geometry and numeric price coordinates. It does not give that function the
+    wallet address, position ID, PnL, access key, endpoint or provider key.</li>`);
   const pageAccess = pageRows.length ? pageRows.join('')
     : `<li class="no"><b>No web page at all.</b> All overlays are off, so no
          content script is registered anywhere.</li>`;
@@ -150,20 +152,29 @@ async function paintPermissions() {
     <ul>${hosts}</ul>
     <h3>Browser permissions</h3>
     <ul>${(mf.permissions || []).map((p) => `<li>${escape(p)}</li>`).join('')}</ul>
-    <h3>What it cannot do, structurally</h3>
+    <h3>Safety boundaries</h3>
     <ul class="cannot">
       <li>No wallet access. It never calls <code>eth_sendTransaction</code>,
-          <code>personal_sign</code> or <code>eth_requestAccounts</code>, and a
-          content script runs in an isolated world where
-          <code>window.ethereum</code> is unreachable.</li>
+          <code>personal_sign</code> or <code>eth_requestAccounts</code>. Persistent
+          content scripts run in an isolated world where <code>window.ethereum</code>
+          is unreachable. The local chart experiment's one-shot MAIN-world function
+          is implemented not to read or call a wallet provider.</li>
       <li>The only JSON-RPC methods it issues are ${rpcMethodList(RPC_METHODS)}.
           All are reads; none can move a token or sign anything.</li>
       <li>No <code>tabs</code>, <code>activeTab</code>, <code>cookies</code>,
           <code>webRequest</code> or <code>&lt;all_urls&gt;</code> — so it cannot
           see your browsing, and cannot reach any exchange or wallet site.</li>
-      <li>An overlay only appends its own panel. It never rewrites the site's
-          markup, so it cannot alter an address or amount shown to you.</li>
+      <li>An overlay adds only its own panel and, in the local experiment, its own
+          non-interactive chart graphic. It never rewrites the site's markup, so
+          it cannot alter an address or amount shown to you.</li>
     </ul>`;
+}
+
+async function removeOverlayPermission(origin) {
+  try {
+    await chrome.runtime.sendMessage({ type: 'LPLENS_REVOKE_OVERLAY_ACCESS', origin });
+  } catch { /* the worker-side permission check still fails closed */ }
+  await chrome.permissions.remove({ origins: [origin] });
 }
 
 permBox.addEventListener('change', async () => {
@@ -171,7 +182,7 @@ permBox.addEventListener('change', async () => {
     const ok = await chrome.permissions.request({ origins: [OVERLAY_ORIGIN] });
     if (!ok) permBox.checked = false;
   } else {
-    await chrome.permissions.remove({ origins: [OVERLAY_ORIGIN] });
+    await removeOverlayPermission(OVERLAY_ORIGIN);
   }
   paintPermissions();
 });
@@ -181,7 +192,7 @@ projectxPermBox.addEventListener('change', async () => {
     const ok = await chrome.permissions.request({ origins: [PROJECTX_OVERLAY_ORIGIN] });
     if (!ok) projectxPermBox.checked = false;
   } else {
-    await chrome.permissions.remove({ origins: [PROJECTX_OVERLAY_ORIGIN] });
+    await removeOverlayPermission(PROJECTX_OVERLAY_ORIGIN);
   }
   paintPermissions();
 });
@@ -191,7 +202,7 @@ dexscreenerPermBox.addEventListener('change', async () => {
     const ok = await chrome.permissions.request({ origins: [DEXSCREENER_OVERLAY_ORIGIN] });
     if (!ok) dexscreenerPermBox.checked = false;
   } else {
-    await chrome.permissions.remove({ origins: [DEXSCREENER_OVERLAY_ORIGIN] });
+    await removeOverlayPermission(DEXSCREENER_OVERLAY_ORIGIN);
   }
   paintPermissions();
 });

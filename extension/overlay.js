@@ -4,16 +4,18 @@
  *
  * SECURITY POSTURE — read this before changing anything here.
  *
- * This is the only LPLens code that runs on a web page, and it runs on the
- * page where transactions get approved. Three properties keep that safe, and
- * all three are load-bearing:
+ * This is the persistent LPLens code that runs on a web page, and it runs on
+ * pages where transactions may get approved. Three properties keep that safe,
+ * and all three are load-bearing:
  *
- *   1. APPEND-ONLY. It adds exactly one node and never reads, moves, or
- *      rewrites anything Uniswap rendered. It therefore cannot alter what you
- *      are shown before you sign.
- *   2. ISOLATED WORLD. Content scripts cannot see page JavaScript, so
- *      `window.ethereum` and the wallet are unreachable from here by
- *      construction rather than by good behaviour.
+ *   1. ADDITIVE. It adds only LPLens-owned nodes and never moves or rewrites
+ *      anything Uniswap rendered. It therefore cannot alter what you are shown
+ *      before you sign.
+ *   2. ISOLATED WORLD. This content script cannot see page JavaScript, so
+ *      `window.ethereum` and the wallet remain unreachable from here. The
+ *      local Dexscreener chart experiment asks the service worker for a
+ *      one-shot chart measurement. It never injects from this file or creates
+ *      a persistent bridge.
  *   3. NO NETWORK. MV3 content scripts have no cross-origin privileges. Every
  *      RPC call happens in the service worker; this file only messages it.
  *
@@ -29,8 +31,12 @@
 // in one place is what stops the popup and the overlay drifting apart again.
 const {
   CSS, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar, details,
-  rebalanceLine, dexscreenerRangeRuler,
+  rebalanceLine, dexscreenerOrientation, dexscreenerRangeRuler,
 } = globalThis.LPLens;
+
+// The packager blocks this literal. This branch is a local feasibility build,
+// not a Chrome Web Store candidate.
+const LOCAL_CHART_EXPERIMENT = 'LPLENS_LOCAL_CHART_EXPERIMENT';
 
 // v4 reads through a different manager and view contract, but the URL shape
 // is identical, so the route captures the version and passes it through.
@@ -50,6 +56,7 @@ const CHAIN_SLUGS = {
 
 const HOST_ID = 'lplens-overlay-host';
 const LIST_HOST_ID = 'lplens-list-host';
+const DEXSCREENER_CHART_HOST_ID = 'lplens-dexscreener-chart-host';
 // The list route is /positions with no position id after it.
 const LIST_ROUTE = /^\/positions\/?$/;
 const PROJECTX_ROUTE = /^\/portfolio\/?$/;
@@ -281,9 +288,10 @@ const VERSION = (() => {
 })();
 
 const head = (right) => `
-  <div class="hd">
+  <div class="hd${ON_DEXSCREENER ? ' local-experiment-header' : ''}">
     <span class="brand">LPLens <span class="tag">read-only v${esc(VERSION)}</span></span>
     <span class="right">${right || ''}<button id="lplens-toggle" title="collapse">-</button></span>
+    ${ON_DEXSCREENER ? '<span class="local-experiment-banner">local chart experiment</span>' : ''}
   </div>`;
 
 
@@ -329,6 +337,8 @@ function body(d) {
 }
 
 function teardown() {
+  stopDexscreenerChartSession();
+  dexscreenerHref = '';
   const host = document.getElementById(HOST_ID);
   if (host) host.remove();
   lastKey = null;
@@ -510,12 +520,16 @@ function portfolioCard(position) {
   return `<div class="portfolio-card">${gutterCard({ data: position })}</div>`;
 }
 
-function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError) {
+function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError, rangeId = '') {
   const tokenId = position && position.tokenId !== undefined ? String(position.tokenId) : '';
-  return `<div class="portfolio-card">
+  return `<div class="portfolio-card"${rangeId ? ` data-dex-range-id="${esc(rangeId)}"` : ''}>
     ${gutterCard({ data: position }, false)}
     ${tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
     ${dexscreenerRangeRuler(position, pair, wrappedNative, pairError)}
+    ${rangeId ? `<div class="dex-range-aligned">
+      <span class="dex-range-aligned-copy">Range drawn on chart</span>
+      <span class="dex-range-aligned-mode">chart scale pending</span>
+    </div>` : ''}
   </div>`;
 }
 
@@ -531,6 +545,7 @@ function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError) {
 let projectxBusy = false;
 let projectxPending = false;
 async function syncProjectXPortfolio() {
+  if (torndown) return;
   const key = 'projectx:portfolio';
   if (projectxBusy) {
     projectxPending = true;
@@ -552,6 +567,7 @@ async function syncProjectXPortfolio() {
       if (isOrphanError(err)) return shutdownOrphan();
       res = { ok: false, error: err.message || String(err) };
     }
+    if (torndown) return;
     if (lastKey !== key) return;
 
     if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
@@ -580,6 +596,10 @@ async function syncProjectXPortfolio() {
     </div>`, true);
   } finally {
     projectxBusy = false;
+    if (torndown) {
+      projectxPending = false;
+      return;
+    }
     if (projectxPending) {
       projectxPending = false;
       lastKey = null;
@@ -588,16 +608,389 @@ async function syncProjectXPortfolio() {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Local-only Dexscreener chart alignment experiment.
+ *
+ * The persistent content script stays in Chrome's isolated world. It sends
+ * only anonymous numeric ranges plus the exact URL to the service worker. The
+ * worker performs a one-shot chart measurement and returns viewport geometry.
+ * This layer treats that response as hostile input, paints its own SVG, and
+ * never touches the chart, the page's JavaScript, or a wallet provider.
+ * ------------------------------------------------------------------------- */
+
+const DEXSCREENER_CHART_POLL_MS = 750;
+const DEXSCREENER_CHART_CSS = `
+:host {
+  all: initial !important; position: fixed !important; inset: 0 !important;
+  width: 100vw !important; height: 100vh !important; pointer-events: none !important;
+  z-index: 2147482500 !important; contain: strict !important;
+}
+svg { position: fixed; display: block; overflow: hidden; pointer-events: none; }
+.range-band { stroke: none; }
+.range-boundary { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.range-bracket { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.range-label, .mode-label {
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: .035em;
+  paint-order: stroke; stroke: rgba(8, 12, 18, .94); stroke-width: 3px; stroke-linejoin: round;
+}
+.mode-label { font-size: 9px; fill: #FFD08A; }
+`;
+
+let dexscreenerChartTimer = null;
+let dexscreenerChartSession = null;
+
+// BEGIN PURE DEXSCREENER CHART GEOMETRY
+const DEXSCREENER_CHART_MODES = new Set([
+  'price-native', 'price-usd', 'mcap-native', 'mcap-usd',
+]);
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function validateDexscreenerChartGeometry(response, expectedHref, expectedRanges, viewport) {
+  const data = response && response.ok === true && response.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)
+      || data.href !== expectedHref || !DEXSCREENER_CHART_MODES.has(data.displayMode)) return null;
+  const plot = data.plot;
+  if (!plot || typeof plot !== 'object' || Array.isArray(plot)) return null;
+  const { left, top, width, height } = plot;
+  if (![left, top, width, height].every(finiteNumber)
+      || width < 120 || height < 100 || width > 20000 || height > 20000
+      || Math.abs(left) > 100000 || Math.abs(top) > 100000
+      || !viewport || !finiteNumber(viewport.width) || !finiteNumber(viewport.height)
+      || left + width <= 0 || top + height <= 0 || left >= viewport.width || top >= viewport.height) return null;
+
+  const rows = data.ranges;
+  const expectedIds = new Set(expectedRanges.map((range) => range.id));
+  if (!Array.isArray(rows) || rows.length !== expectedIds.size || rows.length > 3) return null;
+  const minY = top - 10 * height;
+  const maxY = top + 11 * height;
+  const seen = new Set();
+  const normalized = [];
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const expected = expectedRanges[index];
+    if (!row || typeof row !== 'object' || Array.isArray(row)
+        || typeof row.id !== 'string' || row.id !== expected.id
+        || !expectedIds.has(row.id) || seen.has(row.id)
+        || !finiteNumber(row.loY) || !finiteNumber(row.hiY) || !finiteNumber(row.nowY)
+        || !finiteNumber(row.loValue) || !finiteNumber(row.hiValue) || !finiteNumber(row.nowValue)
+        || !(row.loValue > 0) || !(row.hiValue > row.loValue) || !(row.nowValue > 0)
+        || [row.loY, row.hiY, row.nowY].some((value) => value < minY || value > maxY)) return null;
+    const factors = [row.loValue / expected.lo, row.hiValue / expected.hi,
+      row.nowValue / expected.now];
+    const factor = factors[0];
+    if (!(factor > 0) || factors.some((value) => !finiteNumber(value)
+        || Math.abs(value - factor) > Math.max(1e-12, Math.abs(factor) * 1e-9))
+        || row.hiY > row.loY
+        || (row.nowValue < row.loValue && row.nowY < row.loY)
+        || (row.nowValue > row.hiValue && row.nowY > row.hiY)
+        || (row.nowValue >= row.loValue && row.nowValue <= row.hiValue
+          && (row.nowY < row.hiY || row.nowY > row.loY))) return null;
+    seen.add(row.id);
+    normalized.push({
+      id: row.id, loY: row.loY, hiY: row.hiY, nowY: row.nowY,
+      loValue: row.loValue, hiValue: row.hiValue, nowValue: row.nowValue,
+    });
+  }
+  if (seen.size !== expectedIds.size) return null;
+  return {
+    href: expectedHref,
+    displayMode: data.displayMode,
+    plot: { left, top, width, height },
+    ranges: normalized,
+  };
+}
+
+function compactChartNumber(value, significant = 4) {
+  if (value >= 1000) return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (value >= 1) return value.toLocaleString('en-US', { maximumFractionDigits: 6 });
+  if (value >= 1e-6) return Number(value.toPrecision(significant)).toString();
+  return value.toExponential(2);
+}
+
+function formatDexscreenerChartValue(value, displayMode) {
+  if (displayMode.startsWith('mcap-')) {
+    const tiers = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (const [divisor, suffix] of tiers) {
+      if (value >= divisor) {
+        const compact = `${Number((value / divisor).toPrecision(3))}${suffix}`;
+        return displayMode === 'mcap-usd' ? `$${compact}` : compact;
+      }
+    }
+    const compact = compactChartNumber(value);
+    return displayMode === 'mcap-usd' ? `$${compact}` : compact;
+  }
+  return displayMode === 'price-usd' ? `$${compactChartNumber(value)}` : compactChartNumber(value);
+}
+
+function calculateDexscreenerChartShapes(geometry) {
+  const { top, width, height } = geometry.plot;
+  const equiv = geometry.displayMode !== 'price-native';
+  const modeText = geometry.displayMode === 'price-usd' ? 'CURRENT USD EQUIV'
+    : geometry.displayMode.startsWith('mcap-') ? 'CURRENT MCAP EQUIV' : '';
+  const xStart = equiv ? width * 0.72 : 0;
+  const xEnd = width - 3;
+  return {
+    equiv, modeText, xStart, xEnd,
+    ranges: geometry.ranges.map((range) => {
+      const hiY = range.hiY - top;
+      const loY = range.loY - top;
+      const rawTop = Math.min(hiY, loY);
+      const rawBottom = Math.max(hiY, loY);
+      const clippedTop = Math.max(0, rawTop);
+      const clippedBottom = Math.min(height, rawBottom);
+      const bandHeight = Math.max(2.5, clippedBottom - clippedTop);
+      return {
+        id: range.id, hiY, loY, rawTop, rawBottom,
+        hiLabel: formatDexscreenerChartValue(range.hiValue, geometry.displayMode),
+        loLabel: formatDexscreenerChartValue(range.loValue, geometry.displayMode),
+        whollyAbove: rawBottom < 0,
+        whollyBelow: rawTop > height,
+        rangeSpansView: rawTop < 0 && rawBottom > height,
+        bandHeight,
+        bandY: Math.max(0, Math.min(height - bandHeight,
+          (clippedTop + clippedBottom - bandHeight) / 2)),
+      };
+    }),
+  };
+}
+// END PURE DEXSCREENER CHART GEOMETRY
+
+function chartLayerHost() {
+  const existing = document.getElementById(DEXSCREENER_CHART_HOST_ID);
+  if (existing) return existing.__shadow ? existing : null;
+  const host = document.createElement('div');
+  host.id = DEXSCREENER_CHART_HOST_ID;
+  host.dataset.experiment = LOCAL_CHART_EXPERIMENT;
+  host.setAttribute('aria-hidden', 'true');
+  for (const [name, value] of Object.entries({
+    all: 'initial', position: 'fixed', inset: '0', width: '100vw', height: '100vh',
+    pointerEvents: 'none', zIndex: '2147482500', contain: 'strict',
+  })) host.style.setProperty(name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`), value, 'important');
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(DEXSCREENER_CHART_CSS);
+  shadow.adoptedStyleSheets = [sheet];
+  host.__shadow = shadow;
+  document.documentElement.appendChild(host);
+  return host;
+}
+
+function resetDexscreenerAlignedCards() {
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    card.classList.remove('chart-range-aligned');
+    const mode = card.querySelector('.dex-range-aligned-mode');
+    if (mode) mode.textContent = 'chart scale pending';
+  }
+}
+
+function clearDexscreenerChartVisual() {
+  const host = document.getElementById(DEXSCREENER_CHART_HOST_ID);
+  if (host && host.__shadow) host.remove();
+  resetDexscreenerAlignedCards();
+}
+
+function stopDexscreenerChartSession() {
+  if (dexscreenerChartTimer !== null) clearTimeout(dexscreenerChartTimer);
+  dexscreenerChartTimer = null;
+  dexscreenerChartSession = null;
+  clearDexscreenerChartVisual();
+}
+
+function prepareDexscreenerChartRanges(positions, pair, wrappedNative) {
+  const ranges = [];
+  const rangeIdByIndex = new Map();
+  for (let i = 0; i < positions.length && ranges.length < 3; i++) {
+    const oriented = dexscreenerOrientation(positions[i], pair, wrappedNative);
+    if (!oriented || !oriented.valid || !finiteNumber(oriented.lo)
+        || !finiteNumber(oriented.hi) || !finiteNumber(oriented.now)
+        || !(oriented.lo > 0) || !(oriented.hi > oriented.lo) || !(oriented.now > 0)) continue;
+    const id = `r${ranges.length}`;
+    ranges.push({ id, lo: oriented.lo, hi: oriented.hi, now: oriented.now });
+    rangeIdByIndex.set(i, id);
+  }
+  return { ranges, rangeIdByIndex };
+}
+
+function appendSvg(parent, name, attrs = {}, text = '') {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+  if (text) node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}
+
+function paintDexscreenerChartGeometry(geometry) {
+  const { left, top, width, height } = geometry.plot;
+  const layout = calculateDexscreenerChartShapes(geometry);
+  const { equiv, modeText, xStart, xEnd } = layout;
+  const colors = ['#E8A33D', '#55C3B4', '#B4A0FF'];
+  const dashes = ['', '8 5', '2 5'];
+  const host = chartLayerHost();
+  if (!host || !host.__shadow) return false;
+  const shadow = host.__shadow;
+  const svg = appendSvg(document.createDocumentFragment(), 'svg', {
+    viewBox: `0 0 ${width} ${height}`,
+    width, height,
+    style: `left:${left}px;top:${top}px;width:${width}px;height:${height}px`,
+  });
+  svg.setAttribute('aria-hidden', 'true');
+
+  if (equiv) {
+    appendSvg(svg, 'rect', {
+      x: xStart, y: 0, width: Math.max(0, width - xStart), height,
+      fill: 'rgba(232, 163, 61, .025)',
+    });
+    appendSvg(svg, 'line', {
+      x1: xStart, x2: xStart, y1: 0, y2: height,
+      class: 'range-bracket', stroke: 'rgba(232, 163, 61, .45)', 'stroke-dasharray': '3 5',
+    });
+    appendSvg(svg, 'text', { x: xStart + 7, y: 14, class: 'mode-label' }, modeText);
+  }
+
+  layout.ranges.forEach((range, index) => {
+    const color = colors[index] || colors[0];
+    const dash = dashes[index] || '';
+    const { hiY, loY, whollyAbove, whollyBelow } = range;
+    const labelX = xEnd - (index * 9);
+
+    const label = (y, value, anchor = 'end') => appendSvg(svg, 'text', {
+      x: anchor === 'end' ? labelX : xStart + 7,
+      y: Math.max(11, Math.min(height - 5, y)),
+      class: 'range-label', fill: color, 'text-anchor': anchor,
+    }, value);
+
+    if (whollyAbove || whollyBelow) {
+      const edgeY = whollyAbove ? 1.5 + index * 3 : height - 1.5 - index * 3;
+      appendSvg(svg, 'line', {
+        x1: xStart, x2: xEnd, y1: edgeY, y2: edgeY,
+        class: 'range-boundary', stroke: color, 'stroke-dasharray': dash || '4 4',
+      });
+      const maxY = whollyAbove ? 12 + index * 26 : height - 20 - index * 26;
+      const minY = whollyAbove ? 24 + index * 26 : height - 7 - index * 26;
+      label(maxY, `${whollyAbove ? '▲' : '▼'} LP MAX ${range.hiLabel} ${whollyAbove ? 'ABOVE' : 'BELOW'}`);
+      label(minY, `${whollyAbove ? '▲' : '▼'} LP MIN ${range.loLabel} ${whollyAbove ? 'ABOVE' : 'BELOW'}`);
+      return;
+    }
+
+    appendSvg(svg, 'rect', {
+      x: xStart, y: range.bandY, width: Math.max(0, xEnd - xStart), height: range.bandHeight,
+      class: 'range-band', fill: color, opacity: index === 0 ? '.09' : '.055',
+    });
+
+    if (range.rangeSpansView) {
+      label(26 + index * 13, 'LP RANGE EXTENDS BEYOND VIEW');
+    }
+
+    const narrow = Math.abs(loY - hiY) < 20;
+    const drawBound = (y, kind, valueLabel) => {
+      if (y >= 0 && y <= height) {
+        appendSvg(svg, 'line', {
+          x1: xStart, x2: xEnd, y1: y, y2: y,
+          class: 'range-boundary', stroke: color, 'stroke-dasharray': dash,
+        });
+        const labelY = narrow
+          ? (hiY + loY) / 2 + (kind === 'MAX' ? -5 : 12)
+          : y + (kind === 'MAX' ? -5 : 12);
+        label(labelY, `LP ${kind} ${valueLabel}`);
+      } else {
+        const above = y < 0;
+        label(above ? 12 + index * 13 : height - 7 - index * 13,
+          `${above ? '▲' : '▼'} LP ${kind} ${valueLabel} ${above ? 'ABOVE' : 'BELOW'} VIEW`);
+      }
+    };
+    drawBound(hiY, 'MAX', range.hiLabel);
+    drawBound(loY, 'MIN', range.loLabel);
+  });
+
+  shadow.replaceChildren(svg);
+
+  const alignedIds = new Set(geometry.ranges.map((range) => range.id));
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  const alignedMode = geometry.displayMode === 'price-native' ? 'exact native scale'
+    : geometry.displayMode === 'price-usd' ? 'current USD equivalent'
+      : 'current market cap equivalent';
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    const aligned = alignedIds.has(String(card.dataset.dexRangeId || ''));
+    card.classList.toggle('chart-range-aligned', aligned);
+    const mode = card.querySelector('.dex-range-aligned-mode');
+    if (mode && aligned) mode.textContent = alignedMode;
+  }
+  return true;
+}
+
+function scheduleDexscreenerChartGeometry(session) {
+  if (dexscreenerChartSession !== session) return;
+  if (dexscreenerChartTimer !== null) clearTimeout(dexscreenerChartTimer);
+  dexscreenerChartTimer = setTimeout(() => {
+    dexscreenerChartTimer = null;
+    void refreshDexscreenerChartGeometry(session);
+  }, DEXSCREENER_CHART_POLL_MS);
+}
+
+async function refreshDexscreenerChartGeometry(session) {
+  if (dexscreenerChartSession !== session || session.href !== location.href
+      || session.generation !== dexscreenerGeneration || lastKey !== session.key) {
+    if (dexscreenerChartSession === session) stopDexscreenerChartSession();
+    return;
+  }
+  if (!contextAlive()) return shutdownOrphan();
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: 'LPLENS_DEXSCREENER_CHART_GEOMETRY',
+      href: session.href,
+      ranges: session.ranges.map(({ id, lo, hi, now }) => ({ id, lo, hi, now })),
+    });
+  } catch (err) {
+    if (isOrphanError(err)) return shutdownOrphan();
+    response = null;
+  }
+  if (dexscreenerChartSession !== session || session.href !== location.href
+      || session.generation !== dexscreenerGeneration || lastKey !== session.key) return;
+  if (response && response.reason === 'permission-revoked') return shutdownRevoked();
+  const geometry = validateDexscreenerChartGeometry(
+    response, session.href, session.ranges, { width: innerWidth, height: innerHeight },
+  );
+  try {
+    if (!geometry || !paintDexscreenerChartGeometry(geometry)) clearDexscreenerChartVisual();
+  } catch {
+    clearDexscreenerChartVisual();
+  }
+  scheduleDexscreenerChartGeometry(session);
+}
+
+function startDexscreenerChartSession(key, generation, href, ranges) {
+  stopDexscreenerChartSession();
+  if (!ranges.length) return;
+  const session = {
+    key, generation, href,
+    ranges: ranges.slice(0, 3).map(({ id, lo, hi, now }) => ({ id, lo, hi, now })),
+  };
+  dexscreenerChartSession = session;
+  void refreshDexscreenerChartGeometry(session);
+}
+
 /**
  * Dexscreener pair pages.
  *
  * Only the route is used: /<chain>/<pool-address-or-v4-pool-id>. The address
- * still comes from LPLens local storage through the service worker. No page
- * text, token name, chart state, connected wallet or provider object is read.
+ * still comes from LPLens local storage through the service worker. The local
+ * experiment also requests chart-scale geometry through the worker. This
+ * isolated script reads no page text, connected wallet or provider object.
  */
 let dexscreenerBusy = false;
 let dexscreenerPending = false;
 let dexscreenerGeneration = 0;
+let dexscreenerHref = '';
 function dexscreenerRoute() {
   if (!ON_DEXSCREENER) return null;
   const parts = location.pathname.split('/').filter(Boolean);
@@ -609,19 +1002,26 @@ function dexscreenerRoute() {
 }
 
 async function syncDexscreener() {
+  if (torndown) return;
   const route = dexscreenerRoute();
   if (!route) return teardown();
   const key = `dexscreener:${route.chain}:${route.poolRef}`;
+  const href = location.href;
+  if (dexscreenerHref && dexscreenerHref !== href) {
+    stopDexscreenerChartSession();
+    if (lastKey === key) lastKey = null;
+  }
   if (dexscreenerBusy) {
-    if (lastKey !== key) {
+    if (lastKey !== key || dexscreenerHref !== href) {
       lastKey = key;
       dexscreenerPending = true;
     }
     return;
   }
-  if (lastKey === key) return;
+  if (lastKey === key && dexscreenerHref === href) return;
   dexscreenerBusy = true;
   lastKey = key;
+  dexscreenerHref = href;
   const generation = dexscreenerGeneration;
   teardownList();
   render(head('<span class="pill">Dexscreener</span>')
@@ -640,9 +1040,12 @@ async function syncDexscreener() {
       if (isOrphanError(err)) return shutdownOrphan();
       res = { ok: false, error: err.message || String(err) };
     }
-    if (lastKey !== key || generation !== dexscreenerGeneration) return;
+    if (torndown) return;
+    if (lastKey !== key || generation !== dexscreenerGeneration || href !== location.href) return;
+    if (res && res.permissionRevoked) return shutdownRevoked();
 
     if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+      stopDexscreenerChartSession();
       const e = res.entitlement || {};
       render(head('<span class="pill">Dexscreener</span>') + `<div class="bd">
         <div class="note">${esc(e.reason || 'LPLens access is required.')} Check Settings or ask Dan.</div>
@@ -650,6 +1053,7 @@ async function syncDexscreener() {
       return;
     }
     if (!res || !res.ok) {
+      stopDexscreenerChartSession();
       render(head('<span class="pill">Dexscreener</span>') + `<div class="bd">
         <div class="err note">${esc(res && res.error || 'no response')}</div>
       </div>`);
@@ -663,17 +1067,25 @@ async function syncDexscreener() {
     const address = String(res.data && res.data.address || '');
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
     const shown = positions.slice(0, 8);
+    const prepared = prepareDexscreenerChartRanges(shown, pair, wrappedNative);
     const overflow = positions.length - shown.length;
     const content = positions.length
-      ? shown.map((position) => dexscreenerPortfolioCard(position, pair, wrappedNative, pairError)).join('')
+      ? shown.map((position, index) => dexscreenerPortfolioCard(
+        position, pair, wrappedNative, pairError, prepared.rangeIdByIndex.get(index) || '',
+      )).join('')
         + (overflow > 0 ? `<div class="note">${overflow} more matching position${overflow === 1 ? '' : 's'} not shown here.</div>` : '')
       : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
     render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. Pair orientation is matched by token address. Dexscreener page content and wallet data are not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. Local chart alignment shares up to three anonymous range bounds with this page. Dexscreener wallet data is not read.</div>
       ${content}
     </div>`);
+    startDexscreenerChartSession(key, generation, href, prepared.ranges);
   } finally {
     dexscreenerBusy = false;
+    if (torndown) {
+      dexscreenerPending = false;
+      return;
+    }
     if (dexscreenerPending) {
       dexscreenerPending = false;
       lastKey = null;
@@ -683,6 +1095,7 @@ async function syncDexscreener() {
 }
 
 async function syncList() {
+  if (torndown) return;
   if (listBusy) return;
   const anchors = [...document.querySelectorAll('a[href*="/positions/v"]')];
   if (!anchors.length) return teardownList();
@@ -769,6 +1182,7 @@ async function syncList() {
         if (isOrphanError(err)) return shutdownOrphan('list');
         row.data = { error: err.message || String(err) };
       }
+      if (torndown) return;
       if (listScanned !== key) return;   // rows changed while we were fetching
       paint();
     }
@@ -825,6 +1239,7 @@ let torndown = false;
 function shutdownOrphan(target) {
   if (torndown) return;
   torndown = true;
+  stopDexscreenerChartSession();
   try { clearInterval(pollTimer); } catch {}
   try { clearTimeout(listTimer); } catch {}
   try { listObserver.disconnect(); } catch {}
@@ -849,7 +1264,18 @@ function shutdownOrphan(target) {
   } catch {}
 }
 
+function shutdownRevoked() {
+  if (torndown) return;
+  torndown = true;
+  try { clearInterval(pollTimer); } catch {}
+  try { clearTimeout(listTimer); } catch {}
+  try { listObserver.disconnect(); } catch {}
+  try { teardown(); } catch {}
+  try { teardownList(); } catch {}
+}
+
 async function sync() {
+  if (torndown) return;
   if (ON_DEXSCREENER) {
     return syncDexscreener();
   }
@@ -953,11 +1379,25 @@ try {
         || (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER)) return;
     if (ON_DEXSCREENER) {
       dexscreenerGeneration++;
+      stopDexscreenerChartSession();
       if (dexscreenerBusy) dexscreenerPending = true;
     }
     lastKey = null;
     sync();
   });
 } catch { /* orphaned context */ }
+
+try {
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== 'LPLENS_OVERLAY_ACCESS_REVOKED'
+        || !Array.isArray(msg.origins)) return false;
+    if (msg.origins.includes(`${location.origin}/*`)) shutdownRevoked();
+    return false;
+  });
+} catch { /* orphaned context */ }
+
+window.addEventListener('pagehide', () => {
+  stopDexscreenerChartSession();
+});
 
 sync();

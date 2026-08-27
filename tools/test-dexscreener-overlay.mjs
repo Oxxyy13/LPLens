@@ -6,6 +6,7 @@ const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', i
 const worker = readFileSync(new URL('../extension/sw.js', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const options = readFileSync(new URL('../extension/options.html', import.meta.url), 'utf8');
+const optionsScript = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const privacy = readFileSync(new URL('./licence-worker/worker.js', import.meta.url), 'utf8');
 
@@ -28,14 +29,36 @@ assert.match(overlay, /dexscreenerPending/);
 assert.match(overlay, /generation !== dexscreenerGeneration/);
 assert.match(overlay, /dexscreenerRangeRuler\(position, pair, wrappedNative, pairError\)/);
 assert.match(overlay, /positions\.slice\(0, 8\)/);
-assert.match(overlay, /Dexscreener page content and wallet data are not read/);
+assert.match(overlay, /Local chart alignment shares up to three anonymous range bounds with this page/);
+assert.match(overlay, /local-experiment-banner/);
+assert.match(worker, /LPLENS_DEXSCREENER_CHART_GEOMETRY/);
+assert.match(worker, /world:\s*'MAIN'/);
+assert.match(worker, /async function dexscreenerPageAccess\(sender\)/);
+assert.match(worker, /chrome\.permissions\.contains\(\{ origins: \[DEXSCREENER_OVERLAY_ORIGIN\] \}\)/);
+assert.match(worker, /permissionRevoked: true/);
+assert.match(worker, /LPLENS_OVERLAY_ACCESS_REVOKED/);
 assert.doesNotMatch(overlay, /window\.ethereum\s*[.(=]/);
+assert.match(overlay, /function shutdownRevoked\(\)/);
+assert.match(overlay, /LPLENS_OVERLAY_ACCESS_REVOKED/);
+assert.match(overlay, /async function sync\(\) \{\s*if \(torndown\) return;/);
+assert.match(overlay, /async function syncDexscreener\(\) \{\s*if \(torndown\) return;/);
+assert.match(overlay, /async function syncProjectXPortfolio\(\) \{\s*if \(torndown\) return;/);
 assert.match(options, /id="dexscreenerOverlayPerm"/);
+assert.match(options, /service worker also re-checks Dexscreener permission/i);
+assert.match(optionsScript, /LPLENS_REVOKE_OVERLAY_ACCESS/);
+assert.match(optionsScript, /The local chart experiment's one-shot MAIN-world function/);
+assert.doesNotMatch(optionsScript, /reads no\s+Dexscreener page content/);
 
 for (const [name, body] of [['Options', options], ['README', readme], ['privacy policy', privacy]]) {
   assert.match(body, /dexscreener\.com/i, `${name} omits the optional Dexscreener scope`);
   assert.match(body, /chain and pool identifier/i, `${name} omits the URL-only routing boundary`);
   assert.match(body, /active overlay wallet|active wallet/i,
     `${name} omits the explicit active-wallet behavior`);
+  assert.match(body, /MAIN.world/i,
+    `${name} omits the local chart experiment's page-world measurement`);
+  assert.match(body, /anonymous LP (?:low, current, and high )?range|anonymous LP range numbers/i,
+    `${name} omits the anonymous LP range disclosure`);
+  assert.match(body, /no wallet address|without the (?:active )?wallet address/i,
+    `${name} omits the wallet-address exclusion`);
 }
-console.log('Dexscreener overlay: optional permission, URL-only route and active-wallet dispatch pass');
+console.log('Dexscreener overlay: optional permission, active wallet and local chart disclosure pass');

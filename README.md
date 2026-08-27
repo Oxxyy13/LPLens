@@ -28,6 +28,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
 ## Status: 0.30.0 candidate - support diagnostics and Dexscreener context
 
+> **LOCAL-ONLY EXPERIMENT:** This branch tests chart-aligned LP ranges on
+> Dexscreener. It is not the Store candidate described below and cannot be
+> packaged. For one measurement at a time, the service worker gives a narrowly
+> scoped MAIN-world function anonymous LP range numbers and reads the chart mode
+> and geometry through Dexscreener's private TradingView interface. It does not
+> provide a wallet address, token ID, PnL, access key, endpoint, or provider key.
+> It does not read or call the wallet provider and does not change chart state.
+> The persistent isolated content script draws LPLens's own overlay from the
+> returned numeric coordinates. Dexscreener page code could technically observe
+> the range numbers while the function runs, and the private chart interface may
+> break when Dexscreener changes. `tools/package.mjs` rejects the experiment
+> marker so this code cannot become a release accidentally.
+
 The Chrome Web Store currently serves 0.28.0. This 0.30.0 candidate includes the
 browser-managed portfolio side panel that can stay open while the user changes
 tabs. It restores the most recent rendered portfolio view immediately, then
@@ -79,9 +92,12 @@ node tools/package.mjs          # produces build/lplens-<version>/ and a zip
 diff -r extension build/lplens-0.30.0
 ```
 
-That diff is empty. `tools/package.mjs` also refuses to produce a package if it
-finds anything credential-shaped in the output, and aborts outright if anyone
-reintroduces a hardcoded key into `extension/lib/chains.js`.
+That diff is empty on a release commit. `tools/package.mjs` also refuses to
+produce a package if it finds anything credential-shaped in the output, and
+aborts outright if anyone reintroduces a hardcoded key into
+`extension/lib/chains.js`. On this local experiment branch, the package command
+is expected to abort before changing `build/` while
+`LPLENS_LOCAL_CHART_EXPERIMENT` remains anywhere in `extension/`.
 
 Two claims worth checking directly, because they are the ones that matter:
 
@@ -284,7 +300,7 @@ site's content script.
 Once granted, that is a real widening of the surface, and it is worth
 understanding rather than skimming:
 
-- The content script is **write-isolated and append-only**. On Uniswap it reads
+- The persistent content script is **write-isolated and append-only**. On Uniswap it reads
   the position-page URL; on the positions list it reads semantic position links
   and the first line of visible row text to discover and label positions. On
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
@@ -292,17 +308,28 @@ understanding rather than skimming:
   On Dexscreener it reads only the chain and pool identifier in the pair-page
   URL, then checks that same active wallet for a matching position. The service
   worker sends those two route values, without the wallet address, to
-  `api.dexscreener.com` to retrieve the pair's base/quote token orientation. It
-  reads no Dexscreener text, chart state, connected-wallet state, or provider
-  object. The popup and side panel always name the active overlay wallet;
+  `api.dexscreener.com` to retrieve the pair's base/quote token orientation.
+  The popup and side panel always name the active overlay wallet;
   clicking a saved wallet selects it immediately, and scanning every saved
   wallet does not change that selection. It never
   reads balances, forms, connected-wallet state, wallet-provider objects, or
-  signing prompts. Its only page write is adding its own closed-shadow-root
-  panel; it never moves or rewrites anything either site rendered.
-- It runs in Chrome's **isolated world**, so `window.ethereum`, the page's
-  JavaScript, and the wallet are unreachable from it by construction — not by
-  good behaviour.
+  signing prompts. Its only page writes are its own closed-shadow-root panel and
+  local experiment range graphic; it never moves or rewrites anything either
+  site rendered.
+- The persistent script runs in Chrome's **isolated world**, so
+  `window.ethereum`, the page's JavaScript, and the wallet are unreachable from
+  that script by construction. The local chart experiment is a disclosed,
+  narrow exception: the service worker executes a one-shot MAIN-world function
+  on Dexscreener. That function receives at most anonymous LP low, current, and
+  high range numbers. It reads only chart mode, plot geometry, and the numeric
+  price-to-coordinate mapping from Dexscreener's private TradingView interface.
+  It receives no wallet address, token ID, PnL, access key, custom endpoint, or
+  provider key. Its code does not read or call a wallet provider and does not
+  create drawings, change the visible range, alter autoscale, or otherwise
+  change chart state. The page could technically observe the range numbers
+  during that MAIN-world call. The isolated content script validates the result
+  and draws the SVG itself. Because the chart interface is private, alignment is
+  best effort and may stop working after a Dexscreener change.
 - It has **no network access**. MV3 stripped cross-origin privileges from
   content scripts, so every RPC call happens in the service worker and the
   overlay only ever receives finished data.
