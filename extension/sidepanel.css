@@ -47,8 +47,17 @@ body.sidepanel .pop-body {
   padding: 0 10px 10px;
   white-space: pre-line;
   overflow-wrap: anywhere;
-  color: var(--ink-3);
+  color: var(--ink-2);
   font: 10px/1.5 var(--mono);
+}
+.scan-details-body[hidden] { display: none; }
+.scan-details .diagnostic-actions {
+  margin: 0;
+  padding: 0 10px 10px;
+}
+.scan-details-body:not([hidden]) + .diagnostic-actions {
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
 }
 
 /* The shared popup stylesheet hides these controls outside the side panel.

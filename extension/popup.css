@@ -328,13 +328,12 @@ details.scan-networks fieldset { min-width: 0; margin: 0; padding: 8px 10px 9px;
 .network-option input { width: 14px; height: 14px; flex: none; margin: 0; accent-color: var(--signal); }
 .network-option span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .network-option-all { margin-bottom: 4px; padding-bottom: 8px; border-bottom: 1px solid var(--line); color: var(--ink); }
-details.scan-networks fieldset > p { margin: 6px 4px 0; color: var(--ink-3); font: 9px/1.2 var(--mono); }
-
 .check { display: flex; align-items: center; gap: 7px; color: var(--ink-3); cursor: pointer; font: 10.5px/1.3 var(--mono); letter-spacing: .025em; }
+.check[hidden] { display: none; }
 .check input, .perm input { accent-color: var(--signal); }
 .check input { width: 15px; height: 15px; margin: 0; }
 .secret-toggle { flex: none; margin: 0; padding: 0 4px; white-space: nowrap; }
-.status { min-height: 16px; color: var(--ink-3); font-size: 11.5px;
+.status { min-height: 16px; color: var(--ink-2); font-size: 11.5px;
   /* Status text now names unscanned and unreadable holdings, and error
      strings can carry a long unbroken URL. Neither may widen the popup. */
   overflow-wrap: anywhere; }
@@ -359,7 +358,6 @@ details.scan-networks fieldset > p { margin: 6px 4px 0; color: var(--ink-3); fon
 .wallet-lbl, .chain-lbl { overflow: hidden; color: var(--ink-3); font: 9px/1 var(--mono); letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
 .wallet-lbl { max-width: 76px; }
 .chain-lbl { text-transform: uppercase; }
-.meta { padding: 2px 12px 9px; color: var(--ink-3); font: 10px/1.4 var(--mono); }
 .more {
   display: block;
   width: calc(100% - 22px);
@@ -402,7 +400,6 @@ body:not(.sidepanel) .hide-position { display: none; }
   letter-spacing: .06em;
   text-transform: uppercase;
 }
-.totals-heading span:last-child { color: var(--ink-3); letter-spacing: .02em; text-transform: none; }
 .totals .tot-line { min-width: 0; padding: 10px 9px 11px; color: var(--ink); line-height: 1.25; }
 .totals .tot-line + .tot-line { border-left: 1px solid var(--line); }
 .totals .tot-line .k { display: block; margin-bottom: 4px; color: var(--ink-3); font: 8.5px/1.2 var(--mono); letter-spacing: .075em; text-transform: uppercase; }
@@ -411,7 +408,7 @@ body:not(.sidepanel) .hide-position { display: none; }
 .tot-value.negative { color: var(--warn); }
 .tot-value.muted { color: var(--ink); }
 .tot-line.unavailable .tot-value { color: var(--ink-3); font-size: 12px; letter-spacing: 0; }
-.tot-coverage { display: block; margin-top: 3px; color: var(--ink-3); font: 8.5px/1.35 var(--mono); }
+.tot-coverage { display: block; margin-top: 3px; color: var(--ink-2); font: 8.5px/1.35 var(--mono); }
 .tot-line.partial .tot-coverage { color: var(--signal-strong); }
 .totals-notes {
   display: grid;

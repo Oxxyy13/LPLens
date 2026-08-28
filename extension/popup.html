@@ -24,20 +24,19 @@
     <div id="activeWallet" class="active-wallet" role="status" aria-live="polite">Overlay wallet: none selected</div>
 
     <details class="saved" id="savedWallets">
-      <summary>Saved wallets (<span id="savedCount">0</span>)</summary>
+      <summary>Saved wallets</summary>
       <div id="savedList" class="saved-list"></div>
     </details>
 
     <details class="scan-networks" id="scanNetworks">
-      <summary><span>Networks to scan</span><span id="scanNetworkSummary">All 6</span></summary>
+      <summary><span>Chains</span><span id="scanNetworkSummary">All</span></summary>
       <fieldset>
-        <legend class="sr-only">Networks included in portfolio scans</legend>
+        <legend class="sr-only">Chains included in portfolio refreshes</legend>
         <label class="network-option network-option-all">
           <input type="checkbox" id="scanNetworkAll" checked>
-          <span>All networks</span>
+          <span>All chains</span>
         </label>
         <div id="scanNetworkList" class="network-list"></div>
-        <p>Does not affect page overlays</p>
       </fieldset>
     </details>
 
@@ -52,7 +51,7 @@
     <p id="scanHint" class="notice" role="status" aria-live="polite" hidden></p>
   </form>
 
-  <div id="status" class="status">Checking access…</div>
+  <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">Checking access…</div>
   <div class="diagnostic-actions" aria-label="Support tools">
     <button type="button" id="copyDiagnostics" class="text-button">Copy diagnostics</button>
     <a id="reportIssue" href="https://github.com/Oxxyy13/LPLens/issues/new?template=bug_report.md" target="_blank">What did LPLens get wrong?</a>

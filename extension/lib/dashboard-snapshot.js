@@ -30,6 +30,7 @@ function clean(raw) {
         typeof key === 'string' && /^[a-z0-9-]{1,32}$/.test(key)
       )))].slice(0, 32)
     : null;
+  const wallets = Number.isInteger(raw.wallets) && raw.wallets >= 0 ? raw.wallets : 0;
   return {
     at: raw.at,
     html: raw.html,
@@ -37,7 +38,10 @@ function clean(raw) {
     details: typeof raw.details === 'string' ? raw.details.slice(0, MAX_SNAPSHOT_DETAILS) : '',
     issues: Number.isInteger(raw.issues) && raw.issues >= 0 ? raw.issues : 0,
     positions: Number.isInteger(raw.positions) && raw.positions >= 0 ? raw.positions : 0,
-    wallets: Number.isInteger(raw.wallets) && raw.wallets >= 0 ? raw.wallets : 0,
+    wallets,
+    showWalletLabels: typeof raw.showWalletLabels === 'boolean'
+      ? raw.showWalletLabels
+      : null,
     chains,
     includeClosed: !!raw.includeClosed,
     summaryOnly: !!raw.summaryOnly,
@@ -60,13 +64,16 @@ export async function writeDashboardSnapshot(snapshot) {
   const summary = String(snapshot.summaryHtml || '');
   const summaryOnly = full.length > MAX_SNAPSHOT_HTML;
   const value = clean({
-    at: Date.now(),
+    at: Number.isFinite(snapshot.at) && snapshot.at > 0 ? snapshot.at : Date.now(),
     html: summaryOnly ? summary : full,
     status: String(snapshot.status || ''),
     details: String(snapshot.details || '').slice(0, MAX_SNAPSHOT_DETAILS),
     issues: Number(snapshot.issues) || 0,
     positions: Number(snapshot.positions) || 0,
     wallets: Number(snapshot.wallets) || 0,
+    showWalletLabels: typeof snapshot.showWalletLabels === 'boolean'
+      ? snapshot.showWalletLabels
+      : undefined,
     chains: Array.isArray(snapshot.chains) ? snapshot.chains : null,
     includeClosed: !!snapshot.includeClosed,
     summaryOnly,

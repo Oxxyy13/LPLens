@@ -35,8 +35,9 @@ export function enabledPortfolioChains(chainKeys, disabled) {
 export function portfolioChainSummary(chainKeys, disabled) {
   const available = availableChainKeys(chainKeys);
   const enabled = enabledPortfolioChains(available, disabled);
-  if (enabled.length === available.length) return `All ${available.length}`;
-  return `${enabled.length} of ${available.length}`;
+  if (enabled.length === available.length) return 'All';
+  if (!enabled.length) return 'None';
+  return `${enabled.length} selected`;
 }
 
 export async function loadDisabledPortfolioChains(chainKeys) {

@@ -1,8 +1,7 @@
 import { loadSweep, valueUsd } from './lib/positions.js';
 import { CHAINS } from './lib/chains.js';
 import {
-  entitlement, historyRelayCredentials,
-  TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint,
+  entitlement, historyRelayCredentials, GATING_ENABLED, gateHeadline, gateHint,
 } from './lib/license.js';
 import {
   loadBook, upsertWallet, removeWallet, dedupeBook, MAX_SAVED_ADDRESSES,
@@ -29,6 +28,9 @@ import {
   portfolioChainSummary,
   saveDisabledPortfolioChains,
 } from './lib/scan-preferences.js';
+import {
+  portfolioJobIssue, portfolioScanSummary, restoredPortfolioSummary,
+} from './lib/portfolio-presentation.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
@@ -70,6 +72,7 @@ let latestSweepText = '';
 let latestSweepSummary = '';
 let latestSweepDetails = '';
 let latestSweepIssues = 0;
+let latestPortfolioShowsWallet = false;
 let latestAccessState = 'unknown';
 const ALL_CHAIN_KEYS = Object.freeze(Object.keys(CHAINS));
 let disabledPortfolioChainKeys = [];
@@ -158,8 +161,7 @@ if (reportIssueLink) {
 
 const hiddenReady = loadHiddenPositions().then((keys) => {
   hiddenPositionKeys = new Set(keys);
-  const count = $('hiddenCount');
-  if (count) count.textContent = String(hiddenPositionKeys.size);
+  updateHiddenCount();
   applyPositionFilter();
 });
 
@@ -174,6 +176,7 @@ function clearScanDetails() {
   scanDetailsEl.hidden = true;
   scanDetailsEl.open = false;
   scanDetailsBodyEl.textContent = '';
+  scanDetailsBodyEl.hidden = true;
 }
 
 function presentScanStatus(summary, detail = '', issues = 0) {
@@ -181,25 +184,12 @@ function presentScanStatus(summary, detail = '', issues = 0) {
   if (!SIDE_PANEL || !scanDetailsEl) return;
   const body = String(detail || '').trim();
   scanDetailsBodyEl.textContent = body;
+  scanDetailsBodyEl.hidden = !body;
   scanDetailsSummaryEl.textContent = issues
-    ? `Scan details (${issues} issue${issues === 1 ? '' : 's'})`
-    : 'Scan details';
-  scanDetailsEl.hidden = !body;
+    ? `Details (${issues} issue${issues === 1 ? '' : 's'})`
+    : 'Help & diagnostics';
+  scanDetailsEl.hidden = false;
   if (!body) scanDetailsEl.open = false;
-}
-
-function legacyScanPresentation(text) {
-  const full = String(text || '').trim();
-  const match = /^(\d+)\/(\d+)(?: · (\d+) in flight)?(?: · (\d+) shown)?/.exec(full);
-  if (!match) return { summary: full, details: '', issues: 0 };
-  const failures = (full.match(/ failed:/g) || []).length;
-  const incomplete = (full.match(/\([^)]*(?:unreadable|beyond scan limit)[^)]*\)/g) || []).length;
-  const issues = failures + incomplete;
-  const parts = [`${match[1]}/${match[2]} scans`];
-  if (match[3]) parts.push(`${match[3]} reading`);
-  if (match[4]) parts.push(`${match[4]} positions`);
-  if (issues) parts.push(`${issues} issue${issues === 1 ? '' : 's'}`);
-  return { summary: parts.join(' · '), details: full, issues };
 }
 
 function filterTokens(p) {
@@ -372,8 +362,8 @@ function paintNetworkSelectionNotice() {
     return;
   }
   const lead = selected.length
-    ? 'Network selection changed. Refresh to apply.'
-    : 'Choose at least one network. Current view is unchanged.';
+    ? 'Chains changed. Refresh to update.'
+    : 'Choose at least one chain.';
   setSnapshotStatus(`${lead} ${dashboardStatusBase}`);
 }
 
@@ -488,9 +478,6 @@ function paintAddButton() {
 }
 
 function paintBook() {
-  const n = book.length;
-  const count = $('savedCount');
-  if (count) count.textContent = String(n);
   const list = $('savedList');
   const unlocked = formUnlocked();
   list.replaceChildren();
@@ -652,34 +639,59 @@ function showGate(ent) {
   applyPositionFilter('all');
 }
 
+function cleanRestoredDashboard(showWalletLabels) {
+  const heading = resultsEl.querySelector('.totals-heading');
+  if (heading) heading.textContent = 'Portfolio totals';
+  for (const coverage of resultsEl.querySelectorAll('.tot-line.complete .tot-coverage')) {
+    coverage.remove();
+  }
+  for (const coverage of resultsEl.querySelectorAll('.tot-line.partial .tot-coverage')) {
+    coverage.textContent = 'Partial total';
+  }
+  for (const coverage of resultsEl.querySelectorAll('.tot-line.unavailable .tot-coverage')) {
+    coverage.textContent = 'Not enough data';
+  }
+  for (const notes of resultsEl.querySelectorAll('.totals-notes')) notes.remove();
+  for (const meta of resultsEl.querySelectorAll('.position-card .meta')) meta.remove();
+
+  if (showWalletLabels === false) {
+    for (const label of resultsEl.querySelectorAll('.position-card .wallet-lbl')) label.remove();
+  }
+}
+
 async function restoreDashboard() {
   if (!SIDE_PANEL) return;
   await scanPreferencesReady;
   const snapshot = await readDashboardSnapshot();
   if (!snapshot) {
-    dashboardStatusBase = 'No saved portfolio view yet. Refresh one wallet or every saved wallet.';
+    dashboardStatusBase = 'No saved portfolio yet. Refresh a wallet to begin.';
     renderedChainKeys = null;
     setSnapshotStatus(dashboardStatusBase);
     return;
   }
   resultsEl.innerHTML = snapshot.html;
+  cleanRestoredDashboard(snapshot.showWalletLabels);
   reconcileHiddenCards();
   statusEl.className = 'status';
-  const presentation = snapshot.details
-    ? { summary: snapshot.status, details: snapshot.details, issues: snapshot.issues }
-    : legacyScanPresentation(snapshot.status);
+  const issueCount = Math.max(0, Number(snapshot.issues) || 0);
+  const presentation = {
+    summary: restoredPortfolioSummary({
+      issueCount,
+      visiblePositionCount: snapshot.positions,
+      hasPositionCards: !!resultsEl.querySelector('.position-card'),
+      summaryOnly: snapshot.summaryOnly,
+    }),
+    details: issueCount
+      ? 'Some data was unavailable in this saved refresh. Refresh for current details.'
+      : '',
+    issues: issueCount,
+  };
   presentScanStatus(presentation.summary, presentation.details, presentation.issues);
   $('includeClosed').checked = snapshot.includeClosed;
   paintScanHint();
   renderedChainKeys = Array.isArray(snapshot.chains) ? snapshot.chains : [...ALL_CHAIN_KEYS];
-  const scope = `${snapshot.wallets} wallet${snapshot.wallets === 1 ? '' : 's'} · `
-    + `${renderedChainKeys.length} network${renderedChainKeys.length === 1 ? '' : 's'} · `
-    + `${snapshot.positions} position${snapshot.positions === 1 ? '' : 's'}`;
-  const limited = snapshot.summaryOnly ? ' · summary only, refresh to load position cards' : '';
-  const cards = [...resultsEl.querySelectorAll('.position-card')];
-  const legacy = cards.length > 0 && !cards.some((cardEl) => cardEl.dataset.positionKey);
-  const controls = legacy ? ' · refresh to enable card controls' : '';
-  dashboardStatusBase = `Saved view · ${scope} · refreshed ${snapshotAge(snapshot.at)}${limited}${controls}`;
+  const limited = snapshot.summaryOnly ? ' Refresh to load position cards.' : '';
+  dashboardStatusBase = `Last refreshed ${snapshotAge(snapshot.at)}.${limited}`;
   setSnapshotStatus(dashboardStatusBase);
   paintNetworkSelectionNotice();
   applyPositionFilter('all');
@@ -727,6 +739,9 @@ async function startScan(owners, includeClosed, { selectOverlayWallet = false } 
   // from launching overlapping sweeps that race to repaint and save one view.
   scanBusy = true;
   const scanStartedAt = Date.now();
+  const previousRefreshStatus = /^Last refreshed /.test(dashboardStatusBase)
+    ? dashboardStatusBase
+    : '';
   paintBook();
   try {
     await scanPreferencesReady;
@@ -740,14 +755,11 @@ async function startScan(owners, includeClosed, { selectOverlayWallet = false } 
     // A one-wallet load is also an explicit overlay-wallet choice. A multi-wallet
     // refresh must never change that choice as a side effect.
     statusEl.className = 'status';
-    const nJobs = owners.length * chainKeys.length;
-    statusEl.textContent =
-      `Scanning ${owners.length} wallet${owners.length === 1 ? '' : 's'} on `
-      + `${chainKeys.length} network${chainKeys.length === 1 ? '' : 's'} · ${nJobs} scans, 2 at a time…`;
+    statusEl.textContent = 'Refreshing positions…';
     clearScanDetails();
     resultsEl.innerHTML = '';
     renderedChainKeys = null;
-    dashboardStatusBase = SIDE_PANEL ? 'Refreshing on-chain data…' : '';
+    dashboardStatusBase = '';
     setSnapshotStatus(dashboardStatusBase);
     applyPositionFilter(activePositionFilter);
     if (selectOverlayWallet) await setActiveAddress(owners[0].address);
@@ -762,7 +774,7 @@ async function startScan(owners, includeClosed, { selectOverlayWallet = false } 
       return;
     }
     if (GATING_ENABLED && ent.state === 'trial') {
-      statusEl.textContent = `Trial: ${ent.daysLeft} day${ent.daysLeft === 1 ? '' : 's'} left of ${TRIAL_LENGTH_DAYS} · reading network…`;
+      statusEl.textContent = 'Refreshing positions…';
     }
     await hiddenReady;
     const settings = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
@@ -773,6 +785,7 @@ async function startScan(owners, includeClosed, { selectOverlayWallet = false } 
       etherscanKey: settings.etherscanKey || null,
       historyRelay,
       withUsd: true,
+      showWalletAttribution: !selectOverlayWallet,
     });
     const saved = !final.allFailed && await writeDashboardSnapshot({
       html: resultsEl.innerHTML,
@@ -782,29 +795,29 @@ async function startScan(owners, includeClosed, { selectOverlayWallet = false } 
       issues: final.issueCount,
       positions: final.positions.length,
       wallets: owners.length,
+      showWalletLabels: latestPortfolioShowsWallet,
       chains: chainKeys,
       includeClosed,
     });
     await recordScanDiagnostic(scanStartedAt, final, includeClosed);
     if (SIDE_PANEL) {
-      const scope = `${owners.length} wallet${owners.length === 1 ? '' : 's'} · `
-        + `${chainKeys.length} network${chainKeys.length === 1 ? '' : 's'}`;
       renderedChainKeys = final.allFailed ? null : chainKeys;
       dashboardStatusBase = final.allFailed
-        ? 'Refresh failed on every selected network · saved view was not replaced'
+        ? (previousRefreshStatus ? `Refresh failed. ${previousRefreshStatus}` : 'Refresh failed.')
         : saved
-        ? `Current view · ${scope} · refreshed just now`
-        : `Current view · ${scope} · local snapshot could not be saved`;
+        ? 'Last refreshed just now.'
+        : 'Last refreshed just now. Could not save this view locally.';
       setSnapshotStatus(dashboardStatusBase);
       paintNetworkSelectionNotice();
     }
-  } catch (err) {
+  } catch {
     statusEl.className = 'status error';
-    statusEl.textContent = 'Failed: ' + (err.message || err);
-    clearScanDetails();
+    presentScanStatus('Could not refresh positions.');
     if (SIDE_PANEL) {
       renderedChainKeys = null;
-      dashboardStatusBase = 'Refresh failed · saved view was not replaced';
+      dashboardStatusBase = previousRefreshStatus
+        ? `Refresh failed. ${previousRefreshStatus}`
+        : 'Refresh failed.';
       setSnapshotStatus(dashboardStatusBase);
     }
   } finally {
@@ -848,52 +861,17 @@ function jobKey(ev) {
   return `${ev.owner || ''}@${ev.chainKey}`;
 }
 
-function jobLabel(ev) {
+function jobLabel(ev, showWallet = true) {
+  if (!showWallet) return chainLabel(ev.chainKey);
   const w = (ev.label || '').trim() || shortAddr(ev.owner);
   return `${w} · ${chainLabel(ev.chainKey)}`;
 }
 
-/**
- * "Base: nothing" vs "Base failed: …" must stay distinguishable — and so must
- * "Base: 60" vs "Base: 60, and 91 more we did not scan plus 230 v4 we could
- * not read at all".
- *
- * `lib/positions.js` computes exactly which holdings it failed to render
- * (`result.truncated`, `result.v4.unavailable`, `v4.held` vs `v4.shown`) and
- * this function used to discard all of it, reporting only the rendered count.
- * A bare count reads as "this is all of it", which on a real wallet was wildly
- * false: measured 2026-08-20 against Dan's address, Base held 151 v3 positions
- * (60 scanned) and 230 v4 positions that Blockscout rate-limited away, and the
- * popup said "Base: 60" with no qualifier. Silently showing part of someone's
- * portfolio as though it were the whole thing is the one failure this project
- * does not accept.
- */
-function jobOutcome(job, s) {
-  const name = jobLabel(job);
-  if (!s || s.phase === 'start') return `${name} reading`;
-  if (s.ok === false) return `${name} failed: ${s.error || 'unknown error'}`;
-  const r = s.result || {};
-  const n = r.positions ? r.positions.length : 0;
-
-  const gaps = [];
-  if (r.count > (r.attempted ?? r.scanned)) {
-    gaps.push(`${r.count - (r.attempted ?? r.scanned)} v3 beyond scan limit`);
-  }
-  if (r.enumUnreadable) gaps.push(`${r.enumUnreadable} v3 ownership unreadable`);
-  if (r.positionUnreadable) gaps.push(`${r.positionUnreadable} v3 unreadable`);
-  if (r.closedHidden) gaps.push(`${r.closedHidden} closed v3 hidden`);
-  const v4 = r.v4;
-  if (v4) {
-    // held unknown in the enumeration-failed case, so do not imply a number.
-    if (v4.unavailable) gaps.push(v4.held ? `${v4.held} v4 unreadable` : 'v4 unreadable');
-    else {
-      if (v4.unreadable) gaps.push(`${v4.unreadable} v4 unreadable`);
-      if (v4.closedHidden) gaps.push(`${v4.closedHidden} closed v4 hidden`);
-    }
-  }
-
-  const base = n ? `${name}: ${n}` : `${name}: nothing`;
-  return gaps.length ? `${base} (${gaps.join(', ')})` : base;
+// Routine successes stay out of the UI. Actual gaps remain visible with a
+// friendly reason, while raw provider errors stay inside privacy-safe diagnostics.
+function jobIssueOutcome(job, state, showWallet) {
+  const issue = portfolioJobIssue(state);
+  return issue ? `${jobLabel(job, showWallet)}: ${issue}` : '';
 }
 
 function jobHasIssue(s) {
@@ -909,40 +887,30 @@ function jobHasIssue(s) {
 function totalMetric(label, bucket) {
   const display = bucket.display;
   const tone = ({ up: 'positive', down: 'negative', muted: 'muted' })[display.tone] || 'muted';
-  const coverage = display.state === 'partial'
-    ? `Partial · ${display.coverage}`
-    : display.coverage;
-  const aria = `${label}: ${display.value}. ${coverage}.`;
+  const subtext = display.state === 'partial'
+    ? 'Partial total'
+    : display.state === 'unavailable' ? 'Not enough data' : '';
+  const reason = aggregateReasonText(bucket);
+  const aria = `${label}: ${display.value}. ${display.coverage}.${reason ? ` ${reason}.` : ''}`;
+  const title = subtext
+    ? ` title="${esc(`${display.coverage}.${reason ? ` ${reason}.` : ''}`)}"`
+    : '';
   return `<div class="tot-line ${esc(display.state)}" role="group" data-total-metric="${esc(label)}"
-      aria-label="${esc(aria)}">
+      aria-label="${esc(aria)}"${title}>
     <span class="k">${esc(label)}</span>
     <span class="tot-value ${tone}">${esc(display.value)}</span>
-    <span class="tot-coverage">${esc(coverage)}</span>
+    ${subtext ? `<span class="tot-coverage">${esc(subtext)}</span>` : ''}
   </div>`;
-}
-
-function totalMetricNote(label, bucket) {
-  if (bucket.display.state === 'complete') return '';
-  const reason = aggregateReasonText(bucket);
-  if (!reason) return '';
-  const state = bucket.display.state === 'partial' ? 'partial' : 'unavailable';
-  return `<div><strong>${esc(label)} ${state}:</strong> ${esc(reason)}.</div>`;
 }
 
 function totalsCard(positions) {
   const a = summarizeAggregate(positions);
   if (!a.n) return '';
-  const notes = [
-    totalMetricNote('Vs holding', a.vsHold),
-    totalMetricNote('LP return', a.totalReturn),
-    totalMetricNote('Position value', a.value),
-  ].filter(Boolean).join('');
   return `<section class="card totals" aria-labelledby="portfolioTotalsHeading">
-    <div class="totals-heading" id="portfolioTotalsHeading"><span>Portfolio totals</span><span>all unhidden positions</span></div>
+    <div class="totals-heading" id="portfolioTotalsHeading">Portfolio totals</div>
     ${totalMetric('vs holding', a.vsHold)}
     ${totalMetric('LP return', a.totalReturn)}
     ${totalMetric('in positions', a.value)}
-    ${notes ? `<div class="totals-notes">${notes}</div>` : ''}
   </section>`;
 }
 
@@ -951,7 +919,12 @@ function updateHiddenCount() {
   if (!count) return;
   const allCards = [...resultsEl.querySelectorAll('.position-card')];
   const hiddenCards = allCards.filter((cardEl) => cardEl.dataset.hiddenPosition === 'true');
-  count.textContent = String(allCards.length ? hiddenCards.length : hiddenPositionKeys.size);
+  const hiddenCount = hiddenCards.length;
+  count.textContent = String(hiddenCount);
+  const showHidden = $('showHidden');
+  if (!hiddenCount && showHidden) showHidden.checked = false;
+  const option = $('showHiddenOption');
+  if (option) option.hidden = hiddenCount === 0;
 }
 
 function paintPortfolio(positions) {
@@ -965,21 +938,13 @@ function paintPortfolio(positions) {
   resultsEl.innerHTML = totalsCard(visible)
     + latestPositions.map((position) => {
       const key = positionHideKey(position);
-      return card(position, {}, !!(key && hiddenPositionKeys.has(key)));
+      return card(
+        position, {}, !!(key && hiddenPositionKeys.has(key)), latestPortfolioShowsWallet,
+      );
     }).join('');
   updateHiddenCount();
   applyPositionFilter();
   return { visible, hidden };
-}
-
-function hiddenStatus(text, total, visible, hidden) {
-  let next = String(text || '');
-  if (total) {
-    next = next.replace(`${total} shown`, `${visible} shown`);
-    next = next.replace(`${total} positions`, `${visible} positions`);
-  }
-  if (hidden) next += ` · ${hidden} hidden locally`;
-  return next;
 }
 
 function reconcileHiddenCards() {
@@ -1000,50 +965,45 @@ function reconcileHiddenCards() {
   applyPositionFilter();
 }
 
-function sweepStatus(states, jobs) {
-  const bits = [];
-  const failed = [];
+function sweepStatus(states, jobs, showWallet) {
+  const issueLines = [];
   const positions = [];
   let done = 0;
-  let inflight = 0;
+  let failed = 0;
   let issueCount = 0;
   for (const job of jobs) {
     const s = states[jobKey(job)];
-    bits.push(jobOutcome(job, s));
-    if (jobHasIssue(s)) issueCount++;
-    if (!s || s.phase === 'start') inflight++;
-    else if (s.ok === false) {
+    if (jobHasIssue(s)) {
+      issueCount++;
+      issueLines.push(jobIssueOutcome(job, s, showWallet));
+    }
+    if (!s || s.phase === 'start') continue;
+    if (s.ok === false) {
       done++;
-      failed.push(`${jobLabel(job)} failed: ${s.error || 'unknown error'}`);
+      failed++;
     } else {
       done++;
       if (s.result && s.result.positions) positions.push(...s.result.positions);
     }
   }
-  const head = [`${done}/${jobs.length} network scans`];
-  if (inflight) head.push(`${inflight} in flight`);
-  if (positions.length) head.push(`${positions.length} shown`);
-  else if (done === jobs.length) head.push('0 positions shown');
-  const line = [...head, ...bits].join(' · ');
   const complete = done === jobs.length;
-  const summary = complete ? [] : [`${done}/${jobs.length} network scans`];
-  if (inflight) summary.push(`${inflight} reading`);
-  if (positions.length) summary.push(`${positions.length} position${positions.length === 1 ? '' : 's'}`);
-  else if (complete) summary.push('0 positions shown');
-  if (issueCount) summary.push(`${issueCount} issue${issueCount === 1 ? '' : 's'}`);
-  const allFailed = done === jobs.length && failed.length === jobs.length;
+  const allFailed = complete && failed === jobs.length;
+  const summary = portfolioScanSummary({
+    complete, allFailed, issueCount, positionCount: positions.length,
+  });
   return {
-    text: line,
-    summary: summary.join(' · '),
-    details: bits.join('\n'),
+    text: summary,
+    summary,
+    details: issueLines.filter(Boolean).join('\n'),
     issueCount,
-    failed: failed.length > 0,
+    failed: failed > 0,
     allFailed,
     positions,
   };
 }
 
 async function runSweep(owners, chainKeys, opts) {
+  const { showWalletAttribution, ...loadOptions } = opts;
   const jobs = [];
   const seen = new Set();
   for (const o of owners) {
@@ -1051,41 +1011,34 @@ async function runSweep(owners, chainKeys, opts) {
     seen.add(o.address);
     for (const chainKey of chainKeys) jobs.push({ owner: o.address, label: o.label, chainKey });
   }
+  latestPortfolioShowsWallet = typeof showWalletAttribution === 'boolean'
+    ? showWalletAttribution
+    : new Set(jobs.map((job) => job.owner).filter(Boolean)).size > 1;
   const states = {};
-  const selectedSet = new Set(chainKeys);
-  const skipped = ALL_CHAIN_KEYS.filter((key) => !selectedSet.has(key));
-  const skippedLine = skipped.length
-    ? `Skipped locally: ${skipped.map(chainLabel).join(', ')}`
-    : '';
   const paint = () => {
-    const snap = sweepStatus(states, jobs);
-    const detailText = [snap.details, skippedLine].filter(Boolean).join('\n');
+    const snap = sweepStatus(states, jobs, latestPortfolioShowsWallet);
     const shown = paintPortfolio(snap.positions);
-    const text = hiddenStatus(
-      snap.text, snap.positions.length, shown.visible.length, shown.hidden.length,
-    );
-    const summary = hiddenStatus(
-      snap.summary, snap.positions.length, shown.visible.length, shown.hidden.length,
-    );
+    const text = snap.text;
+    const summary = snap.summary;
     latestSweepText = snap.text;
     latestSweepSummary = snap.summary;
-    latestSweepDetails = detailText;
+    latestSweepDetails = snap.details;
     latestSweepIssues = snap.issueCount;
     statusEl.className = snap.allFailed ? 'status error' : 'status';
-    if (SIDE_PANEL) presentScanStatus(summary, detailText, snap.issueCount);
+    if (SIDE_PANEL) presentScanStatus(summary, snap.details, snap.issueCount);
     else statusEl.textContent = text;
     return {
       ...snap,
       text,
       summary,
-      details: detailText,
+      details: snap.details,
       positions: shown.visible,
       allPositions: snap.positions,
       hiddenPositions: shown.hidden,
     };
   };
   await loadSweep(owners, chainKeys, {
-    ...opts,
+    ...loadOptions,
     onProgress: async (ev) => {
       if (ev.phase === 'start') {
         states[jobKey(ev)] = { phase: 'start' };
@@ -1107,7 +1060,7 @@ async function runSweep(owners, chainKeys, opts) {
  * which the overlay does not fetch. Unpriced legs render "unpriced" rather than
  * $0 — a missing mark must never look like a zero balance.
  */
-function card(p, prices, locallyHidden = false) {
+function card(p, prices, locallyHidden = false, showWallet = true) {
   const table = (p.chainKey && prices[p.chainKey] && typeof prices[p.chainKey] === 'object')
     ? prices[p.chainKey] : prices;
   const s0 = p.token0Meta.symbol, s1 = p.token1Meta.symbol;
@@ -1157,7 +1110,7 @@ function card(p, prices, locallyHidden = false) {
       <div class="card-top">
         <span class="pair">${esc(s0)} / ${esc(s1)}</span>
         <span class="fee">${(p.fee / 10000).toFixed(2)}%</span>
-        <span class="wallet-lbl">${esc(walletName(p))}</span>
+        ${showWallet ? `<span class="wallet-lbl">${esc(walletName(p))}</span>` : ''}
         <span class="chain-lbl">${esc(chainLabel(p.chainKey))}</span>
         <span class="pill ${statusClass}">${statusText}</span>
       </div>
@@ -1187,7 +1140,6 @@ function card(p, prices, locallyHidden = false) {
         <div class="kv"><span>current price</span><span class="num">${currentPrice}</span></div>
         <div class="kv"><span>range</span><span class="num">${rangePrice}</span></div>
         <div class="kv"><span>holds</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>
-        <div class="meta">#${p.tokenId}${p.protocol || p.version ? ' · ' : ''}${p.protocol ? esc(p.protocol) + ' ' : ''}${p.version ? esc(p.version) : ''}</div>
         ${details(p, h, s0, s1, flippable)}
       </div>
     </div>`;
@@ -1214,16 +1166,13 @@ document.addEventListener('click', async (e) => {
 
       if (latestPositions.length) {
         const shown = paintPortfolio(latestPositions);
-        const text = hiddenStatus(
-          latestSweepText, latestPositions.length, shown.visible.length, shown.hidden.length,
-        );
-        const summary = hiddenStatus(
-          latestSweepSummary, latestPositions.length, shown.visible.length, shown.hidden.length,
-        );
+        const text = latestSweepText;
+        const summary = latestSweepSummary;
         if (SIDE_PANEL) presentScanStatus(summary, latestSweepDetails, latestSweepIssues);
         else statusEl.textContent = text;
         const previous = await readDashboardSnapshot();
         await writeDashboardSnapshot({
+          at: previous && previous.at,
           html: resultsEl.innerHTML,
           summaryHtml: totalsCard(shown.visible),
           status: summary,
@@ -1231,6 +1180,7 @@ document.addEventListener('click', async (e) => {
           issues: latestSweepIssues,
           positions: shown.visible.length,
           wallets: previous && previous.wallets || 1,
+          showWalletLabels: latestPortfolioShowsWallet,
           chains: renderedChainKeys || (previous && previous.chains) || selectedPortfolioChainKeys(),
           includeClosed: $('includeClosed').checked,
         });
@@ -1244,22 +1194,29 @@ document.addEventListener('click', async (e) => {
         applyPositionFilter();
         const visibleCount = resultsEl.querySelectorAll('.position-card[data-hidden-position="false"]').length;
         const previous = await readDashboardSnapshot();
-        statusEl.textContent = 'Hidden preference saved locally. Refresh to recalculate portfolio totals.';
-        clearScanDetails();
-        dashboardStatusBase = statusEl.textContent;
+        const previousIssues = previous && previous.issues || 0;
+        const previousDetails = previousIssues
+          ? 'Some data was unavailable in this saved refresh. Refresh for current details.'
+          : '';
+        presentScanStatus('Hidden preference saved locally.', previousDetails, previousIssues);
+        dashboardStatusBase = previous
+          ? `Last refreshed ${snapshotAge(previous.at)}.`
+          : 'Refresh to recalculate portfolio totals.';
         renderedChainKeys = renderedChainKeys
           || (previous && previous.chains)
           || selectedPortfolioChainKeys();
         setSnapshotStatus(dashboardStatusBase);
         paintNetworkSelectionNotice();
         await writeDashboardSnapshot({
+          at: previous && previous.at,
           html: resultsEl.innerHTML,
           summaryHtml: '',
           status: statusEl.textContent,
-          details: '',
-          issues: 0,
+          details: previousDetails,
+          issues: previousIssues,
           positions: visibleCount,
           wallets: previous && previous.wallets || 1,
+          showWalletLabels: previous && previous.showWalletLabels,
           chains: renderedChainKeys || (previous && previous.chains) || selectedPortfolioChainKeys(),
           includeClosed: $('includeClosed').checked,
         });
