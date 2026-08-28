@@ -77,6 +77,13 @@ const BLOCKSCOUT_MAX_PAGES = 50;
 // block. A deep pool resolves on the first; a quiet one widens.
 const EXPLORER_SPANS = Object.freeze([500, 5000, 50000]);
 const EXPLORER_MAX_PAGES = 8;
+// rpcCall already retries provider-declared capacity failures. This outer,
+// bounded retry also covers malformed replies and errors a provider labels as
+// permanent even though a second identical read can succeed. More importantly,
+// the caller never moves to an older interval until this one has returned a
+// well-formed empty result.
+const RPC_LAST_LOG_ATTEMPTS = 3;
+const RPC_LAST_LOG_RETRY_MS = 100;
 
 /** Normalised log: what history.js consumes, regardless of source. */
 const normalise = (log) => ({
@@ -678,6 +685,21 @@ async function lastExplorerLog(target, floor, rowsAt) {
   return null;
 }
 
+/** Read one RPC log interval completely, or admit that the interval is unknown. */
+async function rpcLogsInChunk(rpc, filter) {
+  for (let attempt = 0; attempt < RPC_LAST_LOG_ATTEMPTS; attempt++) {
+    try {
+      const logs = await rpcCall(rpc, 'eth_getLogs', [filter]);
+      if (!Array.isArray(logs)) throw new Error('malformed eth_getLogs result');
+      return logs;
+    } catch {
+      if (attempt + 1 >= RPC_LAST_LOG_ATTEMPTS) return null;
+      await sleep(RPC_LAST_LOG_RETRY_MS * (2 ** attempt));
+    }
+  }
+  return null;
+}
+
 export async function fetchLastLogBefore({
   contract, topics, block, rpc, etherscanKey, etherscanChainId,
   blockscout,
@@ -726,15 +748,20 @@ export async function fetchLastLogBefore({
     const to = target - i * chunk;
     if (to < floor) break;
     const from = Math.max(floor, to - chunk + 1);
-    try {
-      const logs = await rpcCall(rpc, 'eth_getLogs', [{
-        address: contract,
-        fromBlock: '0x' + BigInt(from).toString(16),
-        toBlock: '0x' + BigInt(to).toString(16),
-        topics,
-      }]);
-      if (Array.isArray(logs) && logs.length) return normalise(logs[logs.length - 1]);
-    } catch { /* a refused or timed-out chunk is not proof of no swap */ }
+    const logs = await rpcLogsInChunk(rpc, {
+      address: contract,
+      fromBlock: '0x' + BigInt(from).toString(16),
+      toBlock: '0x' + BigInt(to).toString(16),
+      topics,
+    });
+    // An unreadable newer interval is not proof that it contains no Swap.
+    // Returning a hit from an older interval would silently stamp a stale price
+    // as exact, so this source must fail closed rather than skip the gap.
+    if (logs === null) return null;
+    if (logs.length) {
+      try { return normalise(logs[logs.length - 1]); }
+      catch { return null; }
+    }
     if (from <= floor) break;
   }
   return null;

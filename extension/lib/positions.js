@@ -82,24 +82,34 @@ const isAlchemyRpc = (rpc) => {
   catch { return false; }
 };
 
-/** Batch high-volume Alchemy eth_calls; public RPCs retain bounded singles. */
-async function readMany(rpc, calls) {
-  if (!isAlchemyRpc(rpc)) {
-    return mapLimit(calls, 4, (call) => retryRead(() => ethCall(
-      rpc, call.to, call.data, call.from, call.block || 'latest')));
-  }
+const readSingles = (rpc, calls) => mapLimit(calls, 4, (call) => retryRead(() => ethCall(
+  rpc, call.to, call.data, call.from, call.block || 'latest')));
+
+/**
+ * Batch high-volume Alchemy calls and chains whose provider explicitly opts
+ * in. A provider that refuses a whole batch falls back to the established
+ * bounded-single path; per-item failures retry without repeating good reads.
+ */
+async function readMany(rpc, calls, configuredBatchSize = 0) {
+  const requestedSize = Number(configuredBatchSize);
+  const batchSize = isAlchemyRpc(rpc)
+    ? 25
+    : (Number.isInteger(requestedSize) && requestedSize > 1 ? requestedSize : 0);
+  if (!batchSize) return readSingles(rpc, calls);
 
   const out = new Array(calls.length);
-  for (let offset = 0; offset < calls.length; offset += 25) {
-    const chunk = calls.slice(offset, offset + 25);
+  for (let offset = 0; offset < calls.length; offset += batchSize) {
+    const chunk = calls.slice(offset, offset + batchSize);
     let pending = chunk.map((call, index) => ({ call, index }));
     for (let attempt = 0; attempt < 4 && pending.length; attempt++) {
       let rows;
       try { rows = await ethCallBatch(rpc, pending.map((item) => item.call)); }
       catch {
-        if (attempt < 3) await wait(2000 * (attempt + 1));
-        continue;
+        break;
       }
+      // Some RPCs answer HTTP 200 but reject every JSON-RPC item. Treat that
+      // as a refused batch rather than spending every retry on the same shape.
+      if (rows.length && rows.every((row) => row && row.__error)) break;
       const retry = [];
       for (let i = 0; i < pending.length; i++) {
         if (!rows[i] || rows[i].__error) retry.push(pending[i]);
@@ -108,8 +118,14 @@ async function readMany(rpc, calls) {
       pending = retry;
       if (pending.length && attempt < 3) await wait(2000 * (attempt + 1));
     }
-    for (const item of pending) {
-      out[offset + item.index] = { __error: 'eth_call unreadable after retries' };
+    // Confirm any batch item that is still unknown through the established
+    // bounded scalar path. This covers whole-batch rejection, missing rows,
+    // and a partial item that exhausted its batch retries.
+    if (pending.length) {
+      const rows = await readSingles(rpc, pending.map((item) => item.call));
+      for (let i = 0; i < pending.length; i++) {
+        out[offset + pending[i].index] = rows[i];
+      }
     }
     if (offset + chunk.length < calls.length) await wait(250);
   }
@@ -323,7 +339,7 @@ export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = f
   const indexes = Array.from({ length: attempted }, (_, i) => count - 1 - i);
   const idHexes = await readMany(rpc, indexes.map((index) => ({
     to: chain.nfpm, data: dataTokenOfOwnerByIndex(owner, index),
-  })));
+  })), chain.rpcBatchSize);
 
   const tokenIds = [];
   let enumUnreadable = 0;
@@ -339,7 +355,7 @@ export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = f
   let closedHidden = 0;
   const posHexes = await readMany(rpc, tokenIds.map((tokenId) => ({
     to: chain.nfpm, data: dataPositions(tokenId),
-  })));
+  })), chain.rpcBatchSize);
   for (let i = 0; i < tokenIds.length; i++) {
     const hex = posHexes[i];
     if (!hex || hex.__error) { positionUnreadable++; continue; }
@@ -507,7 +523,7 @@ async function scanV4(chainKey, owner, opts = {}) {
 
   const liquidityHexes = await readMany(rpc, found.tokenIds.map((tokenId) => ({
     to: chain.v4PositionManager, data: V4.positionLiquidity + encUint(tokenId),
-  })));
+  })), chain.rpcBatchSize);
   const checked = found.tokenIds.map((tokenId, index) => {
     const hex = liquidityHexes[index];
     if (!hex || hex.__error) return { __error: hex && hex.__error || 'liquidity unreadable' };

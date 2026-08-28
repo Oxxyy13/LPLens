@@ -25,6 +25,11 @@ function clean(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (!Number.isFinite(raw.at) || raw.at <= 0) return null;
   if (typeof raw.html !== 'string' || typeof raw.status !== 'string') return null;
+  const chains = Array.isArray(raw.chains)
+    ? [...new Set(raw.chains.filter((key) => (
+        typeof key === 'string' && /^[a-z0-9-]{1,32}$/.test(key)
+      )))].slice(0, 32)
+    : null;
   return {
     at: raw.at,
     html: raw.html,
@@ -33,6 +38,7 @@ function clean(raw) {
     issues: Number.isInteger(raw.issues) && raw.issues >= 0 ? raw.issues : 0,
     positions: Number.isInteger(raw.positions) && raw.positions >= 0 ? raw.positions : 0,
     wallets: Number.isInteger(raw.wallets) && raw.wallets >= 0 ? raw.wallets : 0,
+    chains,
     includeClosed: !!raw.includeClosed,
     summaryOnly: !!raw.summaryOnly,
   };
@@ -61,6 +67,7 @@ export async function writeDashboardSnapshot(snapshot) {
     issues: Number(snapshot.issues) || 0,
     positions: Number(snapshot.positions) || 0,
     wallets: Number(snapshot.wallets) || 0,
+    chains: Array.isArray(snapshot.chains) ? snapshot.chains : null,
     includeClosed: !!snapshot.includeClosed,
     summaryOnly,
   });

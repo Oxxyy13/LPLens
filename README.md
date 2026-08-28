@@ -59,7 +59,18 @@ shows both dollars and percentage when available. Unwanted or unsolicited LP
 NFTs can be hidden locally from the side panel; hidden cards are excluded from
 portfolio counts and totals and can be restored at any time. Multi-wallet scan
 progress stays compact, while per-wallet and per-chain outcomes remain available
-under an expandable `Scan details` control. Version 0.30 also adds a sanitized
+under an expandable `Scan details` control. Portfolio scans still default to all
+supported networks, but the popup and side panel now expose a profile-local
+network selector. Turning off a network affects portfolio sweeps only, and the
+saved panel view records its exact network scope so a changed selection is never
+mistaken for an already-refreshed result. Robinhood's public RPC reads are
+batched in groups of 25 with item retries and a single-call fallback.
+
+Portfolio totals now distinguish complete, partial, and unavailable metrics.
+Positive and negative return values are colored consistently, while coverage
+and the exact unavailable reason remain visible in text. A missing historical
+price can therefore never look like a real zero or suppress otherwise valid
+current-value and vs-holding totals. Version 0.30 also adds a sanitized
 Copy diagnostics control, optional anonymous aggregate scan outcomes, and a
 separately optional Dexscreener pair-page overlay. Diagnostics and aggregate
 events contain no wallet, token, pool, position, access-code, installation, or
@@ -526,6 +537,7 @@ extension/
   lib/logs.js        log retrieval; Etherscan V2, Blockscout, or eth_getLogs
   lib/cache.js       bounded persistent caches
   lib/dashboard-snapshot.js  bounded last-rendered side-panel view
+  lib/scan-preferences.js  local portfolio network selection
   lib/diagnostics.js  sanitized local support report and error categories
   lib/telemetry.js    optional anonymous aggregate scan outcomes
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync

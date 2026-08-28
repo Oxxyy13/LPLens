@@ -30,9 +30,22 @@
         <div id="savedList" class="saved-list"></div>
       </details>
 
+      <details class="scan-networks" id="scanNetworks">
+        <summary><span>Networks to scan</span><span id="scanNetworkSummary">All 6</span></summary>
+        <fieldset>
+          <legend class="sr-only">Networks included in portfolio scans</legend>
+          <label class="network-option network-option-all">
+            <input type="checkbox" id="scanNetworkAll" checked>
+            <span>All networks</span>
+          </label>
+          <div id="scanNetworkList" class="network-list"></div>
+          <p>Does not affect page overlays</p>
+        </fieldset>
+      </details>
+
       <div class="row scan-row">
-        <button id="go" class="primary-button" type="submit" disabled>Refresh wallet</button>
-        <button type="button" id="scanAll" class="secondary-button" disabled title="Refresh every saved wallet">Refresh all</button>
+        <button id="go" class="primary-button" type="submit" aria-describedby="scanHint" disabled>Refresh wallet</button>
+        <button type="button" id="scanAll" class="secondary-button" aria-describedby="scanHint" disabled title="Refresh every saved wallet">Refresh all</button>
       </div>
       <label class="check">
         <input type="checkbox" id="includeClosed"> <span>Include closed positions</span>
@@ -40,7 +53,7 @@
       <label class="check">
         <input type="checkbox" id="showHidden"> <span>Show hidden positions (<span id="hiddenCount">0</span>)</span>
       </label>
-      <p id="scanHint" class="notice" hidden></p>
+      <p id="scanHint" class="notice" role="status" aria-live="polite" hidden></p>
     </form>
 
     <div id="status" class="status">Checking access…</div>
