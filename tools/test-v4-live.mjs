@@ -5,6 +5,20 @@ import { loadPositionByVersion } from '../extension/lib/positions.js';
 import { CHAINS } from '../extension/lib/chains.js';
 import { fetchV4Trace, inferSimpleV4TraceAddition } from '../extension/lib/v4.js';
 
+// The public instance rejects Node's default undici user agent even though the
+// same request succeeds from the shipped Chrome extension. Use a browser-like
+// agent so this probe exercises the production network path instead of the
+// instance's bot filter.
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  if (!headers.has('User-Agent')) {
+    headers.set('User-Agent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36');
+  }
+  return nativeFetch(input, { ...init, headers });
+};
+
 // ETH/TENDIES was opened for the 0.27 smoke report and fully removed later.
 // The two lifecycle events are now an immutable live fail-closed fixture for
 // the supported v4 boundary. Its mint transaction separately exercises native
