@@ -31,6 +31,7 @@ jobs:
           node tools/test-overlay-list.mjs
           node tools/test-overlay-panel-layout.mjs
           node tools/test-projectx-overlay.mjs
+          node tools/test-active-projectx-wallet.mjs
           node tools/test-projectx-config.mjs
           node tools/test-dexscreener-overlay.mjs
           node tools/test-dexscreener-range.mjs

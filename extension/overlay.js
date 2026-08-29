@@ -893,7 +893,7 @@ async function syncProjectXPortfolio() {
  * Optional Dexscreener chart alignment.
  *
  * The persistent content script stays in Chrome's isolated world. It sends
- * only anonymous numeric ranges plus the exact URL to the service worker. The
+ * only unlabelled numeric ranges plus the exact URL to the service worker. The
  * worker performs short-lived chart measurements only after separate consent
  * and returns viewport geometry. This layer treats each response as hostile
  * input, paints its own SVG, and never touches the chart, page JavaScript, or a

@@ -404,8 +404,9 @@ exposure. If a v4 NFT has
 later additions, its public transaction hashes are sent directly to that
 chain's public Blockscout trace endpoint; this is what makes the principal/fee
 split exact without sending wallet credentials or requesting a signature.
-Saved addresses, chain choices, hidden-position choices, overlay layout,
-Dexscreener chart consent, and the most recently rendered portfolio view are
+Saved addresses, the separately selected active overlay wallet address, chain
+choices, hidden-position choices, overlay layout, Dexscreener chart consent,
+and the most recently rendered portfolio view are
 stored with `chrome.storage.local`, deliberately **not**
 `chrome.storage.sync`, so they are never carried into a Google account. The
 saved view is local display output, not accounting input, and is replaced after

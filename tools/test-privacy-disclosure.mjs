@@ -9,6 +9,15 @@ const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url)
 const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
 const optionsJs = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 
+assert.match(worker, /Effective 29 August 2026/,
+  'privacy policy effective date must match the 0.30 data-boundary change');
+assert.match(worker, /saved addresses and labels/i,
+  'privacy policy must describe the current all-chain wallet selection model');
+assert.match(worker, /separately selected active overlay wallet address/i,
+  'privacy policy must disclose the active overlay wallet retained after a saved row is removed');
+assert.doesNotMatch(worker, /chain you select and the address you look up are stored locally/i,
+  'privacy policy still describes the retired chain picker');
+
 // The implementation discovers list rows through semantic position links and
 // uses a short visible label. Every user-facing privacy surface must say so.
 assert.match(overlay, /querySelectorAll\('a\[href\*="\/positions\/v"\]'\)/);

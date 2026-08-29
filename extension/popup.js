@@ -444,7 +444,7 @@ function paintActiveWallet() {
   el.textContent = `Overlay wallet: ${identity}${pending ? ' · typed wallet not selected yet' : ''}`;
   el.title = activeAddress || 'Choose a saved wallet or load one wallet to select it.';
   el.classList.toggle('pending', pending);
-  el.classList.toggle('empty', !activeAddress);
+  el.classList.toggle('empty', !activeAddress && !pending);
 }
 
 async function setActiveAddress(value, { syncField = true } = {}) {
