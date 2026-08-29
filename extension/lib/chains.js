@@ -140,6 +140,10 @@ export const CHAINS = {
     nfpm: '0x73991a25c818bf1f1128deaab1492d45638de0d3',
     factory: '0x1f7d7550b1b028f7571e69a784071f0205fd2efa',
     rpc: PUBLIC_RPC.robinhood,
+    // This endpoint accepts JSON-RPC batches and is materially faster when a
+    // wallet owns many NFTs. Other public endpoints retain bounded singles
+    // unless their own chain config opts in.
+    rpcBatchSize: 25,
     dexscreener: 'robinhood',
     // Official Blockscout. Besides lifetime logs, its v2 raw trace is the only
     // keyless source that separates v4 addition principal from fees accrued in

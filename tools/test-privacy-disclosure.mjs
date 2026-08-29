@@ -6,11 +6,15 @@ const options = readFileSync(new URL('../extension/options.html', import.meta.ur
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const worker = readFileSync(new URL('./licence-worker/worker.js', import.meta.url), 'utf8');
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
+const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
+const optionsJs = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 
-assert.match(worker, /Effective 27 August 2026/,
-  'privacy policy effective date must match the 0.28.1 copy change');
-assert.match(worker, /wallet addresses you save or select are stored locally/i,
+assert.match(worker, /Effective 29 August 2026/,
+  'privacy policy effective date must match the 0.30 data-boundary change');
+assert.match(worker, /saved addresses and labels/i,
   'privacy policy must describe the current all-chain wallet selection model');
+assert.match(worker, /separately selected active overlay wallet address/i,
+  'privacy policy must disclose the active overlay wallet retained after a saved row is removed');
 assert.doesNotMatch(worker, /chain you select and the address you look up are stored locally/i,
   'privacy policy still describes the retired chain picker');
 
@@ -30,4 +34,21 @@ for (const falseClaim of [
 ]) {
   assert.doesNotMatch(options + readme + worker, falseClaim);
 }
+for (const [name, body] of [['options', options], ['README', readme], ['privacy policy', worker]]) {
+  assert.match(body, /most recent(?:ly)? rendered portfolio view/i,
+    `${name} omits the local side-panel snapshot`);
+  assert.match(body, /chain and pool identifier/i,
+    `${name} omits the Dexscreener route values`);
+  assert.match(body, /without the (?:active )?wallet address/i,
+    `${name} omits the Dexscreener pair-request wallet exclusion`);
+  assert.match(body, /api\.dexscreener\.com|Dexscreener(?:'s)? API/i,
+    `${name} omits the Dexscreener pair-request destination`);
+}
+assert.match(panel, /No wallet connection or page access/i);
+assert.match(options, /id="licenseKey"\s+type="password"/,
+  'the saved LPLens access key must be masked when Options opens');
+assert.match(options, /id="showLicense"/,
+  'Options has no deliberate access-key reveal control');
+assert.match(optionsJs, /showLicense\.checked \? 'text' : 'password'/,
+  'the access-key reveal control does not restore masking');
 console.log('privacy disclosure: optional overlay implementation and copy agree');

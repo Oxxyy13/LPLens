@@ -4,7 +4,9 @@ import { readFile } from 'node:fs/promises';
 import {
   collectedProceedsUsd, findBlockAtOrBefore, strategyReturn, sumDepositBasis,
 } from '../extension/lib/histprice.js';
-import { classifyPosition, summarizeAggregate } from '../extension/lib/aggregate.js';
+import {
+  aggregateReasonText, classifyPosition, summarizeAggregate,
+} from '../extension/lib/aggregate.js';
 import { CHAINS } from '../extension/lib/chains.js';
 import {
   tokenPriceChangesSinceFirstAdd, tokenPriceChangesSinceLatestAdd,
@@ -151,11 +153,85 @@ function testAggregateLabelsAndExclusions() {
     { history: {}, usd: { currentValue: 80, pnl: 20, pnlPct: 20,
       grossAddedExact: true, collectedProceedsExact: true, vsHodl: 1 } },
     { history: {}, usd: { currentValue: 10, pnl: null,
-      grossAddedExact: false, collectedProceedsExact: true, vsHodl: 0 } },
+      grossAddedExact: false, collectedProceedsExact: true, vsHodl: 0,
+      returnUnavailable: 'gross additions are bounded' } },
   ]);
   assert.match(got.returnLine, /^LP return \+\$20\.00/);
   assert.match(got.returnLine, /1 bound/);
   assert.match(got.valueLine, /^in positions \$90\.00/);
+  assert.deepEqual(got.totalReturn.display, {
+    state: 'partial',
+    value: '+$20.00',
+    tone: 'muted',
+    coverage: '1 of 2 positions included',
+    included: 1,
+    excluded: 1,
+    total: 2,
+    returnUnavailable: [{ reason: 'gross additions are bounded', count: 1 }],
+  });
+}
+
+function testSinglePositionAggregateAvailability() {
+  const got = summarizeAggregate([{
+    history: {},
+    usd: {
+      currentValue: 9_404,
+      vsHodl: 131,
+      pnl: null,
+      returnUnavailable: 'gross additions unpriced',
+    },
+  }]);
+
+  assert.equal(got.vsLine, 'vs holding +$131 · 1 position');
+  assert.equal(got.returnLine,
+    'LP return — · totals exclude 1 of 1 position (1 unpriced)');
+  assert.equal(got.valueLine, 'in positions $9,404 · 1 position');
+  assert.deepEqual(got.vsHold.display, {
+    state: 'complete',
+    value: '+$131',
+    tone: 'up',
+    coverage: '1 position',
+    included: 1,
+    excluded: 0,
+    total: 1,
+    returnUnavailable: [],
+  });
+  assert.deepEqual(got.totalReturn.display, {
+    state: 'unavailable',
+    value: 'Unavailable',
+    tone: 'muted',
+    coverage: '0 of 1 position available',
+    included: 0,
+    excluded: 1,
+    total: 1,
+    returnUnavailable: [{ reason: 'gross additions unpriced', count: 1 }],
+  });
+  assert.deepEqual(got.value.display, {
+    state: 'complete',
+    value: '$9,404',
+    tone: 'muted',
+    coverage: '1 position',
+    included: 1,
+    excluded: 0,
+    total: 1,
+    returnUnavailable: [],
+  });
+
+  const negative = summarizeAggregate([{
+    history: {},
+    usd: { currentValue: 1, vsHodl: -1, pnl: -2 },
+  }]);
+  assert.equal(negative.vsHold.display.tone, 'down');
+  assert.equal(negative.totalReturn.display.tone, 'down');
+
+  const mixed = summarizeAggregate([
+    { history: { unavailable: 'missing' }, usd: {} },
+    { history: {}, usd: { pnl: null, returnUnavailable: 'gross additions unpriced' } },
+    { history: {}, usd: { pnl: null } },
+  ]);
+  assert.equal(aggregateReasonText(mixed.totalReturn),
+    'lifetime history is unavailable for 1 position; entry deposits could not be priced; another position could not be priced',
+    'mixed exclusions must name every cause without double-counting exact reasons');
 }
 
 function testTokenPriceChangesAreExactAndClearlyAnchored() {
@@ -198,5 +274,6 @@ await testCollectionAtEventPrice();
 await testNoCollectedTokensInCurrentValue();
 await testOverlayKeepsDollarReturnAsHeadline();
 testAggregateLabelsAndExclusions();
+testSinglePositionAggregateAvailability();
 testTokenPriceChangesAreExactAndClearlyAnchored();
-console.log('cash-flow pnl: 12 regression groups passed');
+console.log('cash-flow pnl: 13 regression groups passed');

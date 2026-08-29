@@ -1,22 +1,54 @@
 import { loadSweep, valueUsd } from './lib/positions.js';
 import { CHAINS } from './lib/chains.js';
 import {
-  entitlement, historyRelayCredentials,
-  TRIAL_LENGTH_DAYS, GATING_ENABLED, gateHeadline, gateHint,
+  entitlement, historyRelayCredentials, GATING_ENABLED, gateHeadline, gateHint,
 } from './lib/license.js';
 import {
   loadBook, upsertWallet, removeWallet, dedupeBook, MAX_SAVED_ADDRESSES,
   normalizeAddress, shortAddr, walletName,
 } from './lib/wallets.js';
-import { summarizeAggregate } from './lib/aggregate.js';
+import { aggregateReasonText, summarizeAggregate } from './lib/aggregate.js';
+import {
+  readDashboardSnapshot, writeDashboardSnapshot, snapshotAge,
+} from './lib/dashboard-snapshot.js';
+import {
+  loadHiddenPositions, positionHideKey, setPositionHidden,
+} from './lib/hidden-positions.js';
+import {
+  buildScanDiagnostic, copyDiagnosticReport, readDiagnosticReport, saveDiagnosticReport,
+} from './lib/diagnostics.js';
+import {
+  sendScanTelemetry, telemetryEnabled as scanTelemetryEnabled,
+} from './lib/telemetry.js';
+import {
+  DISABLED_PORTFOLIO_CHAINS_KEY,
+  enabledPortfolioChains,
+  loadDisabledPortfolioChains,
+  normalizeDisabledPortfolioChains,
+  portfolioChainSummary,
+  saveDisabledPortfolioChains,
+} from './lib/scan-preferences.js';
+import {
+  portfolioJobIssue, portfolioScanSummary, restoredPortfolioSummary,
+} from './lib/portfolio-presentation.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
+const SIDE_PANEL = document.body.dataset.surface === 'sidepanel';
+const snapshotStatusEl = $('snapshotStatus');
+const scanDetailsEl = $('scanDetails');
+const scanDetailsSummaryEl = $('scanDetailsSummary');
+const scanDetailsBodyEl = $('scanDetailsBody');
+const filterBar = $('filterBar');
+let activePositionFilter = 'all';
 
 // Shared renderer, loaded as a classic script by popup.html before this module.
 // The popup and the on-page overlay had drifted badly — every feature from 0.4
 // to 0.8 landed only in the overlay — so both now render through one copy.
-const { esc, fmt, ageText, priceText, hero, rangeBar, details, rebalanceLine, CSS_COMPONENTS } = globalThis.LPLens;
+const {
+  esc, fmt, ageText, priceText, priceOrientation, hero, rangeBar, details,
+  rebalanceLine, CSS_COMPONENTS,
+} = globalThis.LPLens;
 
 // The overlay renders inside a shadow root; the popup has none, so the shared
 // component styles are injected once here. Only the components — the overlay's
@@ -28,47 +60,370 @@ const usd = (n) =>
     : '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 let book = [];
-// `address` is the backwards-compatible storage key read by the ProjectX
-// overlay. Treat it as an explicit selection, not whichever wallet happened
-// to be scanned most recently.
+// `address` is the backwards-compatible storage key used by the ProjectX and
+// Dexscreener overlays. Treat it as an explicit selection, not whichever
+// address happened to be scanned most recently.
 let activeAddress = null;
 let activeAddressRevision = 0;
 let walletBookRevision = 0;
+let hiddenPositionKeys = new Set();
+let latestPositions = [];
+let latestSweepText = '';
+let latestSweepSummary = '';
+let latestSweepDetails = '';
+let latestSweepIssues = 0;
+let latestPortfolioShowsWallet = false;
+let latestAccessState = 'unknown';
+const ALL_CHAIN_KEYS = Object.freeze(Object.keys(CHAINS));
+let disabledPortfolioChainKeys = [];
+let scanPreferenceRevision = 0;
+let scanPreferenceWritesPending = 0;
+let scanPreferenceWriteQueue = Promise.resolve();
+let scanBusy = false;
+let dashboardMutationBusy = false;
+let renderedChainKeys = null;
+let dashboardStatusBase = '';
+
+const startupScanPreferenceRevision = scanPreferenceRevision;
+const scanPreferencesReady = loadDisabledPortfolioChains(ALL_CHAIN_KEYS).then((disabled) => {
+  if (scanPreferenceRevision === startupScanPreferenceRevision) {
+    disabledPortfolioChainKeys = disabled;
+  }
+  paintNetworkControls();
+  paintScanHint();
+});
+
+const OPTIONAL_PAGE_ORIGINS = Object.freeze({
+  uniswap: 'https://app.uniswap.org/*',
+  projectx: 'https://www.prjx.com/*',
+  dexscreener: 'https://dexscreener.com/*',
+});
+
+async function optionalPageAccess() {
+  const entries = await Promise.all(Object.entries(OPTIONAL_PAGE_ORIGINS).map(async ([name, origin]) => [
+    name,
+    await chrome.permissions.contains({ origins: [origin] }).catch(() => false),
+  ]));
+  return Object.fromEntries(entries);
+}
+
+async function recordScanDiagnostic(startedAt, final, includeClosed) {
+  try {
+    const enabled = await scanTelemetryEnabled();
+    const report = buildScanDiagnostic({
+      surface: SIDE_PANEL ? 'sidepanel' : 'popup',
+      startedAt,
+      jobs: final.jobs,
+      states: final.states,
+      positionCount: final.allPositions.length,
+      hiddenCount: final.hiddenPositions.length,
+      includeClosed,
+      savedWalletCount: book.length,
+      accessState: latestAccessState,
+      telemetryEnabled: enabled,
+      optionalPageAccess: await optionalPageAccess(),
+    });
+    await saveDiagnosticReport(report);
+    void sendScanTelemetry(report);
+  } catch {
+    // Diagnostics and aggregate telemetry must never alter a portfolio result.
+  }
+}
+
+const diagnosticStateEl = $('diagnosticState');
+const copyDiagnosticsButton = $('copyDiagnostics');
+if (copyDiagnosticsButton) {
+  copyDiagnosticsButton.addEventListener('click', async () => {
+    diagnosticStateEl.textContent = '';
+    try {
+      const report = await readDiagnosticReport();
+      if (!report) {
+        diagnosticStateEl.textContent = 'Run a scan first.';
+        return;
+      }
+      await copyDiagnosticReport(report);
+      diagnosticStateEl.textContent = 'Copied. No wallets or position IDs included.';
+    } catch {
+      diagnosticStateEl.textContent = 'Could not copy.';
+    }
+  });
+}
+
+const reportIssueLink = $('reportIssue');
+if (reportIssueLink) {
+  const version = chrome.runtime.getManifest().version;
+  const params = new URLSearchParams({
+    title: `[${version}] `,
+    body: 'What happened?\n\nPaste the output from Copy diagnostics below. It contains no wallet addresses, token names, pool IDs, position IDs, access keys, or raw provider errors.\n\n',
+  });
+  reportIssueLink.href = `https://github.com/Oxxyy13/LPLens/issues/new?${params}`;
+}
+
+const hiddenReady = loadHiddenPositions().then((keys) => {
+  hiddenPositionKeys = new Set(keys);
+  updateHiddenCount();
+  applyPositionFilter();
+});
+
+function setSnapshotStatus(text) {
+  if (!snapshotStatusEl) return;
+  snapshotStatusEl.textContent = text || '';
+  snapshotStatusEl.hidden = !text;
+}
+
+function clearScanDetails() {
+  if (!scanDetailsEl) return;
+  scanDetailsEl.hidden = true;
+  scanDetailsEl.open = false;
+  scanDetailsBodyEl.textContent = '';
+  scanDetailsBodyEl.hidden = true;
+}
+
+function presentScanStatus(summary, detail = '', issues = 0) {
+  statusEl.textContent = summary || '';
+  if (!SIDE_PANEL || !scanDetailsEl) return;
+  const body = String(detail || '').trim();
+  scanDetailsBodyEl.textContent = body;
+  scanDetailsBodyEl.hidden = !body;
+  scanDetailsSummaryEl.textContent = issues
+    ? `Details (${issues} issue${issues === 1 ? '' : 's'})`
+    : 'Help & diagnostics';
+  scanDetailsEl.hidden = false;
+  if (!body) scanDetailsEl.open = false;
+}
+
+function filterTokens(p) {
+  const tokens = [];
+  if (p.status === 'in-range') tokens.push('in-range');
+  if (p.status === 'below' || p.status === 'above') tokens.push('out-of-range');
+  if (p.status === 'closed') tokens.push('closed');
+  const h = p.history || {};
+  const u = p.usd || {};
+  if (h.unavailable || u.returnUnavailable
+      || u.totalNow === null || u.totalNow === undefined) tokens.push('issues');
+  return tokens.join(' ');
+}
+
+function applyPositionFilter(next = activePositionFilter) {
+  activePositionFilter = next;
+  const cards = [...resultsEl.querySelectorAll('.position-card')];
+  const showHidden = !!($('showHidden') && $('showHidden').checked);
+  for (const el of cards) {
+    const tokens = String(el.dataset.positionFilters || '').split(/\s+/).filter(Boolean);
+    const locallyHidden = el.dataset.hiddenPosition === 'true';
+    el.hidden = (locallyHidden && !showHidden)
+      || (next !== 'all' && !tokens.includes(next));
+  }
+  if (filterBar) {
+    filterBar.hidden = cards.every((el) => el.dataset.hiddenPosition === 'true' && !showHidden);
+    for (const button of filterBar.querySelectorAll('[data-position-filter]')) {
+      const active = button.dataset.positionFilter === next;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    }
+  }
+}
+
+if ($('showHidden')) {
+  $('showHidden').addEventListener('change', () => applyPositionFilter());
+}
+
+if (filterBar) {
+  filterBar.addEventListener('click', (event) => {
+    const button = event.target.closest && event.target.closest('[data-position-filter]');
+    if (!button) return;
+    applyPositionFilter(button.dataset.positionFilter || 'all');
+  });
+}
+
+const openPanelButton = $('openPanel');
+let currentWindowId = null;
+if (openPanelButton) {
+  if (!chrome.sidePanel || !chrome.sidePanel.open || !chrome.windows) {
+    openPanelButton.disabled = true;
+    openPanelButton.title = 'Portfolio panel requires Chrome 116 or newer';
+  } else {
+    chrome.windows.getCurrent().then((win) => {
+      currentWindowId = win && win.id;
+      if (!Number.isInteger(currentWindowId)) {
+        openPanelButton.disabled = true;
+        openPanelButton.title = 'Chrome did not provide the current window';
+      }
+    }).catch(() => {
+      openPanelButton.disabled = true;
+      openPanelButton.title = 'Chrome did not provide the current window';
+    });
+    openPanelButton.addEventListener('click', () => {
+      if (!Number.isInteger(currentWindowId)) {
+        statusEl.className = 'status error';
+        statusEl.textContent = 'The portfolio panel is not ready yet. Try again.';
+        return;
+      }
+      chrome.sidePanel.open({ windowId: currentWindowId }).catch((err) => {
+        statusEl.className = 'status error';
+        statusEl.textContent = 'Could not open the portfolio panel: ' + (err.message || err);
+      });
+    });
+  }
+}
 
 const startupAddressRevision = activeAddressRevision;
 const startupBookRevision = walletBookRevision;
 chrome.storage.local.get(['chain'], async (s) => {
   const initialBook = await loadBook();
   const latest = await chrome.storage.local.get(['address']);
-  // Another popup may have changed either value while loadBook() was awaiting
-  // storage. Do not let this slower startup overwrite that newer choice.
+  // Another open surface may have changed either value while loadBook() was
+  // awaiting storage. Never let this slower startup repaint or overwrite that
+  // newer explicit choice.
   if (walletBookRevision === startupBookRevision) book = initialBook;
   if (activeAddressRevision === startupAddressRevision) {
     activeAddress = normalizeAddress(latest.address);
-    // A saved wallet is not the ProjectX wallet until the user selects it.
+    // No implicit fallback. A saved wallet is not an overlay wallet until the
+    // user selects it, and pre-filling one here would visually imply otherwise.
     $('address').value = activeAddress || '';
   }
-  // Pre-0.22 stored a single-chain pick. Scanning is always every chain
-  // now; leaving the key would let an old `chain: 'robinhood'` silently
-  // pin a user to one network if anything still read it.
+  // Pre-0.22 stored a single-chain pick. The current selector uses a distinct,
+  // versioned key; leaving `chain` around could silently pin older code.
   if (Object.prototype.hasOwnProperty.call(s, 'chain')) {
     chrome.storage.local.remove('chain');
   }
+  await scanPreferencesReady;
   paintBook();
   paintScanHint();
+});
+
+function selectedPortfolioChainKeys() {
+  return enabledPortfolioChains(ALL_CHAIN_KEYS, disabledPortfolioChainKeys);
+}
+
+function sameChainSelection(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.every((key, index) => key === b[index]);
+}
+
+function paintScanButtons() {
+  const unlocked = formUnlocked();
+  const busy = scanBusy || dashboardMutationBusy;
+  const hasNetwork = selectedPortfolioChainKeys().length > 0;
+  const go = $('go');
+  const scanAll = $('scanAll');
+  if (go) {
+    go.disabled = !unlocked || busy || !hasNetwork;
+    go.title = hasNetwork ? '' : 'Choose at least one network';
+  }
+  if (scanAll) {
+    scanAll.disabled = !unlocked || busy || !hasNetwork || book.length === 0;
+    if (!hasNetwork) scanAll.title = 'Choose at least one network';
+    else if (!book.length) scanAll.title = 'Save at least one address first';
+    else scanAll.title = 'Scan every saved wallet';
+  }
+}
+
+function paintNetworkControls() {
+  const list = $('scanNetworkList');
+  const all = $('scanNetworkAll');
+  const summary = $('scanNetworkSummary');
+  if (!list || !all || !summary) return;
+  const enabled = new Set(selectedPortfolioChainKeys());
+  const interactive = formUnlocked() && !scanBusy && !dashboardMutationBusy;
+  summary.textContent = portfolioChainSummary(ALL_CHAIN_KEYS, disabledPortfolioChainKeys);
+  all.checked = enabled.size === ALL_CHAIN_KEYS.length;
+  all.indeterminate = enabled.size > 0 && enabled.size < ALL_CHAIN_KEYS.length;
+  all.disabled = !interactive;
+  for (const input of list.querySelectorAll('input[type="checkbox"]')) {
+    if (!ALL_CHAIN_KEYS.includes(input.value)) input.closest('.network-option')?.remove();
+  }
+  for (const key of ALL_CHAIN_KEYS) {
+    let input = [...list.querySelectorAll('input[type="checkbox"]')]
+      .find((candidate) => candidate.value === key);
+    if (!input) {
+      const label = document.createElement('label');
+      label.className = 'network-option';
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = key;
+      const name = document.createElement('span');
+      name.textContent = chainLabel(key);
+      label.append(input, name);
+      list.appendChild(label);
+    }
+    input.checked = enabled.has(key);
+    input.disabled = !interactive;
+    input.setAttribute('aria-label', `Scan ${chainLabel(key)} portfolios`);
+  }
+  paintScanButtons();
+}
+
+function paintNetworkSelectionNotice() {
+  if (!SIDE_PANEL || !Array.isArray(renderedChainKeys) || !dashboardStatusBase) return;
+  const selected = selectedPortfolioChainKeys();
+  if (sameChainSelection(renderedChainKeys, selected)) {
+    setSnapshotStatus(dashboardStatusBase);
+    return;
+  }
+  const lead = selected.length
+    ? 'Chains changed. Refresh to update.'
+    : 'Choose at least one chain.';
+  setSnapshotStatus(`${lead} ${dashboardStatusBase}`);
+}
+
+async function updateDisabledPortfolioChains(disabled) {
+  const desired = normalizeDisabledPortfolioChains(disabled, ALL_CHAIN_KEYS);
+  disabledPortfolioChainKeys = desired;
+  paintNetworkControls();
+  paintScanHint();
+  paintNetworkSelectionNotice();
+  scanPreferenceWritesPending++;
+  const write = scanPreferenceWriteQueue.then(() => (
+    saveDisabledPortfolioChains(desired, ALL_CHAIN_KEYS)
+  ));
+  scanPreferenceWriteQueue = write.catch(() => {});
+  try {
+    await write;
+  } catch {
+    statusEl.className = 'status error';
+    statusEl.textContent = 'Could not save the network selection.';
+  } finally {
+    scanPreferenceWritesPending--;
+    if (scanPreferenceWritesPending === 0) {
+      const stored = await loadDisabledPortfolioChains(ALL_CHAIN_KEYS);
+      if (scanPreferenceWritesPending === 0) {
+        disabledPortfolioChainKeys = stored;
+        paintNetworkControls();
+        paintScanHint();
+        paintNetworkSelectionNotice();
+      }
+    }
+  }
+}
+
+$('scanNetworkAll').addEventListener('change', async (event) => {
+  await updateDisabledPortfolioChains(event.target.checked ? [] : ALL_CHAIN_KEYS);
+});
+
+$('scanNetworkList').addEventListener('change', async (event) => {
+  if (!event.target.matches('input[type="checkbox"]')) return;
+  const enabled = new Set([...$('scanNetworkList').querySelectorAll('input:checked')]
+    .map((input) => input.value));
+  await updateDisabledPortfolioChains(ALL_CHAIN_KEYS.filter((key) => !enabled.has(key)));
 });
 
 function paintScanHint() {
   const hint = $('scanHint');
   if (!hint) return;
   const closed = $('includeClosed').checked;
+  const enabled = selectedPortfolioChainKeys();
+  if (enabled.length && !closed) {
+    hint.hidden = true;
+    hint.textContent = '';
+    hint.classList.remove('error');
+    return;
+  }
   hint.hidden = false;
-  const bits = [
-    'Always scans Ethereum, Base, Arbitrum, Polygon, HyperEVM and Robinhood.',
-    'Empty is “nothing”; a failure is named.',
-  ];
-  if (closed) bits.push('Include closed walks up to 60 per chain — this can take a while.');
+  const bits = enabled.length ? [] : ['Choose at least one network to scan.'];
+  if (closed) bits.push('Closed positions can make scans much slower.');
   hint.textContent = bits.join(' ');
+  hint.classList.toggle('error', enabled.length === 0);
 }
 $('includeClosed').addEventListener('change', paintScanHint);
 paintScanHint();
@@ -86,7 +441,7 @@ function paintActiveWallet() {
     : 'none selected';
   const typed = fieldAddress();
   const pending = !!(typed && typed !== activeAddress);
-  el.textContent = `ProjectX wallet: ${identity}${pending ? ' · typed wallet not selected yet' : ''}`;
+  el.textContent = `Overlay wallet: ${identity}${pending ? ' · typed wallet not selected yet' : ''}`;
   el.title = activeAddress || 'Choose a saved wallet or load one wallet to select it.';
   el.classList.toggle('pending', pending);
   el.classList.toggle('empty', !activeAddress && !pending);
@@ -123,9 +478,6 @@ function paintAddButton() {
 }
 
 function paintBook() {
-  const n = book.length;
-  const count = $('savedCount');
-  if (count) count.textContent = String(n);
   const list = $('savedList');
   const unlocked = formUnlocked();
   list.replaceChildren();
@@ -151,8 +503,8 @@ function paintBook() {
     load.className = 'saved-load';
     load.textContent = shortAddr(e.address);
     load.title = active
-      ? 'This wallet is used by the ProjectX overlay'
-      : 'Use this wallet for the ProjectX overlay';
+      ? 'This wallet is used by the ProjectX and Dexscreener overlays'
+      : 'Use this wallet for the ProjectX and Dexscreener overlays';
     load.setAttribute('aria-pressed', String(active));
     load.disabled = !unlocked;
 
@@ -167,13 +519,9 @@ function paintBook() {
     row.append(lab, load, rm);
     list.appendChild(row);
   }
-  const scanAll = $('scanAll');
-  if (scanAll) {
-    scanAll.disabled = !unlocked || n === 0;
-    scanAll.title = n === 0 ? 'Save at least one address first' : 'Scan every saved wallet';
-  }
   paintAddButton();
   paintActiveWallet();
+  paintNetworkControls();
   paintScanHint();
 }
 
@@ -194,9 +542,9 @@ $('addWallet').addEventListener('click', async () => {
   }
   await setActiveAddress($('address').value);
   statusEl.className = 'status';
-  statusEl.textContent = 'Saved and selected as the ProjectX wallet.';
+  statusEl.textContent = 'Saved and selected as the overlay wallet.';
   setTimeout(() => {
-    if (statusEl.textContent === 'Saved and selected as the ProjectX wallet.') statusEl.textContent = '';
+    if (statusEl.textContent === 'Saved and selected as the overlay wallet.') statusEl.textContent = '';
   }, 1800);
 });
 
@@ -207,19 +555,20 @@ $('savedList').addEventListener('click', async (e) => {
   if (e.target.closest('.saved-remove')) {
     // Instant — an address costs nothing to re-add. No confirm(), no dialog.
     book = await removeWallet(addr);
-    // Saving and selecting are independent. Removing the active saved row
-    // leaves that address selected until the user chooses another.
+    // Saving and selecting are independent. Removing a row must not rewrite
+    // another open surface's newer selection, so an active wallet simply
+    // remains active as an unsaved address until the user selects another.
     paintBook();
     if (addr === activeAddress) {
       statusEl.className = 'status';
-      statusEl.textContent = 'Removed from saved wallets. It remains the ProjectX wallet.';
+      statusEl.textContent = 'Removed from saved wallets. It remains the overlay wallet.';
     }
     return;
   }
   if (e.target.closest('.saved-load')) {
     await setActiveAddress(addr);
     statusEl.className = 'status';
-    statusEl.textContent = `ProjectX wallet changed to ${shortAddr(addr)}.`;
+    statusEl.textContent = `Overlay wallet changed to ${shortAddr(addr)}.`;
   }
 });
 
@@ -233,8 +582,9 @@ $('savedList').addEventListener('change', async (e) => {
   paintActiveWallet();
 });
 
-// Keep every open popup and the ProjectX overlay aligned with the same explicit
-// selection. The overlay already refreshes when this storage key changes.
+// Keep the popup and side panel in sync. Selecting a wallet in either surface
+// updates an already-open Dexscreener or ProjectX overlay immediately through
+// its own storage listener.
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
@@ -247,46 +597,133 @@ try {
     }
     if (changes.wallets) {
       walletBookRevision++;
-      // Chrome's event value is authoritative. Async reloads here could finish
-      // out of order and repaint an older saved-wallet list.
+      // Using the event's new value keeps Chrome's event order authoritative.
+      // Starting an async load for every event could allow an older read to
+      // finish after a newer one and repaint stale rows.
       book = dedupeBook(changes.wallets.newValue || []);
       paintBook();
+    }
+    if (changes[DISABLED_PORTFOLIO_CHAINS_KEY]) {
+      scanPreferenceRevision++;
+      const next = normalizeDisabledPortfolioChains(
+        changes[DISABLED_PORTFOLIO_CHAINS_KEY].newValue,
+        ALL_CHAIN_KEYS,
+      );
+      // Local writes are reconciled once their serialized queue drains. Ignore
+      // intermediate storage echoes so a slower first write cannot repaint a
+      // newer checkbox choice. External changes still apply immediately when
+      // this surface has no preference write in flight.
+      if (scanPreferenceWritesPending || sameChainSelection(next, disabledPortfolioChainKeys)) return;
+      disabledPortfolioChainKeys = next;
+      paintNetworkControls();
+      paintScanHint();
+      paintNetworkSelectionNotice();
     }
   });
 } catch { /* preview harness or orphaned extension page */ }
 
 function setFormInteractive(on) {
   $('address').disabled = !on;
-  $('go').disabled = !on;
   paintBook();
 }
 
 function showGate(ent) {
   setFormInteractive(false);
+  renderedChainKeys = null;
+  dashboardStatusBase = '';
   statusEl.className = 'status error';
   statusEl.textContent = ent.reason || gateHeadline(ent.state);
+  clearScanDetails();
   resultsEl.innerHTML = paywall(ent);
+  setSnapshotStatus('');
+  applyPositionFilter('all');
+}
+
+function cleanRestoredDashboard(showWalletLabels) {
+  const heading = resultsEl.querySelector('.totals-heading');
+  if (heading) heading.textContent = 'Portfolio totals';
+  for (const coverage of resultsEl.querySelectorAll('.tot-line.complete .tot-coverage')) {
+    coverage.remove();
+  }
+  for (const coverage of resultsEl.querySelectorAll('.tot-line.partial .tot-coverage')) {
+    coverage.textContent = 'Partial total';
+  }
+  for (const coverage of resultsEl.querySelectorAll('.tot-line.unavailable .tot-coverage')) {
+    coverage.textContent = 'Not enough data';
+  }
+  for (const notes of resultsEl.querySelectorAll('.totals-notes')) notes.remove();
+  for (const meta of resultsEl.querySelectorAll('.position-card .meta')) meta.remove();
+
+  if (showWalletLabels === false) {
+    for (const label of resultsEl.querySelectorAll('.position-card .wallet-lbl')) label.remove();
+  }
+}
+
+async function restoreDashboard() {
+  if (!SIDE_PANEL) return;
+  await scanPreferencesReady;
+  const snapshot = await readDashboardSnapshot();
+  if (!snapshot) {
+    dashboardStatusBase = 'No saved portfolio yet. Refresh a wallet to begin.';
+    renderedChainKeys = null;
+    setSnapshotStatus(dashboardStatusBase);
+    return;
+  }
+  resultsEl.innerHTML = snapshot.html;
+  cleanRestoredDashboard(snapshot.showWalletLabels);
+  reconcileHiddenCards();
+  statusEl.className = 'status';
+  const issueCount = Math.max(0, Number(snapshot.issues) || 0);
+  const presentation = {
+    summary: restoredPortfolioSummary({
+      issueCount,
+      visiblePositionCount: snapshot.positions,
+      hasPositionCards: !!resultsEl.querySelector('.position-card'),
+      summaryOnly: snapshot.summaryOnly,
+    }),
+    details: issueCount
+      ? 'Some data was unavailable in this saved refresh. Refresh for current details.'
+      : '',
+    issues: issueCount,
+  };
+  presentScanStatus(presentation.summary, presentation.details, presentation.issues);
+  $('includeClosed').checked = snapshot.includeClosed;
+  paintScanHint();
+  renderedChainKeys = Array.isArray(snapshot.chains) ? snapshot.chains : [...ALL_CHAIN_KEYS];
+  const limited = snapshot.summaryOnly ? ' Refresh to load position cards.' : '';
+  dashboardStatusBase = `Last refreshed ${snapshotAge(snapshot.at)}.${limited}`;
+  setSnapshotStatus(dashboardStatusBase);
+  paintNetworkSelectionNotice();
+  applyPositionFilter('all');
 }
 
 // First paint (popup.html) already has the address + Load disabled and
 // "Checking access…" in #status, so we never show a working form and then
 // yank it. The verdict replaces that: a gate card, or the ordinary form.
 (async function gateOnOpen() {
+  await scanPreferencesReady;
   if (!GATING_ENABLED) {
+    latestAccessState = 'free';
+    await hiddenReady;
+    await restoreDashboard();
     setFormInteractive(true);
-    statusEl.textContent = '';
+    if (!SIDE_PANEL) statusEl.textContent = '';
     return;
   }
   try {
     const ent = await entitlement();
+    latestAccessState = ent.state || 'unknown';
     if (!ent.allowed) {
       showGate(ent);
       return;
     }
-    setFormInteractive(true);
     statusEl.className = 'status';
     statusEl.textContent = '';
+    clearScanDetails();
     resultsEl.innerHTML = '';
+    await hiddenReady;
+    await restoreDashboard();
+    setFormInteractive(true);
   } catch (err) {
     showGate({
       allowed: false,
@@ -297,47 +734,96 @@ function showGate(ent) {
 })();
 
 async function startScan(owners, includeClosed, { selectOverlayWallet = false } = {}) {
-  // Loading one wallet is an explicit ProjectX-wallet choice. Scan all never
-  // changes that choice as a side effect, even when only one wallet is saved.
-  if (selectOverlayWallet) await setActiveAddress(owners[0].address);
-  $('go').disabled = true;
-  $('scanAll').disabled = true;
-  statusEl.className = 'status';
-  const chainKeys = Object.keys(CHAINS);
-  const nJobs = owners.length * chainKeys.length;
-  statusEl.textContent =
-    `Scanning ${owners.length} wallet${owners.length === 1 ? '' : 's'} × ${chainKeys.length} chains (${nJobs} jobs, 2 at a time)…`;
-  resultsEl.innerHTML = '';
+  if (scanBusy || dashboardMutationBusy) return;
+  // Acquire the UI lock before the first await. This prevents two rapid clicks
+  // from launching overlapping sweeps that race to repaint and save one view.
+  scanBusy = true;
+  const scanStartedAt = Date.now();
+  const previousRefreshStatus = /^Last refreshed /.test(dashboardStatusBase)
+    ? dashboardStatusBase
+    : '';
+  paintBook();
   try {
+    await scanPreferencesReady;
+    const chainKeys = [...selectedPortfolioChainKeys()];
+    if (!chainKeys.length) {
+      statusEl.className = 'status error';
+      statusEl.textContent = 'Choose at least one network to scan.';
+      return;
+    }
+    $('scanNetworks').open = false;
+    // A one-wallet load is also an explicit overlay-wallet choice. A multi-wallet
+    // refresh must never change that choice as a side effect.
+    statusEl.className = 'status';
+    statusEl.textContent = 'Refreshing positions…';
+    clearScanDetails();
+    resultsEl.innerHTML = '';
+    renderedChainKeys = null;
+    dashboardStatusBase = '';
+    setSnapshotStatus(dashboardStatusBase);
+    applyPositionFilter(activePositionFilter);
+    if (selectOverlayWallet) await setActiveAddress(owners[0].address);
     // Recheck on submit even though we already checked on open: a key can
     // expire (or be revoked) while the popup sits open. The second call is
     // cheap — licenseSeen caches for RECHECK_HOURS, so this is not a second
     // network round-trip on the normal path.
     const ent = await entitlement();
+    latestAccessState = ent.state || 'unknown';
     if (GATING_ENABLED && !ent.allowed) {
       showGate(ent);
       return;
     }
     if (GATING_ENABLED && ent.state === 'trial') {
-      statusEl.textContent = `Trial — ${ent.daysLeft} day${ent.daysLeft === 1 ? '' : 's'} left of ${TRIAL_LENGTH_DAYS} · reading chain…`;
+      statusEl.textContent = 'Refreshing positions…';
     }
+    await hiddenReady;
     const settings = await chrome.storage.local.get(['rpcOverrides', 'etherscanKey']);
     const historyRelay = await historyRelayCredentials();
-    await runSweep(owners, Object.keys(CHAINS), {
+    const final = await runSweep(owners, chainKeys, {
       includeClosed,
       rpcOverrides: settings.rpcOverrides || {},
       etherscanKey: settings.etherscanKey || null,
       historyRelay,
       withUsd: true,
+      showWalletAttribution: !selectOverlayWallet,
     });
-  } catch (err) {
-    statusEl.className = 'status error';
-    statusEl.textContent = 'Failed: ' + (err.message || err);
-  } finally {
-    if (!$('address').disabled) {
-      $('go').disabled = false;
-      $('scanAll').disabled = book.length === 0;
+    const saved = !final.allFailed && await writeDashboardSnapshot({
+      html: resultsEl.innerHTML,
+      summaryHtml: totalsCard(final.positions),
+      status: final.summary,
+      details: final.details,
+      issues: final.issueCount,
+      positions: final.positions.length,
+      wallets: owners.length,
+      showWalletLabels: latestPortfolioShowsWallet,
+      chains: chainKeys,
+      includeClosed,
+    });
+    await recordScanDiagnostic(scanStartedAt, final, includeClosed);
+    if (SIDE_PANEL) {
+      renderedChainKeys = final.allFailed ? null : chainKeys;
+      dashboardStatusBase = final.allFailed
+        ? (previousRefreshStatus ? `Refresh failed. ${previousRefreshStatus}` : 'Refresh failed.')
+        : saved
+        ? 'Last refreshed just now.'
+        : 'Last refreshed just now. Could not save this view locally.';
+      setSnapshotStatus(dashboardStatusBase);
+      paintNetworkSelectionNotice();
     }
+  } catch {
+    statusEl.className = 'status error';
+    presentScanStatus('Could not refresh positions.');
+    if (SIDE_PANEL) {
+      renderedChainKeys = null;
+      dashboardStatusBase = previousRefreshStatus
+        ? `Refresh failed. ${previousRefreshStatus}`
+        : 'Refresh failed.';
+      setSnapshotStatus(dashboardStatusBase);
+    }
+  } finally {
+    scanBusy = false;
+    reconcileHiddenCards();
+    paintBook();
   }
 }
 
@@ -375,94 +861,149 @@ function jobKey(ev) {
   return `${ev.owner || ''}@${ev.chainKey}`;
 }
 
-function jobLabel(ev) {
+function jobLabel(ev, showWallet = true) {
+  if (!showWallet) return chainLabel(ev.chainKey);
   const w = (ev.label || '').trim() || shortAddr(ev.owner);
   return `${w} · ${chainLabel(ev.chainKey)}`;
 }
 
-/**
- * "Base: nothing" vs "Base failed: …" must stay distinguishable — and so must
- * "Base: 60" vs "Base: 60, and 91 more we did not scan plus 230 v4 we could
- * not read at all".
- *
- * `lib/positions.js` computes exactly which holdings it failed to render
- * (`result.truncated`, `result.v4.unavailable`, `v4.held` vs `v4.shown`) and
- * this function used to discard all of it, reporting only the rendered count.
- * A bare count reads as "this is all of it", which on a real wallet was wildly
- * false: measured 2026-08-20 against Dan's address, Base held 151 v3 positions
- * (60 scanned) and 230 v4 positions that Blockscout rate-limited away, and the
- * popup said "Base: 60" with no qualifier. Silently showing part of someone's
- * portfolio as though it were the whole thing is the one failure this project
- * does not accept.
- */
-function jobOutcome(job, s) {
-  const name = jobLabel(job);
-  if (!s || s.phase === 'start') return `${name} reading`;
-  if (s.ok === false) return `${name} failed: ${s.error || 'unknown error'}`;
+// Routine successes stay out of the UI. Actual gaps remain visible with a
+// friendly reason, while raw provider errors stay inside privacy-safe diagnostics.
+function jobIssueOutcome(job, state, showWallet) {
+  const issue = portfolioJobIssue(state);
+  return issue ? `${jobLabel(job, showWallet)}: ${issue}` : '';
+}
+
+function jobHasIssue(s) {
+  if (!s || s.phase === 'start') return false;
+  if (s.ok === false) return true;
   const r = s.result || {};
-  const n = r.positions ? r.positions.length : 0;
-
-  const gaps = [];
-  if (r.count > (r.attempted ?? r.scanned)) {
-    gaps.push(`${r.count - (r.attempted ?? r.scanned)} v3 beyond scan limit`);
-  }
-  if (r.enumUnreadable) gaps.push(`${r.enumUnreadable} v3 ownership unreadable`);
-  if (r.positionUnreadable) gaps.push(`${r.positionUnreadable} v3 unreadable`);
-  if (r.closedHidden) gaps.push(`${r.closedHidden} closed v3 hidden`);
+  if (r.count > (r.attempted ?? r.scanned)) return true;
+  if (r.enumUnreadable || r.positionUnreadable) return true;
   const v4 = r.v4;
-  if (v4) {
-    // held unknown in the enumeration-failed case, so do not imply a number.
-    if (v4.unavailable) gaps.push(v4.held ? `${v4.held} v4 unreadable` : 'v4 unreadable');
-    else {
-      if (v4.unreadable) gaps.push(`${v4.unreadable} v4 unreadable`);
-      if (v4.closedHidden) gaps.push(`${v4.closedHidden} closed v4 hidden`);
-    }
-  }
+  return !!(v4 && (v4.unavailable || v4.unreadable));
+}
 
-  const base = n ? `${name}: ${n}` : `${name}: nothing`;
-  return gaps.length ? `${base} (${gaps.join(', ')})` : base;
+function totalMetric(label, bucket) {
+  const display = bucket.display;
+  const tone = ({ up: 'positive', down: 'negative', muted: 'muted' })[display.tone] || 'muted';
+  const subtext = display.state === 'partial'
+    ? 'Partial total'
+    : display.state === 'unavailable' ? 'Not enough data' : '';
+  const reason = aggregateReasonText(bucket);
+  const aria = `${label}: ${display.value}. ${display.coverage}.${reason ? ` ${reason}.` : ''}`;
+  const title = subtext
+    ? ` title="${esc(`${display.coverage}.${reason ? ` ${reason}.` : ''}`)}"`
+    : '';
+  return `<div class="tot-line ${esc(display.state)}" role="group" data-total-metric="${esc(label)}"
+      aria-label="${esc(aria)}"${title}>
+    <span class="k">${esc(label)}</span>
+    <span class="tot-value ${tone}">${esc(display.value)}</span>
+    ${subtext ? `<span class="tot-coverage">${esc(subtext)}</span>` : ''}
+  </div>`;
 }
 
 function totalsCard(positions) {
   const a = summarizeAggregate(positions);
   if (!a.n) return '';
-  return `<div class="card totals">
-    <div class="tot-line"><span class="k">vs holding</span>${esc(a.vsLine.replace(/^vs holding\s*/, ''))}</div>
-    <div class="tot-line"><span class="k">LP return</span>${esc(a.returnLine.replace(/^LP return\s*/, ''))}</div>
-    <div class="tot-line"><span class="k">in positions</span>${esc(a.valueLine.replace(/^in positions\s*/, ''))}</div>
-  </div>`;
+  return `<section class="card totals" aria-labelledby="portfolioTotalsHeading">
+    <div class="totals-heading" id="portfolioTotalsHeading">Portfolio totals</div>
+    ${totalMetric('vs holding', a.vsHold)}
+    ${totalMetric('LP return', a.totalReturn)}
+    ${totalMetric('in positions', a.value)}
+  </section>`;
 }
 
-function sweepStatus(states, jobs) {
-  const bits = [];
-  const failed = [];
+function updateHiddenCount() {
+  const count = $('hiddenCount');
+  if (!count) return;
+  const allCards = [...resultsEl.querySelectorAll('.position-card')];
+  const hiddenCards = allCards.filter((cardEl) => cardEl.dataset.hiddenPosition === 'true');
+  const hiddenCount = hiddenCards.length;
+  count.textContent = String(hiddenCount);
+  const showHidden = $('showHidden');
+  if (!hiddenCount && showHidden) showHidden.checked = false;
+  const option = $('showHiddenOption');
+  if (option) option.hidden = hiddenCount === 0;
+}
+
+function paintPortfolio(positions) {
+  latestPositions = Array.isArray(positions) ? positions : [];
+  const visible = [];
+  const hidden = [];
+  for (const position of latestPositions) {
+    const key = positionHideKey(position);
+    (key && hiddenPositionKeys.has(key) ? hidden : visible).push(position);
+  }
+  resultsEl.innerHTML = totalsCard(visible)
+    + latestPositions.map((position) => {
+      const key = positionHideKey(position);
+      return card(
+        position, {}, !!(key && hiddenPositionKeys.has(key)), latestPortfolioShowsWallet,
+      );
+    }).join('');
+  updateHiddenCount();
+  applyPositionFilter();
+  return { visible, hidden };
+}
+
+function reconcileHiddenCards() {
+  for (const cardEl of resultsEl.querySelectorAll('.position-card[data-position-key]')) {
+    const hidden = hiddenPositionKeys.has(String(cardEl.dataset.positionKey || '').toLowerCase());
+    cardEl.dataset.hiddenPosition = String(hidden);
+    const button = cardEl.querySelector('.hide-position');
+    if (button) {
+      button.textContent = hidden ? 'restore' : 'hide';
+      button.setAttribute('aria-label', `${hidden ? 'Restore' : 'Hide'} this position in this browser`);
+      button.disabled = scanBusy || dashboardMutationBusy;
+      button.title = scanBusy || dashboardMutationBusy
+        ? 'Wait for the portfolio update to finish'
+        : `${hidden ? 'Restore' : 'Hide'} this position in local portfolio views`;
+    }
+  }
+  updateHiddenCount();
+  applyPositionFilter();
+}
+
+function sweepStatus(states, jobs, showWallet) {
+  const issueLines = [];
   const positions = [];
   let done = 0;
-  let inflight = 0;
+  let failed = 0;
+  let issueCount = 0;
   for (const job of jobs) {
     const s = states[jobKey(job)];
-    bits.push(jobOutcome(job, s));
-    if (!s || s.phase === 'start') inflight++;
-    else if (s.ok === false) {
+    if (jobHasIssue(s)) {
+      issueCount++;
+      issueLines.push(jobIssueOutcome(job, s, showWallet));
+    }
+    if (!s || s.phase === 'start') continue;
+    if (s.ok === false) {
       done++;
-      failed.push(`${jobLabel(job)} failed: ${s.error || 'unknown error'}`);
+      failed++;
     } else {
       done++;
       if (s.result && s.result.positions) positions.push(...s.result.positions);
     }
   }
-  const head = [`${done}/${jobs.length}`];
-  if (inflight) head.push(`${inflight} in flight`);
-  if (positions.length) head.push(`${positions.length} shown`);
-  else if (done === jobs.length && !failed.length) {
-    head.push('No Uniswap v3 position NFTs held');
-  }
-  const line = [...head, ...bits].join(' · ');
-  const allFailed = done === jobs.length && failed.length === jobs.length;
-  return { text: line, failed: failed.length > 0, allFailed, positions };
+  const complete = done === jobs.length;
+  const allFailed = complete && failed === jobs.length;
+  const summary = portfolioScanSummary({
+    complete, allFailed, issueCount, positionCount: positions.length,
+  });
+  return {
+    text: summary,
+    summary,
+    details: issueLines.filter(Boolean).join('\n'),
+    issueCount,
+    failed: failed > 0,
+    allFailed,
+    positions,
+  };
 }
 
 async function runSweep(owners, chainKeys, opts) {
+  const { showWalletAttribution, ...loadOptions } = opts;
   const jobs = [];
   const seen = new Set();
   for (const o of owners) {
@@ -470,16 +1011,34 @@ async function runSweep(owners, chainKeys, opts) {
     seen.add(o.address);
     for (const chainKey of chainKeys) jobs.push({ owner: o.address, label: o.label, chainKey });
   }
+  latestPortfolioShowsWallet = typeof showWalletAttribution === 'boolean'
+    ? showWalletAttribution
+    : new Set(jobs.map((job) => job.owner).filter(Boolean)).size > 1;
   const states = {};
   const paint = () => {
-    const snap = sweepStatus(states, jobs);
+    const snap = sweepStatus(states, jobs, latestPortfolioShowsWallet);
+    const shown = paintPortfolio(snap.positions);
+    const text = snap.text;
+    const summary = snap.summary;
+    latestSweepText = snap.text;
+    latestSweepSummary = snap.summary;
+    latestSweepDetails = snap.details;
+    latestSweepIssues = snap.issueCount;
     statusEl.className = snap.allFailed ? 'status error' : 'status';
-    statusEl.textContent = snap.text;
-    resultsEl.innerHTML = totalsCard(snap.positions)
-      + snap.positions.map((p) => card(p, {})).join('');
+    if (SIDE_PANEL) presentScanStatus(summary, snap.details, snap.issueCount);
+    else statusEl.textContent = text;
+    return {
+      ...snap,
+      text,
+      summary,
+      details: snap.details,
+      positions: shown.visible,
+      allPositions: snap.positions,
+      hiddenPositions: shown.hidden,
+    };
   };
   await loadSweep(owners, chainKeys, {
-    ...opts,
+    ...loadOptions,
     onProgress: async (ev) => {
       if (ev.phase === 'start') {
         states[jobKey(ev)] = { phase: 'start' };
@@ -490,7 +1049,7 @@ async function runSweep(owners, chainKeys, opts) {
       paint();
     },
   });
-  paint();
+  return { ...paint(), jobs, states };
 }
 
 /**
@@ -501,15 +1060,19 @@ async function runSweep(owners, chainKeys, opts) {
  * which the overlay does not fetch. Unpriced legs render "unpriced" rather than
  * $0 — a missing mark must never look like a zero balance.
  */
-function card(p, prices) {
+function card(p, prices, locallyHidden = false, showWallet = true) {
   const table = (p.chainKey && prices[p.chainKey] && typeof prices[p.chainKey] === 'object')
     ? prices[p.chainKey] : prices;
   const s0 = p.token0Meta.symbol, s1 = p.token1Meta.symbol;
   const p0 = table[p.token0.toLowerCase()], p1 = table[p.token1.toLowerCase()];
   const h = p.history || {};
   const u = p.usd;
-  const lo = Math.min(p.priceLower, p.priceUpper);
-  const hi = Math.max(p.priceLower, p.priceUpper);
+  const standardPrice = priceOrientation(p, h, s0, s1, false);
+  const inversePrice = priceOrientation(p, h, s0, s1, true);
+  const flippable = standardPrice.valid && inversePrice.valid;
+  const priceViews = (standard, inverse) => flippable
+    ? `<span data-price-view="standard">${standard}</span><span data-price-view="inverse">${inverse}</span>`
+    : standard;
 
   // Same restraint as the overlay: answer the question, then offer the rest.
   const value = u && u.totalNow !== null && u.totalNow !== undefined
@@ -521,27 +1084,37 @@ function card(p, prices) {
     ? '$' + u.collectable.toLocaleString('en-US', { maximumFractionDigits: 2 })
     : `${fmt(p.collectable0)} ${esc(s0)} + ${fmt(p.collectable1)} ${esc(s1)}`;
 
-  const entry = h.entry
-    ? (h.entry.exact
-        ? fmt(h.entry.price, 8)
-        : `${esc(h.entry.bound)} ${fmt(h.entry.price, 8)}`)
+  const entryValue = (point) => point
+    ? (point.exact
+        ? fmt(point.price, 8)
+        : `${esc(point.bound)} ${fmt(point.price, 8)}`)
     : (h.unavailable ? '—' : '—');
-  const entryNote = h.entry && !h.entry.exact
-    ? (h.entry.bound === 'at or below' ? 'at least' : h.entry.bound === 'at or above' ? 'at most' : h.entry.bound)
-    : (h.entry ? 'solved from mint' : (h.unavailable ? 'unavailable' : ''));
+  const entryNoteValue = (point) => point && !point.exact
+    ? (point.bound === 'at or below' ? 'at least' : point.bound === 'at or above' ? 'at most' : point.bound)
+    : (point ? 'solved from mint' : (h.unavailable ? 'unavailable' : ''));
+  const entry = priceViews(entryValue(standardPrice.entry), entryValue(inversePrice.entry));
+  const entryNote = priceViews(entryNoteValue(standardPrice.entry), entryNoteValue(inversePrice.entry));
 
   const statusClass = ({ 'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed' }[p.status]) || '';
+  const hideKey = positionHideKey(p);
+  const statusText = priceViews(esc(standardPrice.status), esc(inversePrice.status));
+  const currentPrice = priceViews(fmt(standardPrice.now, 8), fmt(inversePrice.now, 8));
+  const rangePrice = priceViews(
+    `${fmt(standardPrice.lo, 8)} – ${fmt(standardPrice.hi, 8)}`,
+    `${fmt(inversePrice.lo, 8)} – ${fmt(inversePrice.hi, 8)}`,
+  );
 
   return `
-    <div class="card">
+    <div class="card position-card" data-position-filters="${filterTokens(p)}"
+      data-position-key="${esc(hideKey || '')}" data-hidden-position="${locallyHidden ? 'true' : 'false'}">
       <div class="card-top">
         <span class="pair">${esc(s0)} / ${esc(s1)}</span>
         <span class="fee">${(p.fee / 10000).toFixed(2)}%</span>
-        <span class="wallet-lbl">${esc(walletName(p))}</span>
+        ${showWallet ? `<span class="wallet-lbl">${esc(walletName(p))}</span>` : ''}
         <span class="chain-lbl">${esc(chainLabel(p.chainKey))}</span>
-        <span class="pill ${statusClass}">${esc(p.status)}</span>
+        <span class="pill ${statusClass}">${statusText}</span>
       </div>
-      ${rangeBar(p, h)}
+      ${rangeBar(p, h, flippable)}
       ${hero(p, h, s1)}
       <div class="stats">
         <div class="stat">
@@ -551,24 +1124,122 @@ function card(p, prices) {
         <div class="stat">
           <span class="stat-l">entry</span>
           <span class="stat-v muted">${entry}</span>
-          <span class="stat-n">${esc(entryNote)}</span>
+          <span class="stat-n">${entryNote}</span>
         </div>
       </div>
       ${rebalanceLine(p, h, s0, s1)}
-      <button class="more" data-more="${p.tokenId}">details</button>
+      <div class="card-actions">
+        <button class="more" data-more="${p.tokenId}">details</button>
+        ${hideKey ? `<button type="button" class="hide-position"
+          ${scanBusy || dashboardMutationBusy ? 'disabled' : ''}
+          aria-label="${locallyHidden ? 'Restore' : 'Hide'} ${esc(s0)} / ${esc(s1)} in this browser"
+          title="${scanBusy || dashboardMutationBusy ? 'Wait for the portfolio update to finish' : `${locallyHidden ? 'Restore' : 'Hide'} this position in local portfolio views`}">${locallyHidden ? 'restore' : 'hide'}</button>` : ''}
+      </div>
       <div class="extra">
         <div class="kv"><span>value</span><span class="num">${value}</span></div>
-        <div class="kv"><span>current price</span><span class="num">${fmt(p.price, 8)}</span></div>
-        <div class="kv"><span>range</span><span class="num">${fmt(lo, 8)} – ${fmt(hi, 8)}</span></div>
+        <div class="kv"><span>current price</span><span class="num">${currentPrice}</span></div>
+        <div class="kv"><span>range</span><span class="num">${rangePrice}</span></div>
         <div class="kv"><span>holds</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>
-        <div class="meta">#${p.tokenId}${p.protocol || p.version ? ' · ' : ''}${p.protocol ? esc(p.protocol) + ' ' : ''}${p.version ? esc(p.version) : ''}</div>
-        ${details(p, h, s0, s1)}
+        ${details(p, h, s0, s1, flippable)}
       </div>
     </div>`;
 }
 
 // One handler for every card, added once rather than per render.
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
+  const hideButton = e.target.closest && e.target.closest('.hide-position');
+  if (hideButton) {
+    // Hiding changes aggregate membership and its persisted snapshot. Acquire
+    // the same UI mutation lock before the first await so a refresh cannot
+    // begin inside this storage transaction, or vice versa.
+    if (scanBusy || dashboardMutationBusy) return;
+    const cardEl = hideButton.closest('.position-card');
+    const key = String(cardEl && cardEl.dataset.positionKey || '').toLowerCase();
+    if (!key) return;
+    const hide = cardEl.dataset.hiddenPosition !== 'true';
+    dashboardMutationBusy = true;
+    reconcileHiddenCards();
+    paintBook();
+    try {
+      hiddenPositionKeys = new Set(await setPositionHidden(key, hide));
+      updateHiddenCount();
+
+      if (latestPositions.length) {
+        const shown = paintPortfolio(latestPositions);
+        const text = latestSweepText;
+        const summary = latestSweepSummary;
+        if (SIDE_PANEL) presentScanStatus(summary, latestSweepDetails, latestSweepIssues);
+        else statusEl.textContent = text;
+        const previous = await readDashboardSnapshot();
+        await writeDashboardSnapshot({
+          at: previous && previous.at,
+          html: resultsEl.innerHTML,
+          summaryHtml: totalsCard(shown.visible),
+          status: summary,
+          details: latestSweepDetails,
+          issues: latestSweepIssues,
+          positions: shown.visible.length,
+          wallets: previous && previous.wallets || 1,
+          showWalletLabels: latestPortfolioShowsWallet,
+          chains: renderedChainKeys || (previous && previous.chains) || selectedPortfolioChainKeys(),
+          includeClosed: $('includeClosed').checked,
+        });
+      } else {
+        cardEl.dataset.hiddenPosition = String(hide);
+        hideButton.textContent = hide ? 'restore' : 'hide';
+        hideButton.setAttribute('aria-label', `${hide ? 'Restore' : 'Hide'} this position in this browser`);
+        hideButton.title = `${hide ? 'Restore' : 'Hide'} this position in local portfolio views`;
+        const totals = resultsEl.querySelector('.totals');
+        if (totals) totals.remove();
+        applyPositionFilter();
+        const visibleCount = resultsEl.querySelectorAll('.position-card[data-hidden-position="false"]').length;
+        const previous = await readDashboardSnapshot();
+        const previousIssues = previous && previous.issues || 0;
+        const previousDetails = previousIssues
+          ? 'Some data was unavailable in this saved refresh. Refresh for current details.'
+          : '';
+        presentScanStatus('Hidden preference saved locally.', previousDetails, previousIssues);
+        dashboardStatusBase = previous
+          ? `Last refreshed ${snapshotAge(previous.at)}.`
+          : 'Refresh to recalculate portfolio totals.';
+        renderedChainKeys = renderedChainKeys
+          || (previous && previous.chains)
+          || selectedPortfolioChainKeys();
+        setSnapshotStatus(dashboardStatusBase);
+        paintNetworkSelectionNotice();
+        await writeDashboardSnapshot({
+          at: previous && previous.at,
+          html: resultsEl.innerHTML,
+          summaryHtml: '',
+          status: statusEl.textContent,
+          details: previousDetails,
+          issues: previousIssues,
+          positions: visibleCount,
+          wallets: previous && previous.wallets || 1,
+          showWalletLabels: previous && previous.showWalletLabels,
+          chains: renderedChainKeys || (previous && previous.chains) || selectedPortfolioChainKeys(),
+          includeClosed: $('includeClosed').checked,
+        });
+      }
+    } finally {
+      dashboardMutationBusy = false;
+      reconcileHiddenCards();
+      paintBook();
+    }
+    return;
+  }
+  const flip = e.target.closest && e.target.closest('.price-flip');
+  if (flip) {
+    const card = flip.closest('.position-card');
+    if (!card) return;
+    const inverted = card.classList.toggle('price-inverted');
+    for (const button of card.querySelectorAll('.price-flip')) {
+      button.setAttribute('aria-pressed', String(inverted));
+      const next = inverted ? button.dataset.priceStandard : button.dataset.priceInverse;
+      button.setAttribute('aria-label', `Show prices as ${next}`);
+    }
+    return;
+  }
   const btn = e.target.closest && e.target.closest('.more');
   if (!btn) return;
   const card = btn.closest('.card');

@@ -7,6 +7,7 @@
  *
  * Usage: node tools/test-live-fresh-install.mjs --env CWS_REVIEWER_ACCESS_KEY
  *        node tools/test-live-fresh-install.mjs --key-file C:\path\to\key.txt
+ *        LPLENS_ENV_FILE=C:\path\to\.env node tools/test-live-fresh-install.mjs --env NAME
  */
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -25,7 +26,7 @@ const V4_MODIFY = '0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f71
 const ETH_V4_POOL_ID = '0x135e319cb228834941e895dd8f123b218246f2bb8ef533972784b77efb38eedc';
 
 function envValues() {
-  const file = resolve(ROOT, '.env');
+  const file = resolve(String(process.env.LPLENS_ENV_FILE || '').trim() || join(ROOT, '.env'));
   if (!existsSync(file)) return {};
   return Object.fromEntries(readFileSync(file, 'utf8').split(/\r?\n/).flatMap((line) => {
     const trimmed = line.trim();

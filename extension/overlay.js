@@ -1,19 +1,21 @@
 /**
- * On-page overlay for app.uniswap.org position pages and the ProjectX
- * portfolio at www.prjx.com.
+ * On-page overlay for app.uniswap.org position pages, the ProjectX portfolio
+ * at www.prjx.com, and Dexscreener pair pages.
  *
- * SECURITY POSTURE — read this before changing anything here.
+ * SECURITY POSTURE: read this before changing anything here.
  *
- * This is the only LPLens code that runs on a web page, and it runs on the
- * page where transactions get approved. Three properties keep that safe, and
- * all three are load-bearing:
+ * This is the persistent LPLens code that runs on a web page, and it runs on
+ * pages where transactions may get approved. Three properties keep that safe,
+ * and all three are load-bearing:
  *
- *   1. APPEND-ONLY. It adds exactly one node and never reads, moves, or
- *      rewrites anything Uniswap rendered. It therefore cannot alter what you
- *      are shown before you sign.
- *   2. ISOLATED WORLD. Content scripts cannot see page JavaScript, so
- *      `window.ethereum` and the wallet are unreachable from here by
- *      construction rather than by good behaviour.
+ *   1. ADDITIVE. It adds only LPLens-owned nodes and never moves or rewrites
+ *      anything Uniswap rendered. It therefore cannot alter what you are shown
+ *      before you sign.
+ *   2. ISOLATED WORLD. This content script cannot see page JavaScript, so
+ *      `window.ethereum` and the wallet remain unreachable from here. The
+ *      separately approved Dexscreener chart feature asks the service worker
+ *      for short-lived chart measurements. It never injects from this file or
+ *      creates a persistent bridge.
  *   3. NO NETWORK. MV3 content scripts have no cross-origin privileges. Every
  *      RPC call happens in the service worker; this file only messages it.
  *
@@ -27,7 +29,12 @@
 
 // Shared renderer, loaded ahead of this file by the manifest. Keeping these
 // in one place is what stops the popup and the overlay drifting apart again.
-const { CSS, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar, details, rebalanceLine } = globalThis.LPLens;
+const {
+  CSS, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar, details,
+  rebalanceLine, dexscreenerOrientation, dexscreenerRangeRuler,
+} = globalThis.LPLens;
+
+const DEXSCREENER_CHART_CONSENT_KEY = 'dexscreenerChartConsentV1';
 
 // v4 reads through a different manager and view contract, but the URL shape
 // is identical, so the route captures the version and passes it through.
@@ -47,10 +54,24 @@ const CHAIN_SLUGS = {
 
 const HOST_ID = 'lplens-overlay-host';
 const LIST_HOST_ID = 'lplens-list-host';
+const DEXSCREENER_CHART_HOST_ID = 'lplens-dexscreener-chart-host';
 // The list route is /positions with no position id after it.
 const LIST_ROUTE = /^\/positions\/?$/;
 const PROJECTX_ROUTE = /^\/portfolio\/?$/;
+const ON_DEXSCREENER = location.hostname === 'dexscreener.com';
+const DEXSCREENER_CHAIN_SLUGS = Object.freeze({
+  ethereum: 'ethereum',
+  base: 'base',
+  arbitrum: 'arbitrum',
+  polygon: 'polygon',
+  hyperevm: 'hyperevm',
+  hyperliquid: 'hyperevm',
+  robinhood: 'robinhood',
+  robinhoodchain: 'robinhood',
+});
 let lastKey = null;
+let dexscreenerPanelResizeObserver = null;
+let finishActiveDexscreenerPanelDrag = null;
 
 
 function mount() {
@@ -68,17 +89,30 @@ function mount() {
   sheet.replaceSync(CSS);
   shadow.adoptedStyleSheets = [sheet];
   const panel = document.createElement('div');
-  panel.className = 'panel';
+  panel.className = `panel${ON_DEXSCREENER ? ' dexscreener-panel' : ''}`;
   shadow.appendChild(panel);
   host.__shadow = shadow;
   document.body.appendChild(host);
+  if (ON_DEXSCREENER && typeof ResizeObserver === 'function') {
+    if (dexscreenerPanelResizeObserver) dexscreenerPanelResizeObserver.disconnect();
+    dexscreenerPanelResizeObserver = new ResizeObserver(() => {
+      if (!panel.isConnected || panel.classList.contains('dragging')
+          || !dexscreenerPanelPlacement) return;
+      applyDexscreenerPanelPlacement(panel);
+    });
+    dexscreenerPanelResizeObserver.observe(panel);
+  }
   return shadow;
 }
 
 // Collapsed state is remembered. Without this the panel reopened on every SPA
 // navigation and every reload, so "get out of the way of the chart" had to be
 // re-done constantly.
+const PANEL_COLLAPSED_KEY = ON_DEXSCREENER
+  ? 'dexscreenerPanelCollapsed'
+  : 'panelCollapsed';
 let collapsed = false;
+let collapsedPreferenceGeneration = 0;
 // Set once the user opens the panel by hand, so an automatic collapse from a
 // tight layout never overrides a deliberate choice.
 let userExpanded = false;
@@ -88,11 +122,26 @@ try {
   chrome.storage.local.get('showDetails', (s) => { showDetails = !!(s && s.showDetails); });
 } catch { /* orphaned context */ }
 try {
-  chrome.storage.local.get('panelCollapsed', (s) => {
-    collapsed = !!(s && s.panelCollapsed);
-    const host = document.getElementById(HOST_ID);
-    if (host) host.__shadow.querySelector('.panel').classList.toggle('collapsed', collapsed);
-  });
+  const loadGeneration = collapsedPreferenceGeneration;
+  chrome.storage.local.get(
+    ON_DEXSCREENER ? [PANEL_COLLAPSED_KEY, 'panelCollapsed'] : PANEL_COLLAPSED_KEY,
+    (s) => {
+      if (loadGeneration !== collapsedPreferenceGeneration) return;
+      // Migrate the old shared preference once, without continuing to let a
+      // Dexscreener choice collapse the Uniswap or ProjectX panel too.
+      const hasOwnPreference = Object.prototype.hasOwnProperty.call(
+        s || {}, PANEL_COLLAPSED_KEY,
+      );
+      collapsed = ON_DEXSCREENER && !hasOwnPreference
+        ? !!(s && s.panelCollapsed)
+        : !!(s && s[PANEL_COLLAPSED_KEY]);
+      if (ON_DEXSCREENER && !hasOwnPreference) {
+        try { chrome.storage.local.set({ [PANEL_COLLAPSED_KEY]: collapsed }); } catch {}
+      }
+      const host = document.getElementById(HOST_ID);
+      if (host) applyPanelCollapsedUI(host.__shadow.querySelector('.panel'), collapsed);
+    },
+  );
 } catch { /* orphaned context; default to open */ }
 
 /* ---------------------------------------------------------------------------
@@ -120,8 +169,122 @@ try {
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+/* ---------------------------------------------------------------------------
+ * Dexscreener panel placement.
+ *
+ * The chart uses nearly every useful pixel, so the overlay has to be movable.
+ * Placement is Dexscreener-only: ProjectX must keep its forced-left dock and
+ * Uniswap must keep measuring its gutters. Normalized coordinates survive
+ * zoom and window-size changes, while every application is clamped on-screen.
+ * ------------------------------------------------------------------------- */
+
+const DEXSCREENER_PANEL_PLACEMENT_KEY = 'dexscreenerPanelPlacementV1';
+const PANEL_VIEWPORT_MARGIN = 12;
+let dexscreenerPanelPlacement = null;
+let dexscreenerPanelPlacementGeneration = 0;
+
+// BEGIN PURE OVERLAY PANEL PLACEMENT
+function validPanelPlacement(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Number.isFinite(value.x) && Number.isFinite(value.y)
+    && value.x >= 0 && value.x <= 1 && value.y >= 0 && value.y <= 1;
+}
+
+function resolvePanelPlacement(value, size, viewport, margin = 12) {
+  if (!validPanelPlacement(value) || !size || !viewport
+      || !Number.isFinite(size.width) || !Number.isFinite(size.height)
+      || !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height)
+      || !(size.width > 0) || !(size.height > 0)
+      || !(viewport.width > 0) || !(viewport.height > 0)
+      || !Number.isFinite(margin) || margin < 0) return null;
+  const travelX = Math.max(0, viewport.width - size.width - margin * 2);
+  const travelY = Math.max(0, viewport.height - size.height - margin * 2);
+  return {
+    left: margin + value.x * travelX,
+    top: margin + value.y * travelY,
+  };
+}
+
+function panelPlacementFromRect(rect, viewport, margin = 12) {
+  if (!rect || !viewport
+      || !Number.isFinite(rect.left) || !Number.isFinite(rect.top)
+      || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)
+      || !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height)
+      || !(rect.width > 0) || !(rect.height > 0)
+      || !(viewport.width > 0) || !(viewport.height > 0)
+      || !Number.isFinite(margin) || margin < 0) return null;
+  const travelX = Math.max(0, viewport.width - rect.width - margin * 2);
+  const travelY = Math.max(0, viewport.height - rect.height - margin * 2);
+  const x = travelX > 0 ? (rect.left - margin) / travelX : 0;
+  const y = travelY > 0 ? (rect.top - margin) / travelY : 0;
+  return {
+    x: Math.max(0, Math.min(1, x)),
+    y: Math.max(0, Math.min(1, y)),
+  };
+}
+// END PURE OVERLAY PANEL PLACEMENT
+
+function setPanelPixelPosition(panel, left, top) {
+  if (!panel) return false;
+  const rect = panel.getBoundingClientRect();
+  const maxLeft = Math.max(PANEL_VIEWPORT_MARGIN,
+    innerWidth - rect.width - PANEL_VIEWPORT_MARGIN);
+  const maxTop = Math.max(PANEL_VIEWPORT_MARGIN,
+    innerHeight - rect.height - PANEL_VIEWPORT_MARGIN);
+  panel.style.left = clamp(left, PANEL_VIEWPORT_MARGIN, maxLeft) + 'px';
+  panel.style.top = clamp(top, PANEL_VIEWPORT_MARGIN, maxTop) + 'px';
+  // `bottom` exists in the shared stylesheet, so an empty inline value would
+  // reactivate the dock and leave both top and bottom constraining the panel.
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+  return true;
+}
+
+function applyDexscreenerPanelPlacement(panel) {
+  if (!ON_DEXSCREENER || !panel || !validPanelPlacement(dexscreenerPanelPlacement)) return false;
+  const rect = panel.getBoundingClientRect();
+  const target = resolvePanelPlacement(
+    dexscreenerPanelPlacement,
+    { width: rect.width, height: rect.height },
+    { width: innerWidth, height: innerHeight },
+    PANEL_VIEWPORT_MARGIN,
+  );
+  return !!target && setPanelPixelPosition(panel, target.left, target.top);
+}
+
+function rememberDexscreenerPanelPlacement(panel) {
+  if (!ON_DEXSCREENER || !panel) return;
+  const next = panelPlacementFromRect(
+    panel.getBoundingClientRect(),
+    { width: innerWidth, height: innerHeight },
+    PANEL_VIEWPORT_MARGIN,
+  );
+  if (!next) return;
+  dexscreenerPanelPlacementGeneration += 1;
+  dexscreenerPanelPlacement = next;
+  applyDexscreenerPanelPlacement(panel);
+  try { chrome.storage.local.set({ [DEXSCREENER_PANEL_PLACEMENT_KEY]: next }); } catch {}
+}
+
+try {
+  if (ON_DEXSCREENER) {
+    const loadGeneration = dexscreenerPanelPlacementGeneration;
+    chrome.storage.local.get(DEXSCREENER_PANEL_PLACEMENT_KEY, (s) => {
+      if (loadGeneration !== dexscreenerPanelPlacementGeneration) return;
+      const saved = s && s[DEXSCREENER_PANEL_PLACEMENT_KEY];
+      dexscreenerPanelPlacement = validPanelPlacement(saved) ? saved : null;
+      const host = document.getElementById(HOST_ID);
+      if (host && dexscreenerPanelPlacement) {
+        applyDexscreenerPanelPlacement(host.__shadow.querySelector('.panel'));
+      }
+    });
+  }
+} catch { /* orphaned context; use automatic placement */ }
+
 function applyPanelSize(panel) {
-  if (!panel || !panelSize) return false;
+  // The legacy resize grip assumes a bottom-docked panel. Dexscreener is free
+  // positioned now, and its compact mode is the supported smaller footprint.
+  if (ON_DEXSCREENER || !panel || !panelSize) return false;
   panel.style.width = clamp(panelSize.w, 260, innerWidth - 32) + 'px';
   panel.style.maxHeight = clamp(panelSize.h, 140, innerHeight - 32) + 'px';
   return true;
@@ -171,6 +334,119 @@ function attachGrip(panel, dockedRight) {
   });
 }
 
+function attachDexscreenerPanelDrag(panel) {
+  if (!ON_DEXSCREENER || !panel) return;
+  const header = panel.querySelector('.hd');
+  if (!header) return;
+  header.classList.add('panel-drag-handle');
+  header.title = 'Drag to move LPLens. Double-click to reset position.';
+
+  header.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest('button, a, input, select, textarea, [role="button"]')) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (finishActiveDexscreenerPanelDrag) finishActiveDexscreenerPanelDrag();
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    let finished = false;
+    let dragOffsetLeft = 0;
+    let dragOffsetTop = 0;
+    try { header.setPointerCapture(pointerId); } catch {}
+
+    const onMove = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
+      moveEvent.stopPropagation();
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      if (!moved) {
+        moved = true;
+        dexscreenerPanelPlacementGeneration += 1;
+        const currentRect = panel.getBoundingClientRect();
+        dragOffsetLeft = currentRect.left - moveEvent.clientX;
+        dragOffsetTop = currentRect.top - moveEvent.clientY;
+        panel.classList.add('dragging');
+      }
+      setPanelPixelPosition(
+        panel,
+        moveEvent.clientX + dragOffsetLeft,
+        moveEvent.clientY + dragOffsetTop,
+      );
+      const livePlacement = panelPlacementFromRect(
+        panel.getBoundingClientRect(),
+        { width: innerWidth, height: innerHeight },
+        PANEL_VIEWPORT_MARGIN,
+      );
+      if (livePlacement) dexscreenerPanelPlacement = livePlacement;
+    };
+
+    let complete;
+    const finish = (finishEvent) => {
+      if (finishEvent.pointerId !== undefined && finishEvent.pointerId !== pointerId) return;
+      finishEvent.stopPropagation();
+      complete();
+    };
+    complete = () => {
+      if (finished) return;
+      finished = true;
+      header.removeEventListener('pointermove', onMove);
+      header.removeEventListener('pointerup', finish);
+      header.removeEventListener('pointercancel', finish);
+      header.removeEventListener('lostpointercapture', finish);
+      panel.classList.remove('dragging');
+      if (moved) rememberDexscreenerPanelPlacement(panel);
+      if (finishActiveDexscreenerPanelDrag === complete) {
+        finishActiveDexscreenerPanelDrag = null;
+      }
+      try {
+        if (header.hasPointerCapture(pointerId)) header.releasePointerCapture(pointerId);
+      } catch {}
+    };
+    finishActiveDexscreenerPanelDrag = complete;
+
+    header.addEventListener('pointermove', onMove);
+    header.addEventListener('pointerup', finish);
+    header.addEventListener('pointercancel', finish);
+    header.addEventListener('lostpointercapture', finish);
+  });
+
+  header.addEventListener('dblclick', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest('button, a, input, select, textarea, [role="button"]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dexscreenerPanelPlacementGeneration += 1;
+    dexscreenerPanelPlacement = null;
+    panel.style.left = '';
+    panel.style.top = '';
+    panel.style.right = '';
+    panel.style.bottom = '';
+    try { chrome.storage.local.remove(DEXSCREENER_PANEL_PLACEMENT_KEY); } catch {}
+    placePanel(panel);
+  });
+}
+
+function applyPanelCollapsedUI(panel, isCollapsed) {
+  if (!panel) return;
+  panel.classList.toggle('collapsed', isCollapsed);
+  const button = panel.querySelector('#lplens-toggle');
+  if (button) {
+    button.textContent = isCollapsed ? '+' : '−';
+    button.title = isCollapsed ? 'expand' : 'collapse';
+    button.setAttribute('aria-expanded', String(!isCollapsed));
+    button.setAttribute('aria-label', `${isCollapsed ? 'Expand' : 'Collapse'} LPLens panel`);
+  }
+  if (ON_DEXSCREENER && dexscreenerPanelPlacement) {
+    applyDexscreenerPanelPlacement(panel);
+  }
+}
+
 /**
  * Adaptive placement for the detail panel.
  *
@@ -204,13 +480,26 @@ function placePanel(panel) {
   const room = useRight ? roomRight : roomLeft;
   const width = Math.min(MAX, room);
 
+  panel.style.top = '';
+
   // A size the user chose by hand outranks the computed fit.
   if (applyPanelSize(panel)) {
     panel.style.left = useRight ? '' : GAP + 'px';
     panel.style.right = useRight ? GAP + 'px' : '';
+    panel.style.bottom = GAP + 'px';
     return true;
   }
   panel.style.width = width >= MIN ? width + 'px' : '';
+
+  // A dragged Dexscreener panel no longer belongs to either gutter. Its saved
+  // normalized anchor is applied after width selection so zoom and compacting
+  // cannot strand it off-screen.
+  if (ON_DEXSCREENER && applyDexscreenerPanelPlacement(panel)) {
+    panel.dataset.overlapping = '';
+    return true;
+  }
+
+  panel.style.bottom = GAP + 'px';
   if (width >= MIN) {
     panel.style.left = useRight ? '' : GAP + 'px';
     panel.style.right = useRight ? GAP + 'px' : '';
@@ -228,11 +517,18 @@ function placePanel(panel) {
 function render(html, openWhenOverlapping = false) {
   const shadow = mount();
   const panel = shadow.querySelector('.panel');
+  // A network response can rerender the initial Checking card while the user
+  // is dragging it. Finish that gesture first so replacing the header cannot
+  // redock the panel or strand its old pointer capture.
+  if (ON_DEXSCREENER && finishActiveDexscreenerPanelDrag) {
+    finishActiveDexscreenerPanelDrag();
+  }
   panel.innerHTML = html;
   const fits = placePanel(panel);
-  attachGrip(panel, !panel.style.left);
+  if (!ON_DEXSCREENER) attachGrip(panel, !panel.style.left);
   const startsCollapsed = collapsed || (!fits && !userExpanded && !openWhenOverlapping);
-  panel.classList.toggle('collapsed', startsCollapsed);
+  applyPanelCollapsedUI(panel, startsCollapsed);
+  attachDexscreenerPanelDrag(panel);
   const more = panel.querySelector('#lplens-more');
   if (more) {
     panel.classList.toggle('showmore', showDetails);
@@ -246,15 +542,12 @@ function render(html, openWhenOverlapping = false) {
   }
   const btn = panel.querySelector('#lplens-toggle');
   if (btn) {
-    btn.textContent = startsCollapsed ? '+' : '−';
-    btn.title = startsCollapsed ? 'expand' : 'collapse';
     btn.onclick = () => {
+      collapsedPreferenceGeneration += 1;
       collapsed = !panel.classList.contains('collapsed');
       if (!collapsed) userExpanded = true;
-      panel.classList.toggle('collapsed', collapsed);
-      btn.textContent = collapsed ? '+' : '−';
-      btn.title = collapsed ? 'expand' : 'collapse';
-      try { chrome.storage.local.set({ panelCollapsed: collapsed }); } catch {}
+      applyPanelCollapsedUI(panel, collapsed);
+      try { chrome.storage.local.set({ [PANEL_COLLAPSED_KEY]: collapsed }); } catch {}
     };
   }
 }
@@ -267,9 +560,12 @@ const VERSION = (() => {
 })();
 
 const head = (right) => `
-  <div class="hd">
+  <div class="hd${ON_DEXSCREENER ? ' chart-range-header' : ''}">
     <span class="brand">LPLens <span class="tag">read-only v${esc(VERSION)}</span></span>
-    <span class="right">${right || ''}<button id="lplens-toggle" title="collapse">-</button></span>
+    ${ON_DEXSCREENER ? '<span class="panel-drag-mark" aria-hidden="true">⠿</span>' : ''}
+    <span class="right">${right || ''}<button id="lplens-toggle" type="button"
+      title="collapse" aria-expanded="true" aria-label="Collapse LPLens panel">−</button></span>
+    ${ON_DEXSCREENER ? '<span class="chart-range-banner">chart range</span>' : ''}
   </div>`;
 
 
@@ -315,6 +611,15 @@ function body(d) {
 }
 
 function teardown() {
+  if (finishActiveDexscreenerPanelDrag) finishActiveDexscreenerPanelDrag();
+  stopDexscreenerChartSession();
+  if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
+  dexscreenerDataTimer = null;
+  dexscreenerHref = '';
+  if (dexscreenerPanelResizeObserver) {
+    dexscreenerPanelResizeObserver.disconnect();
+    dexscreenerPanelResizeObserver = null;
+  }
   const host = document.getElementById(HOST_ID);
   if (host) host.remove();
   lastKey = null;
@@ -419,7 +724,7 @@ const placeSoon = () => {
   requestAnimationFrame(placeGutterCards);
 };
 
-function gutterCard(row) {
+function gutterCard(row, includeRange = true) {
   if (!row.data) {
     return `<div class="gc-pair">${esc(row.label || '')}</div><div class="gc-sub">reading…</div>`;
   }
@@ -444,7 +749,7 @@ function gutterCard(row) {
   const lo = Math.min(d.priceLower, d.priceUpper);
   const hi = Math.max(d.priceLower, d.priceUpper);
   let bar = '';
-  if (lo > 0 && hi > lo && Number.isFinite(lo) && Number.isFinite(hi)) {
+  if (includeRange && lo > 0 && hi > lo && Number.isFinite(lo) && Number.isFinite(hi)) {
     const nowP = closed ? h.exit.price : d.price;
     const lnLo = Math.log(lo), lnHi = Math.log(hi), lnNow = Math.log(nowP);
     const span = lnHi - lnLo;
@@ -496,18 +801,32 @@ function portfolioCard(position) {
   return `<div class="portfolio-card">${gutterCard({ data: position })}</div>`;
 }
 
+function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError, rangeId = '') {
+  const tokenId = position && position.tokenId !== undefined ? String(position.tokenId) : '';
+  return `<div class="portfolio-card"${rangeId ? ` data-dex-range-id="${esc(rangeId)}"` : ''}>
+    ${gutterCard({ data: position }, false)}
+    ${tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
+    ${dexscreenerRangeRuler(position, pair, wrappedNative, pairError)}
+    ${rangeId ? `<div class="dex-range-aligned">
+      <span class="dex-range-aligned-copy">Range drawn on chart</span>
+      <span class="dex-range-aligned-mode">chart scale pending</span>
+    </div><div class="gc-sub dex-chart-status" hidden></div>` : ''}
+  </div>`;
+}
+
 /**
  * ProjectX portfolio (/portfolio)
  *
  * ProjectX renders its position actions inline and does not put NFT ids in
  * stable semantic links. Reading the connected wallet would violate LPLens's
  * no-wallet boundary, so this panel instead asks the service worker for the
- * ProjectX wallet the user explicitly selected in LPLens. No ProjectX page
+ * active overlay wallet explicitly selected in LPLens. No ProjectX page
  * content is needed or sent anywhere.
  */
 let projectxBusy = false;
 let projectxPending = false;
 async function syncProjectXPortfolio() {
+  if (torndown) return;
   const key = 'projectx:portfolio';
   if (projectxBusy) {
     projectxPending = true;
@@ -518,7 +837,7 @@ async function syncProjectXPortfolio() {
   lastKey = key;
   teardownList();
   render(head('<span class="pill">ProjectX</span>') +
-    '<div class="bd"><div class="note">Reading the ProjectX wallet selected in LPLens…</div></div>', true);
+    '<div class="bd"><div class="note">Reading the active wallet selected in LPLens…</div></div>', true);
 
   try {
     if (!contextAlive()) return shutdownOrphan();
@@ -529,6 +848,7 @@ async function syncProjectXPortfolio() {
       if (isOrphanError(err)) return shutdownOrphan();
       res = { ok: false, error: err.message || String(err) };
     }
+    if (torndown) return;
     if (lastKey !== key) return;
 
     if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
@@ -550,13 +870,17 @@ async function syncProjectXPortfolio() {
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
     const content = positions.length
       ? positions.map(portfolioCard).join('')
-      : '<div class="note">No open ProjectX positions found for this address.</div>';
+      : '<div class="note">No open ProjectX positions found for the active wallet.</div>';
     render(head(`<span class="pill">ProjectX · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Selected LPLens wallet: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
       ${content}
     </div>`, true);
   } finally {
     projectxBusy = false;
+    if (torndown) {
+      projectxPending = false;
+      return;
+    }
     if (projectxPending) {
       projectxPending = false;
       lastKey = null;
@@ -565,7 +889,646 @@ async function syncProjectXPortfolio() {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Optional Dexscreener chart alignment.
+ *
+ * The persistent content script stays in Chrome's isolated world. It sends
+ * only unlabelled numeric ranges plus the exact URL to the service worker. The
+ * worker performs short-lived chart measurements only after separate consent
+ * and returns viewport geometry. This layer treats each response as hostile
+ * input, paints its own SVG, and never touches the chart, page JavaScript, or a
+ * wallet provider.
+ * ------------------------------------------------------------------------- */
+
+// BEGIN PURE DEXSCREENER CHART RECOVERY
+const DEXSCREENER_CHART_POLL_MS = 750;
+const DEXSCREENER_CHART_RETRY_MS = [100, 200, 400];
+const DEXSCREENER_CHART_NOTICE_MS = 1_500;
+const DEXSCREENER_CHART_TRANSIENT_FAILURES = new Set([
+  'chart-frame-ambiguous', 'chart-frame-unavailable', 'chart-api-unavailable',
+  'unsupported-chart-mode', 'chart-mode-conflict', 'chart-mode-unverified',
+  'chart-geometry-unavailable', 'coordinate-unavailable',
+  'measurement-failed', 'execution-timeout', 'execution-failed', 'invalid-result',
+  'isolated-validation-failed', 'paint-failed',
+]);
+
+function planDexscreenerChartRecovery(reason, misses, elapsed) {
+  const transient = reason === 'no-response'
+    || DEXSCREENER_CHART_TRANSIENT_FAILURES.has(reason);
+  const retryIndex = Math.max(0, misses - 1);
+  const retry = transient && retryIndex < DEXSCREENER_CHART_RETRY_MS.length
+    ? DEXSCREENER_CHART_RETRY_MS[retryIndex]
+    : DEXSCREENER_CHART_POLL_MS;
+  return {
+    transient,
+    showFailure: !transient || elapsed >= DEXSCREENER_CHART_NOTICE_MS,
+    showAligning: transient && elapsed < DEXSCREENER_CHART_NOTICE_MS,
+    delay: retry,
+  };
+}
+// END PURE DEXSCREENER CHART RECOVERY
+
+const DEXSCREENER_CHART_CSS = `
+:host {
+  all: initial !important; position: fixed !important; inset: 0 !important;
+  width: 100vw !important; height: 100vh !important; pointer-events: none !important;
+  z-index: 2147482500 !important; contain: strict !important;
+}
+svg { position: fixed; display: block; overflow: hidden; pointer-events: none; }
+.range-band { stroke: none; }
+.range-boundary { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.range-bracket { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.range-label, .mode-label {
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: .035em;
+  paint-order: stroke; stroke: rgba(8, 12, 18, .94); stroke-width: 3px; stroke-linejoin: round;
+}
+.mode-label { font-size: 9px; fill: #FFD08A; }
+`;
+
+let dexscreenerChartTimer = null;
+let dexscreenerChartSession = null;
+
+// BEGIN PURE DEXSCREENER CHART GEOMETRY
+const DEXSCREENER_CHART_MODES = new Set([
+  'price-native', 'price-usd', 'mcap-native', 'mcap-usd',
+]);
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function validateDexscreenerChartGeometry(response, expectedHref, expectedRanges, viewport) {
+  const data = response && response.ok === true && response.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)
+      || data.href !== expectedHref || !DEXSCREENER_CHART_MODES.has(data.displayMode)
+      || typeof data.inverted !== 'boolean') return null;
+  const plot = data.plot;
+  if (!plot || typeof plot !== 'object' || Array.isArray(plot)) return null;
+  const { left, top, width, height } = plot;
+  if (![left, top, width, height].every(finiteNumber)
+      || width < 120 || height < 100 || width > 20000 || height > 20000
+      || Math.abs(left) > 100000 || Math.abs(top) > 100000
+      || !viewport || !finiteNumber(viewport.width) || !finiteNumber(viewport.height)
+      || left + width <= 0 || top + height <= 0 || left >= viewport.width || top >= viewport.height) return null;
+
+  const rows = data.ranges;
+  const expectedIds = new Set(expectedRanges.map((range) => range.id));
+  if (!Array.isArray(rows) || rows.length !== expectedIds.size || rows.length > 3) return null;
+  const minY = top - height;
+  const maxY = top + 2 * height;
+  const seen = new Set();
+  const normalized = [];
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
+    const expected = expectedRanges[index];
+    const ordered = [
+      { value: row && row.loValue, y: row && row.loY },
+      { value: row && row.nowValue, y: row && row.nowY },
+      { value: row && row.hiValue, y: row && row.hiY },
+    ].sort((a, b) => a.value - b.value);
+    const coordinateOrderValid = ordered.every((point, pointIndex) => pointIndex === 0
+      || (data.inverted ? point.y >= ordered[pointIndex - 1].y
+        : point.y <= ordered[pointIndex - 1].y));
+    const collapsedAtSentinel = row && row.loY === row.hiY
+      && (row.loY === minY || row.loY === maxY);
+    if (!row || typeof row !== 'object' || Array.isArray(row)
+        || typeof row.id !== 'string' || row.id !== expected.id
+        || !expectedIds.has(row.id) || seen.has(row.id)
+        || !finiteNumber(row.loY) || !finiteNumber(row.hiY) || !finiteNumber(row.nowY)
+        || !finiteNumber(row.loValue) || !finiteNumber(row.hiValue) || !finiteNumber(row.nowValue)
+        || !(row.loValue > 0) || !(row.hiValue > row.loValue) || !(row.nowValue > 0)
+        || [row.loY, row.hiY, row.nowY].some((value) => value < minY || value > maxY)) return null;
+    const factors = [row.loValue / expected.lo, row.hiValue / expected.hi,
+      row.nowValue / expected.now];
+    const factor = factors[0];
+    if (!(factor > 0) || factors.some((value) => !finiteNumber(value)
+        || Math.abs(value - factor) > Math.max(1e-12, Math.abs(factor) * 1e-9))
+        || !coordinateOrderValid
+        || (row.loY === row.hiY && !collapsedAtSentinel)) return null;
+    seen.add(row.id);
+    normalized.push({
+      id: row.id, loY: row.loY, hiY: row.hiY, nowY: row.nowY,
+      loValue: row.loValue, hiValue: row.hiValue, nowValue: row.nowValue,
+    });
+  }
+  if (seen.size !== expectedIds.size) return null;
+  return {
+    href: expectedHref,
+    displayMode: data.displayMode,
+    inverted: data.inverted,
+    plot: { left, top, width, height },
+    ranges: normalized,
+  };
+}
+
+function compactChartNumber(value, significant = 4) {
+  if (value >= 1000) return value.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  if (value >= 1) return value.toLocaleString('en-US', { maximumFractionDigits: 6 });
+  if (value >= 1e-6) return Number(value.toPrecision(significant)).toString();
+  return value.toExponential(2);
+}
+
+function formatDexscreenerChartValue(value, displayMode) {
+  if (displayMode.startsWith('mcap-')) {
+    const tiers = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (const [divisor, suffix] of tiers) {
+      if (value >= divisor) {
+        const compact = `${Number((value / divisor).toPrecision(3))}${suffix}`;
+        return displayMode === 'mcap-usd' ? `$${compact}` : compact;
+      }
+    }
+    const compact = compactChartNumber(value);
+    return displayMode === 'mcap-usd' ? `$${compact}` : compact;
+  }
+  return displayMode === 'price-usd' ? `$${compactChartNumber(value)}` : compactChartNumber(value);
+}
+
+function calculateDexscreenerChartShapes(geometry) {
+  const { top, width, height } = geometry.plot;
+  const equiv = geometry.displayMode !== 'price-native';
+  const modeText = geometry.displayMode === 'price-usd' ? 'CURRENT USD EQUIV'
+    : geometry.displayMode.startsWith('mcap-') ? 'CURRENT MCAP EQUIV' : '';
+  const xStart = equiv ? width * 0.72 : 0;
+  const xEnd = width - 3;
+  return {
+    equiv, modeText, xStart, xEnd,
+    ranges: geometry.ranges.map((range) => {
+      const hiY = range.hiY - top;
+      const loY = range.loY - top;
+      const rawTop = Math.min(hiY, loY);
+      const rawBottom = Math.max(hiY, loY);
+      const clippedTop = Math.max(0, rawTop);
+      const clippedBottom = Math.min(height, rawBottom);
+      const bandHeight = Math.max(2.5, clippedBottom - clippedTop);
+      return {
+        id: range.id, hiY, loY, rawTop, rawBottom,
+        hiLabel: formatDexscreenerChartValue(range.hiValue, geometry.displayMode),
+        loLabel: formatDexscreenerChartValue(range.loValue, geometry.displayMode),
+        whollyAbove: rawBottom < 0,
+        whollyBelow: rawTop > height,
+        rangeSpansView: rawTop < 0 && rawBottom > height,
+        bandHeight,
+        bandY: Math.max(0, Math.min(height - bandHeight,
+          (clippedTop + clippedBottom - bandHeight) / 2)),
+      };
+    }),
+  };
+}
+// END PURE DEXSCREENER CHART GEOMETRY
+
+function chartLayerHost() {
+  const existing = document.getElementById(DEXSCREENER_CHART_HOST_ID);
+  if (existing) return existing.__shadow ? existing : null;
+  const host = document.createElement('div');
+  host.id = DEXSCREENER_CHART_HOST_ID;
+  host.setAttribute('aria-hidden', 'true');
+  for (const [name, value] of Object.entries({
+    all: 'initial', position: 'fixed', inset: '0', width: '100vw', height: '100vh',
+    pointerEvents: 'none', zIndex: '2147482500', contain: 'strict',
+  })) host.style.setProperty(name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`), value, 'important');
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(DEXSCREENER_CHART_CSS);
+  shadow.adoptedStyleSheets = [sheet];
+  host.__shadow = shadow;
+  document.documentElement.appendChild(host);
+  return host;
+}
+
+function resetDexscreenerAlignedCards() {
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    card.classList.remove('chart-range-aligned');
+    const mode = card.querySelector('.dex-range-aligned-mode');
+    if (mode) mode.textContent = 'chart scale pending';
+    const status = card.querySelector('.dex-chart-status');
+    if (status) {
+      status.classList.remove('is-aligning');
+      status.hidden = true;
+      status.textContent = '';
+    }
+  }
+}
+
+function showDexscreenerChartFailure(reason) {
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  const safeReason = /^[a-z0-9-]{1,48}$/.test(String(reason || ''))
+    ? String(reason) : 'unknown';
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    const status = card.querySelector('.dex-chart-status');
+    if (!status) continue;
+    status.classList.remove('is-aligning');
+    status.textContent = `chart: ${safeReason}`;
+    status.hidden = false;
+  }
+}
+
+function clearDexscreenerChartVisual() {
+  const host = document.getElementById(DEXSCREENER_CHART_HOST_ID);
+  if (host && host.__shadow) host.remove();
+  resetDexscreenerAlignedCards();
+}
+
+function showDexscreenerChartAligning() {
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return;
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    const status = card.querySelector('.dex-chart-status');
+    if (!status) continue;
+    status.classList.add('is-aligning');
+    status.textContent = 'chart aligning';
+    status.hidden = false;
+  }
+}
+
+function stopDexscreenerChartSession() {
+  if (dexscreenerChartTimer !== null) clearTimeout(dexscreenerChartTimer);
+  dexscreenerChartTimer = null;
+  dexscreenerChartSession = null;
+  clearDexscreenerChartVisual();
+}
+
+function prepareDexscreenerChartRanges(positions, pair, wrappedNative) {
+  const ranges = [];
+  const rangeIdByIndex = new Map();
+  for (let i = 0; i < positions.length && ranges.length < 3; i++) {
+    const oriented = dexscreenerOrientation(positions[i], pair, wrappedNative);
+    if (!oriented || !oriented.valid || !finiteNumber(oriented.lo)
+        || !finiteNumber(oriented.hi) || !finiteNumber(oriented.now)
+        || !(oriented.lo > 0) || !(oriented.hi > oriented.lo) || !(oriented.now > 0)) continue;
+    const id = `r${ranges.length}`;
+    ranges.push({ id, lo: oriented.lo, hi: oriented.hi, now: oriented.now });
+    rangeIdByIndex.set(i, id);
+  }
+  return { ranges, rangeIdByIndex };
+}
+
+function appendSvg(parent, name, attrs = {}, text = '') {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+  if (text) node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}
+
+function paintDexscreenerChartGeometry(geometry) {
+  const { left, top, width, height } = geometry.plot;
+  const layout = calculateDexscreenerChartShapes(geometry);
+  const { equiv, modeText, xStart, xEnd } = layout;
+  const colors = ['#E8A33D', '#55C3B4', '#B4A0FF'];
+  const dashes = ['', '8 5', '2 5'];
+  const host = chartLayerHost();
+  if (!host || !host.__shadow) return false;
+  host.style.setProperty('opacity', '1', 'important');
+  const shadow = host.__shadow;
+  const svg = appendSvg(document.createDocumentFragment(), 'svg', {
+    viewBox: `0 0 ${width} ${height}`,
+    width, height,
+    style: `left:${left}px;top:${top}px;width:${width}px;height:${height}px`,
+  });
+  svg.setAttribute('aria-hidden', 'true');
+
+  if (equiv) {
+    appendSvg(svg, 'rect', {
+      x: xStart, y: 0, width: Math.max(0, width - xStart), height,
+      fill: 'rgba(232, 163, 61, .025)',
+    });
+    appendSvg(svg, 'line', {
+      x1: xStart, x2: xStart, y1: 0, y2: height,
+      class: 'range-bracket', stroke: 'rgba(232, 163, 61, .45)', 'stroke-dasharray': '3 5',
+    });
+    appendSvg(svg, 'text', { x: xStart + 7, y: 14, class: 'mode-label' }, modeText);
+  }
+
+  layout.ranges.forEach((range, index) => {
+    const color = colors[index] || colors[0];
+    const dash = dashes[index] || '';
+    const { hiY, loY, whollyAbove, whollyBelow } = range;
+    const labelX = xEnd - (index * 9);
+
+    const label = (y, value, anchor = 'end') => appendSvg(svg, 'text', {
+      x: anchor === 'end' ? labelX : xStart + 7,
+      y: Math.max(11, Math.min(height - 5, y)),
+      class: 'range-label', fill: color, 'text-anchor': anchor,
+    }, value);
+
+    if (whollyAbove || whollyBelow) {
+      const edgeY = whollyAbove ? 1.5 + index * 3 : height - 1.5 - index * 3;
+      appendSvg(svg, 'line', {
+        x1: xStart, x2: xEnd, y1: edgeY, y2: edgeY,
+        class: 'range-boundary', stroke: color, 'stroke-dasharray': dash || '4 4',
+      });
+      const maxY = whollyAbove ? 12 + index * 26 : height - 20 - index * 26;
+      const minY = whollyAbove ? 24 + index * 26 : height - 7 - index * 26;
+      label(maxY, `${whollyAbove ? '▲' : '▼'} LP MAX ${range.hiLabel} ${whollyAbove ? 'ABOVE' : 'BELOW'}`);
+      label(minY, `${whollyAbove ? '▲' : '▼'} LP MIN ${range.loLabel} ${whollyAbove ? 'ABOVE' : 'BELOW'}`);
+      return;
+    }
+
+    appendSvg(svg, 'rect', {
+      x: xStart, y: range.bandY, width: Math.max(0, xEnd - xStart), height: range.bandHeight,
+      class: 'range-band', fill: color, opacity: index === 0 ? '.09' : '.055',
+    });
+
+    if (range.rangeSpansView) {
+      label(26 + index * 13, 'LP RANGE EXTENDS BEYOND VIEW');
+    }
+
+    const narrow = Math.abs(loY - hiY) < 20;
+    const drawBound = (y, kind, valueLabel) => {
+      if (y >= 0 && y <= height) {
+        appendSvg(svg, 'line', {
+          x1: xStart, x2: xEnd, y1: y, y2: y,
+          class: 'range-boundary', stroke: color, 'stroke-dasharray': dash,
+        });
+        const labelY = narrow
+          ? (hiY + loY) / 2 + (kind === 'MAX' ? -5 : 12)
+          : y + (kind === 'MAX' ? -5 : 12);
+        label(labelY, `LP ${kind} ${valueLabel}`);
+      } else {
+        const above = y < 0;
+        label(above ? 12 + index * 13 : height - 7 - index * 13,
+          `${above ? '▲' : '▼'} LP ${kind} ${valueLabel} ${above ? 'ABOVE' : 'BELOW'} VIEW`);
+      }
+    };
+    drawBound(hiY, 'MAX', range.hiLabel);
+    drawBound(loY, 'MIN', range.loLabel);
+  });
+
+  shadow.replaceChildren(svg);
+
+  const alignedIds = new Set(geometry.ranges.map((range) => range.id));
+  const panelHost = document.getElementById(HOST_ID);
+  const panelShadow = panelHost && panelHost.__shadow;
+  if (!panelShadow) return true;
+  const alignedMode = geometry.displayMode === 'price-native' ? 'exact native scale'
+    : geometry.displayMode === 'price-usd' ? 'current USD equivalent'
+      : 'current market cap equivalent';
+  for (const card of panelShadow.querySelectorAll('[data-dex-range-id]')) {
+    const aligned = alignedIds.has(String(card.dataset.dexRangeId || ''));
+    card.classList.toggle('chart-range-aligned', aligned);
+    const mode = card.querySelector('.dex-range-aligned-mode');
+    if (mode && aligned) mode.textContent = alignedMode;
+    const status = card.querySelector('.dex-chart-status');
+    if (status) {
+      status.classList.remove('is-aligning');
+      status.hidden = true;
+      status.textContent = '';
+    }
+  }
+  return true;
+}
+
+function scheduleDexscreenerChartGeometry(session, delay = DEXSCREENER_CHART_POLL_MS) {
+  if (dexscreenerChartSession !== session) return;
+  if (dexscreenerChartTimer !== null) clearTimeout(dexscreenerChartTimer);
+  dexscreenerChartTimer = setTimeout(() => {
+    dexscreenerChartTimer = null;
+    void refreshDexscreenerChartGeometry(session);
+  }, delay);
+}
+
+async function refreshDexscreenerChartGeometry(session) {
+  if (dexscreenerChartSession !== session || session.href !== location.href
+      || session.generation !== dexscreenerGeneration || lastKey !== session.key) {
+    if (dexscreenerChartSession === session) stopDexscreenerChartSession();
+    return;
+  }
+  if (!contextAlive()) return shutdownOrphan();
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: 'LPLENS_DEXSCREENER_CHART_GEOMETRY',
+      href: session.href,
+      ranges: session.ranges.map(({ id, lo, hi, now }) => ({ id, lo, hi, now })),
+    });
+  } catch (err) {
+    if (isOrphanError(err)) return shutdownOrphan();
+    response = null;
+  }
+  if (dexscreenerChartSession !== session || session.href !== location.href
+      || session.generation !== dexscreenerGeneration || lastKey !== session.key) return;
+  if (response && response.reason === 'permission-revoked') return shutdownRevoked();
+  const geometry = validateDexscreenerChartGeometry(
+    response, session.href, session.ranges, { width: innerWidth, height: innerHeight },
+  );
+  let painted = false;
+  try {
+    painted = Boolean(geometry && paintDexscreenerChartGeometry(geometry));
+  } catch {
+    painted = false;
+  }
+  if (painted) {
+    session.misses = 0;
+    session.firstMissAt = 0;
+    session.lastFailure = '';
+    scheduleDexscreenerChartGeometry(session);
+    return;
+  }
+
+  const reason = response && typeof response.reason === 'string'
+    ? response.reason
+    : response && response.ok === true
+      ? geometry ? 'paint-failed' : 'isolated-validation-failed'
+      : 'no-response';
+  session.misses += 1;
+  session.lastFailure = reason;
+  const now = Date.now();
+  if (!session.firstMissAt) session.firstMissAt = now;
+  const elapsed = now - session.firstMissAt;
+  const recovery = planDexscreenerChartRecovery(reason, session.misses, elapsed);
+  clearDexscreenerChartVisual();
+  if (recovery.showFailure) showDexscreenerChartFailure(reason);
+  else if (recovery.showAligning) showDexscreenerChartAligning();
+  scheduleDexscreenerChartGeometry(session, recovery.delay);
+}
+
+function startDexscreenerChartSession(key, generation, href, ranges) {
+  stopDexscreenerChartSession();
+  if (!ranges.length) return;
+  const session = {
+    key, generation, href,
+    ranges: ranges.slice(0, 3).map(({ id, lo, hi, now }) => ({ id, lo, hi, now })),
+    misses: 0,
+    firstMissAt: 0,
+    lastFailure: '',
+  };
+  dexscreenerChartSession = session;
+  void refreshDexscreenerChartGeometry(session);
+}
+
+/**
+ * Dexscreener pair pages.
+ *
+ * Only the route is used: /<chain>/<pool-address-or-v4-pool-id>. The address
+ * still comes from LPLens local storage through the service worker. With
+ * separate chart consent, this script also requests chart-scale geometry
+ * through the worker. This isolated script reads no page text, connected
+ * wallet or provider object.
+ */
+let dexscreenerBusy = false;
+let dexscreenerPending = false;
+let dexscreenerGeneration = 0;
+let dexscreenerHref = '';
+let dexscreenerChartConsented = false;
+let dexscreenerDataTimer = null;
+const DEXSCREENER_DATA_REFRESH_MS = 65_000;
+
+function scheduleDexscreenerDataRefresh() {
+  if (!ON_DEXSCREENER || torndown) return;
+  if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
+  dexscreenerDataTimer = setTimeout(() => {
+    dexscreenerDataTimer = null;
+    if (torndown || !dexscreenerRoute()) return;
+    dexscreenerGeneration++;
+    stopDexscreenerChartSession();
+    lastKey = null;
+    void syncDexscreener();
+  }, DEXSCREENER_DATA_REFRESH_MS);
+}
+
+function applyDexscreenerChartConsent(value) {
+  const next = value === true;
+  if (next === dexscreenerChartConsented) return;
+  dexscreenerChartConsented = next;
+  if (!ON_DEXSCREENER) return;
+  dexscreenerGeneration++;
+  stopDexscreenerChartSession();
+  if (dexscreenerBusy) dexscreenerPending = true;
+  lastKey = null;
+  void syncDexscreener();
+}
+
+try {
+  chrome.storage.local.get(DEXSCREENER_CHART_CONSENT_KEY, (stored) => {
+    applyDexscreenerChartConsent(
+      stored && stored[DEXSCREENER_CHART_CONSENT_KEY],
+    );
+  });
+} catch { /* orphaned context; chart alignment stays off */ }
+
+function dexscreenerRoute() {
+  if (!ON_DEXSCREENER) return null;
+  const parts = location.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  const chain = DEXSCREENER_CHAIN_SLUGS[String(parts[0] || '').toLowerCase()];
+  const poolRef = String(parts[1] || '').toLowerCase();
+  if (!chain || !/^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(poolRef)) return null;
+  return { chain, poolRef };
+}
+
+async function syncDexscreener() {
+  if (torndown) return;
+  const route = dexscreenerRoute();
+  if (!route) return teardown();
+  const key = `dexscreener:${route.chain}:${route.poolRef}`;
+  const href = location.href;
+  if (dexscreenerHref && dexscreenerHref !== href) {
+    stopDexscreenerChartSession();
+    if (lastKey === key) lastKey = null;
+  }
+  if (dexscreenerBusy) {
+    if (lastKey !== key || dexscreenerHref !== href) {
+      lastKey = key;
+      dexscreenerPending = true;
+    }
+    return;
+  }
+  if (lastKey === key && dexscreenerHref === href) return;
+  dexscreenerBusy = true;
+  lastKey = key;
+  dexscreenerHref = href;
+  const generation = dexscreenerGeneration;
+  teardownList();
+  render(head('<span class="pill">Dexscreener</span>')
+    + '<div class="bd"><div class="note">Checking the active wallet selected in LPLens for this pool…</div></div>');
+
+  try {
+    if (!contextAlive()) return shutdownOrphan();
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({
+        type: 'LPLENS_DEXSCREENER_POOL',
+        chain: route.chain,
+        poolRef: route.poolRef,
+      });
+    } catch (err) {
+      if (isOrphanError(err)) return shutdownOrphan();
+      res = { ok: false, error: err.message || String(err) };
+    }
+    if (torndown) return;
+    if (lastKey !== key || generation !== dexscreenerGeneration || href !== location.href) return;
+    if (res && res.permissionRevoked) return shutdownRevoked();
+
+    if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+      stopDexscreenerChartSession();
+      const e = res.entitlement || {};
+      render(head('<span class="pill">Dexscreener</span>') + `<div class="bd">
+        <div class="note">${esc(e.reason || 'LPLens access is required.')} Check Settings or ask Dan.</div>
+      </div>`);
+      return;
+    }
+    if (!res || !res.ok) {
+      stopDexscreenerChartSession();
+      render(head('<span class="pill">Dexscreener</span>') + `<div class="bd">
+        <div class="err note">${esc(res && res.error || 'no response')}</div>
+      </div>`);
+      return;
+    }
+
+    const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
+    const pair = res.data && res.data.pair || null;
+    const pairError = String(res.data && res.data.pairError || '');
+    const wrappedNative = String(res.data && res.data.wrappedNative || '');
+    const address = String(res.data && res.data.address || '');
+    const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+    const shown = positions.slice(0, 8);
+    const prepared = dexscreenerChartConsented
+      ? prepareDexscreenerChartRanges(shown, pair, wrappedNative)
+      : { ranges: [], rangeIdByIndex: new Map() };
+    const overflow = positions.length - shown.length;
+    const content = positions.length
+      ? shown.map((position, index) => dexscreenerPortfolioCard(
+        position, pair, wrappedNative, pairError, prepared.rangeIdByIndex.get(index) || '',
+      )).join('')
+        + (overflow > 0 ? `<div class="note">${overflow} more matching position${overflow === 1 ? '' : 's'} not shown here.</div>` : '')
+      : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
+    const chartNote = dexscreenerChartConsented
+      ? 'Chart alignment is on. Up to three unlabelled low, current, and high range values are shared with this page while the overlay is open. The pool and bounds are public on-chain, so Dexscreener could correlate them to a position and owner.'
+      : 'Chart alignment is off. LPLens is using its own exact on-chain range ruler. Enable chart alignment in Settings to place it on the chart.';
+    render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. ${esc(chartNote)} Dexscreener wallet data is not read.</div>
+      ${content}
+    </div>`);
+    if (dexscreenerChartConsented) {
+      startDexscreenerChartSession(key, generation, href, prepared.ranges);
+    } else {
+      stopDexscreenerChartSession();
+    }
+  } finally {
+    dexscreenerBusy = false;
+    if (torndown) {
+      dexscreenerPending = false;
+      return;
+    }
+    if (dexscreenerPending) {
+      dexscreenerPending = false;
+      lastKey = null;
+      void syncDexscreener();
+      return;
+    }
+    scheduleDexscreenerDataRefresh();
+  }
+}
+
 async function syncList() {
+  if (torndown) return;
   if (listBusy) return;
   const anchors = [...document.querySelectorAll('a[href*="/positions/v"]')];
   if (!anchors.length) return teardownList();
@@ -643,11 +1606,16 @@ async function syncList() {
           type: 'LPLENS_POSITION', chain: row.chain, tokenId: row.tokenId,
           version: row.version,
         });
-        row.data = res && res.ok ? res.data : { error: (res && res.error) || 'no response' };
+        if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+          row.data = { error: res.entitlement.reason || 'LPLens access is required; check Options.' };
+        } else {
+          row.data = res && res.ok ? res.data : { error: (res && res.error) || 'no response' };
+        }
       } catch (err) {
         if (isOrphanError(err)) return shutdownOrphan('list');
         row.data = { error: err.message || String(err) };
       }
+      if (torndown) return;
       if (listScanned !== key) return;   // rows changed while we were fetching
       paint();
     }
@@ -704,6 +1672,9 @@ let torndown = false;
 function shutdownOrphan(target) {
   if (torndown) return;
   torndown = true;
+  stopDexscreenerChartSession();
+  if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
+  dexscreenerDataTimer = null;
   try { clearInterval(pollTimer); } catch {}
   try { clearTimeout(listTimer); } catch {}
   try { listObserver.disconnect(); } catch {}
@@ -726,9 +1697,26 @@ function shutdownOrphan(target) {
       render(html);
     }
   } catch {}
+  try {
+    if (dexscreenerPanelResizeObserver) dexscreenerPanelResizeObserver.disconnect();
+  } catch {}
+}
+
+function shutdownRevoked() {
+  if (torndown) return;
+  torndown = true;
+  try { clearInterval(pollTimer); } catch {}
+  try { clearTimeout(listTimer); } catch {}
+  try { listObserver.disconnect(); } catch {}
+  try { teardown(); } catch {}
+  try { teardownList(); } catch {}
 }
 
 async function sync() {
+  if (torndown) return;
+  if (ON_DEXSCREENER) {
+    return syncDexscreener();
+  }
   if (PROJECTX_ROUTE.test(location.pathname)) {
     return syncProjectXPortfolio();
   }
@@ -821,14 +1809,43 @@ window.addEventListener('popstate', () => {
   setTimeout(sync, 50);
 });
 
-// If the user selects another ProjectX wallet in the popup while ProjectX is
-// open, the panel follows that choice without reading the site's wallet state.
+// If the user selects another active wallet in the popup or side panel, the
+// overlay follows that explicit choice without reading the site's wallet state.
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes.address || !PROJECTX_ROUTE.test(location.pathname)) return;
+    if (area !== 'local') return;
+    const addressChanged = !!changes.address;
+    const chartConsentChanged = ON_DEXSCREENER
+      && !!changes[DEXSCREENER_CHART_CONSENT_KEY];
+    if (!addressChanged && !chartConsentChanged) return;
+    if (chartConsentChanged) {
+      applyDexscreenerChartConsent(
+        changes[DEXSCREENER_CHART_CONSENT_KEY].newValue,
+      );
+      if (!addressChanged) return;
+    }
+    if (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER) return;
+    if (ON_DEXSCREENER) {
+      dexscreenerGeneration++;
+      stopDexscreenerChartSession();
+      if (dexscreenerBusy) dexscreenerPending = true;
+    }
     lastKey = null;
     sync();
   });
 } catch { /* orphaned context */ }
+
+try {
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== 'LPLENS_OVERLAY_ACCESS_REVOKED'
+        || !Array.isArray(msg.origins)) return false;
+    if (msg.origins.includes(`${location.origin}/*`)) shutdownRevoked();
+    return false;
+  });
+} catch { /* orphaned context */ }
+
+window.addEventListener('pagehide', () => {
+  stopDexscreenerChartSession();
+});
 
 sync();

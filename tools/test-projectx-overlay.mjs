@@ -28,7 +28,6 @@ assert.match(worker, /loadPositions\('hyperevm', address/);
 assert.match(overlay, /const PROJECTX_ROUTE = \/\^\\\/portfolio/);
 assert.match(overlay, /type: 'LPLENS_PROJECTX_PORTFOLIO'/);
 assert.match(overlay, /ProjectX wallet data is not read/);
-assert.match(overlay, /Selected LPLens wallet/);
 assert.match(overlay, /const forceLeft = PROJECTX_ROUTE\.test\(location\.pathname\)/,
   'ProjectX panel must stay on the left, clear of the site Support control');
 assert.match(overlay, /const useRight = !forceLeft && roomRight > roomLeft/,
@@ -39,10 +38,10 @@ assert.match(options, /id="projectxOverlayPerm"/);
 
 for (const [name, body] of [['options', options], ['README', readme], ['privacy policy', privacy]]) {
   assert.match(body, /www\.prjx\.com\/portfolio/i, `${name} omits the ProjectX page scope`);
-  assert.match(body, /ProjectX wallet[^.]{0,100}(select|explicit)/i,
-    `${name} omits the explicit ProjectX-wallet behavior`);
+  assert.match(body, /active overlay wallet|active wallet/i,
+    `${name} omits the explicit active-wallet behavior`);
   assert.match(body, /does not read ProjectX page content|ProjectX[^.]{0,100}reads no page content/i,
     `${name} omits the ProjectX page-content boundary`);
 }
 
-console.log('ProjectX overlay: optional permission, local address and portfolio dispatch pass');
+console.log('ProjectX overlay: optional permission, explicit active wallet and portfolio dispatch pass');

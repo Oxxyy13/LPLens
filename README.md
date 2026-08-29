@@ -26,9 +26,68 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.28.1: invite-only beta hotfix
+## Status: 0.30.0 production candidate
 
-The extension is complete and in daily use, but access is currently gated:
+Dexscreener chart alignment has a separate, versioned consent control and is
+off until the user enables it. Site permission alone shows the existing exact
+on-chain range ruler and does not start chart measurement. While a matching
+overlay is open with chart alignment enabled, the service worker repeatedly
+runs a packaged, short-lived MAIN-world function so the range follows chart
+movement and mode changes. Each call receives at most three unlabelled LP range
+values for low, current, and high, plus public pair-conversion values. The call
+receives no wallet address, token or position ID, PnL, access key, endpoint, or
+provider key directly. Unlabelled does not mean anonymous: the pool and
+bounds are public on-chain, so Dexscreener could correlate them with a specific
+position and owner while each call runs. The function reads chart mode, the
+latest public chart close once per measurement, plot geometry, and numeric price
+coordinates through Dexscreener's private TradingView interface. The close stays
+inside that short-lived MAIN-world call. Only validated chart mode, plot geometry,
+and numeric coordinates return to LPLens's isolated overlay for the drawing; the
+close is not returned. The returned result is not stored, logged, or transmitted
+over the network. The function does not read or call the wallet provider and does
+not change chart state. Turning chart alignment off stops the measurement and
+removes the chart graphic immediately. Because the interface is private,
+alignment is best effort and falls back to LPLens's own range ruler.
+
+On Dexscreener, drag the dotted panel header to move LPLens anywhere in the
+viewport. Its position is stored only in `chrome.storage.local` and is clamped
+back on-screen after zoom or window-size changes. The minus control collapses
+the panel to a small LPLens pill; double-clicking the header restores the default
+dock. These layout preferences apply only to Dexscreener and do not change the
+Uniswap or ProjectX overlays.
+
+Version 0.30.0 includes the browser-managed portfolio side panel that can stay
+open while the user changes
+tabs. It restores the most recent rendered portfolio view immediately, then
+refreshes only when the user asks. The snapshot stays in
+`chrome.storage.local`, is never used as an input to calculations, and is
+bounded so a large portfolio cannot exhaust extension storage. Each position's
+price unit can be flipped without changing its accounting, and `vs holding`
+shows both dollars and percentage when available. Unwanted or unsolicited LP
+NFTs can be hidden locally from the side panel; hidden cards are excluded from
+portfolio counts and totals and can be restored at any time. The normal panel
+keeps only useful state such as the last refresh, a compact chain-change prompt,
+or a short refresh or failure message. Routine scan fractions, empty-chain
+chatter, wallet counts, position counts, and NFT identifiers stay out of the
+main view. Friendly issue summaries, sanitized diagnostics, and the report link
+live under `Help & diagnostics`. Portfolio scans still default to all supported
+networks, but the popup and side panel expose a profile-local network checklist.
+Turning off a network affects portfolio sweeps only, and the saved panel view
+records its exact network scope so a changed selection is never mistaken for an
+already-refreshed result. Robinhood's public RPC reads are batched in groups of
+25 with item retries and a single-call fallback.
+
+Portfolio totals now distinguish complete, partial, and unavailable metrics.
+Positive and negative return values are colored consistently, while coverage
+and the exact unavailable reason remain visible in text. A missing historical
+price can therefore never look like a real zero or suppress otherwise valid
+current-value and vs-holding totals. Version 0.30 also adds a sanitized
+Copy diagnostics control, optional anonymous aggregate scan outcomes, and a
+separately optional Dexscreener pair-page overlay. Diagnostics and aggregate
+events contain no wallet, token, pool, position, access-code, installation, or
+raw-error values.
+
+Access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
 link on its own grants nothing. A key is validated against a Cloudflare Worker
 whose registry is `SHA-256 hash -> { label, expires }`. The same Worker provides
@@ -37,9 +96,14 @@ tester supplies no RPC or explorer key: paste the LPLens access key, paste a
 wallet address, and scan. The source is
 in this repo at `tools/licence-worker/worker.js`. It stores hashes of access
 codes and random browser-installation identifiers plus aggregate request counts;
-it does not store wallet addresses, log filters, IP addresses or API responses.
+when enabled in Settings, it also stores anonymous daily scan outcomes and
+allowlisted error-category totals in rows that have no access-code or
+installation hash. It does not store wallet addresses, log filters, IP
+addresses or API responses.
 The relay necessarily processes each allowlisted log filter long enough to send
 it to Blockscout; v4 ownership filters can contain the public address being read.
+The saved access key is masked whenever Options opens and is revealed only when
+the user explicitly selects **show**.
 
 This is access control for a private beta, not a paywall. Everything LPLens
 computes, it computes locally on your machine. The hosted component supplies a
@@ -54,12 +118,14 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.28.1
+diff -r extension build/lplens-0.30.0
 ```
 
-That diff is empty. `tools/package.mjs` also refuses to produce a package if it
-finds anything credential-shaped in the output, and aborts outright if anyone
-reintroduces a hardcoded key into `extension/lib/chains.js`.
+That diff is empty on a release commit. `tools/package.mjs` also refuses to
+produce a package if it finds anything credential-shaped in the output, and
+aborts outright if anyone reintroduces a hardcoded key into
+`extension/lib/chains.js`. It also rejects the development-fence marker used
+during chart prototyping if that marker ever reappears in `extension/`.
 
 Two claims worth checking directly, because they are the ones that matter:
 
@@ -68,13 +134,14 @@ Two claims worth checking directly, because they are the ones that matter:
   `eth_call`, `eth_getLogs`, `eth_getBlockByNumber`,
   `eth_getTransactionReceipt` — four reads. There is no
   code path that can issue `eth_sendTransaction` or `personal_sign`.
-- **The permissions** are in `extension/manifest.json`: `storage` and
-  `scripting`, plus network access to a named list of RPC, price, explorer, and
-  LPLens service hosts. No
+- **The permissions** are in `extension/manifest.json`: `storage`, `scripting`,
+  and `sidePanel`, plus network access to a named list of RPC, price, explorer,
+  and LPLens service hosts. `sidePanel` provides the persistent portfolio
+  surface and does not grant access to browsing data or page content. No
   `tabs`, no `cookies`, no `webRequest`, no `<all_urls>`. Note that
-  `app.uniswap.org` and `www.prjx.com` appear under
+  `app.uniswap.org`, `www.prjx.com`, and `dexscreener.com` appear under
   `optional_host_permissions`, not `host_permissions` — LPLens ships with
-  **no** access to either site and cannot run there unless you explicitly grant
+  **no** access to any of those sites and cannot run there unless you explicitly grant
   each one.
 
 ## What it does
@@ -118,6 +185,16 @@ Two claims worth checking directly, because they are the ones that matter:
   every card names its chain, and its wallet when several are saved
 - Saves multiple addresses locally with optional labels, and can total them.
   Saved addresses live in `chrome.storage.local` and never leave the machine
+- Opens a persistent browser side panel from the popup. It can show the last
+  portfolio view on any tab without reading that tab, filter cards by range or
+  data status, flip every displayed position price into either token direction,
+  hide or restore unwanted LP NFTs locally, and refresh one saved wallet or the
+  full local address book. Hidden cards do not contribute to portfolio counts
+  or totals. Refresh is manual so simply leaving the panel open does not consume
+  provider quota. The headline scan status stays short; complete chain outcomes
+  and provider failures are kept in an expandable details section
+- Shows `vs holding` in both dollars and percentage when history is available,
+  including ProjectX positions
 - **Uniswap v4** as well as v3. v4 needed four separate mechanisms: pools are
   addressed by `keccak256(abi.encode(PoolKey))` rather than existing as
   contracts (hence `lib/keccak.js`), the PositionManager is *not*
@@ -204,6 +281,7 @@ withheld.
    [the one real risk](#the-one-real-risk-never-load-unpacked-from-a-synced-or-shared-folder)
    first
 5. Pin LPLens, click it, paste an address, hit **Load positions**
+6. Choose **Open portfolio panel** to keep the saved overview beside any tab
 
 No build step, no `npm install`, no bundler. After editing any file, hit the
 refresh icon on the extension card.
@@ -232,34 +310,63 @@ against, and an unlisted method throws. Chrome also isolates extensions from
 each other, so LPLens cannot reach MetaMask's storage or keys even in principle.
 
 **Cannot see your general browsing.** No `tabs`, no `activeTab`, no `cookies`,
-no `webRequest`, no `<all_urls>`. The only page permission is the optional,
-user-granted Uniswap scope described below.
+no `webRequest`, no `<all_urls>`. The only page permissions are the optional,
+user-granted scopes described below.
 
-**Both on-page overlays are independently opt-in and off by default.**
-`app.uniswap.org` and `www.prjx.com` are in `optional_host_permissions`, not
-`host_permissions`, so a freshly installed LPLens has no access to either site.
+**All on-page overlays are independently opt-in and off by default.**
+`app.uniswap.org`, `www.prjx.com`, and `dexscreener.com` are in
+`optional_host_permissions`, not `host_permissions`, so a freshly installed
+LPLens has no access to those sites.
 The Uniswap toggle registers only the exact
 `https://app.uniswap.org/positions` list and its `/positions/*` descendants.
 The ProjectX toggle registers only `https://www.prjx.com/portfolio` and its
-descendants. Turning either one off unregisters only that site's content script.
+descendants. The Dexscreener toggle registers only `https://dexscreener.com/*`;
+the script acts only on a route containing a supported chain slug and a 20-byte
+pool address or 32-byte v4 pool id. Turning any toggle off unregisters only that
+site's content script.
 
 Once granted, that is a real widening of the surface, and it is worth
 understanding rather than skimming:
 
-- The content script is **write-isolated and append-only**. On Uniswap it reads
+- The persistent content script is **write-isolated and append-only**. On Uniswap it reads
   the position-page URL; on the positions list it reads semantic position links
   and the first line of visible row text to discover and label positions. On
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
-  the panel uses only the ProjectX wallet explicitly selected in LPLens. The
-  popup always names that wallet, and clicking a saved wallet selects it
-  immediately. **Scan all** refreshes the portfolio without changing the
-  ProjectX selection. It never
+  the panel uses only the active overlay wallet explicitly selected in LPLens.
+  On Dexscreener it reads only the chain and pool identifier in the pair-page
+  URL, then checks that same active wallet for a matching position. The service
+  worker sends those two route values, without the wallet address, to
+  `api.dexscreener.com` to retrieve the pair's base/quote token orientation.
+  The popup and side panel always name the active overlay wallet;
+  clicking a saved wallet selects it immediately, and scanning every saved
+  wallet does not change that selection. It never
   reads balances, forms, connected-wallet state, wallet-provider objects, or
-  signing prompts. Its only page write is adding its own closed-shadow-root
-  panel; it never moves or rewrites anything either site rendered.
-- It runs in Chrome's **isolated world**, so `window.ethereum`, the page's
-  JavaScript, and the wallet are unreachable from it by construction — not by
-  good behaviour.
+  signing prompts. Its only page writes are its own closed-shadow-root panel and
+  optional range graphic; it never moves or rewrites anything either site
+  rendered.
+- The persistent script runs in Chrome's **isolated world**, so
+  `window.ethereum`, the page's JavaScript, and the wallet are unreachable from
+  that script by construction. Chart alignment is a separately disclosed and
+  versioned opt-in. While a matching overlay is open, the service worker repeats
+  a packaged, short-lived MAIN-world function so the graphic follows chart
+  changes. Each call receives at most three unlabelled LP range values for low,
+  current, and high, plus public pair-conversion values. The call receives no
+  wallet address, token or position ID, PnL, access key, custom endpoint, or
+  provider key directly. Unlabelled does not mean anonymous: the pool and bounds are
+  public on-chain, so Dexscreener could correlate them with a specific position
+  and owner while each call runs. It reads only chart mode, the latest public
+  chart close once per measurement, plot geometry, and the numeric
+  price-to-coordinate mapping from Dexscreener's private TradingView interface.
+  Its code does not read or call a wallet provider
+  and does not create drawings, change the visible range, alter autoscale, or
+  otherwise change chart state. The public chart close stays inside the
+  short-lived MAIN-world call. Only validated chart mode, plot geometry, and
+  numeric coordinates return to the isolated script for drawing; the close is
+  not returned. The returned result is not stored, logged, or transmitted over
+  the network. The isolated content script validates every result and draws the SVG itself. Turning the consent
+  off removes that SVG and returns to the exact on-chain ruler. Because the
+  chart interface is private, alignment is best effort and may stop working
+  after a Dexscreener change.
 - It has **no network access**. MV3 stripped cross-origin privileges from
   content scripts, so every RPC call happens in the service worker and the
   overlay only ever receives finished data.
@@ -286,17 +393,31 @@ text-node context, never inside an attribute, so no element or handler can be
 constructed. Verified against five injection payloads. MV3's default CSP
 (`script-src 'self'`) blocks inline handlers as a second layer.
 
-**Privacy, not security:** the address you paste is sent to the RPC endpoint and
-to DexScreener, which learn that your IP is interested in that address. For v4
-ownership enumeration, an address-bearing log filter also passes through the
-LPLens Worker to Blockscout Pro; it is processed but not stored. Point the
-options page at your own RPC to reduce direct RPC exposure. If a v4 NFT has
+**Privacy, not security:** the address you paste is sent to the RPC and history
+services needed for the scan. Dexscreener receives token contract addresses for
+price marks and, for its optional overlay, the URL-derived chain and pool
+identifier without the wallet address. Those hosts see ordinary HTTPS metadata,
+including your IP address. For v4 ownership enumeration, an address-bearing log
+filter also passes through the LPLens Worker to Blockscout Pro; it is processed
+but not stored. Point the options page at your own RPC to reduce direct RPC
+exposure. If a v4 NFT has
 later additions, its public transaction hashes are sent directly to that
 chain's public Blockscout trace endpoint; this is what makes the principal/fee
 split exact without sending wallet credentials or requesting a signature.
-Saved addresses are stored with
-`chrome.storage.local`, deliberately **not** `chrome.storage.sync`, so they are
-never carried into a Google account.
+Saved addresses, the separately selected active overlay wallet address, chain
+choices, hidden-position choices, overlay layout, Dexscreener chart consent,
+and the most recently rendered portfolio view are
+stored with `chrome.storage.local`, deliberately **not**
+`chrome.storage.sync`, so they are never carried into a Google account. The
+saved view is local display output, not accounting input, and is replaced after
+a successful refresh. The Copy diagnostics control saves only version, UI
+surface, coarse scan counts,
+allowlisted error categories, and local feature state. It excludes wallets,
+labels, tokens, pools, positions, keys, custom endpoints, and raw errors, and it
+leaves the browser only when the user copies it. If anonymous scan outcomes are
+enabled in Settings, the extension sends the same coarse version/surface,
+outcome, count bucket, duration bucket, and per-chain error categories. Worker
+storage has no access-code hash or installation hash on those aggregate rows.
 
 ### The one real risk: never load unpacked from a synced or shared folder
 
@@ -425,6 +546,7 @@ applies to any unpacked extension, not just this one.
 extension/
   manifest.json      MV3, minimum permissions
   popup.*            UI
+  sidepanel.*        persistent, page-independent portfolio UI
   options.*          optional custom RPCs and Etherscan key, data disclosure
   render.js          shared renderer, used by both the popup and the overlay
   lib/chains.js      NFPM/factory/RPC per chain — no credentials, ever
@@ -438,10 +560,14 @@ extension/
   lib/histprice.js   USD at any block, from a reference pool's Swap events
   lib/logs.js        log retrieval; Etherscan V2, Blockscout, or eth_getLogs
   lib/cache.js       bounded persistent caches
+  lib/dashboard-snapshot.js  bounded last-rendered side-panel view
+  lib/scan-preferences.js  local portfolio network selection
+  lib/diagnostics.js  sanitized local support report and error categories
+  lib/telemetry.js    optional anonymous aggregate scan outcomes
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync
   lib/aggregate.js   all-wallets totals, with explicit exclusion reporting
   lib/license.js     beta access gate
-  overlay.js         optional Uniswap and ProjectX overlays
+  overlay.js         optional Uniswap, ProjectX, and Dexscreener overlays
   sw.js              service worker; holds all network access for the overlay
 tools/
   package.mjs        builds the distributable zip; refuses to ship a credential

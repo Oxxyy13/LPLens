@@ -1,31 +1,16 @@
 /**
- * Persistent history cache.
+ * Persistent v3 history cache.
  *
- * Lifetime events are immutable: a position's past never changes, and its
- * present only changes when someone interacts with it. Re-fetching the entire
- * history on every view is therefore pure waste — and it is the single largest
- * cost in the whole extension, because it is the one call that needs a paid or
- * rate-limited endpoint.
- *
- * The invalidation signal is free. `positions(tokenId)` is already fetched on
- * every load, and `liquidity`, `feeGrowthInside{0,1}LastX128` and
- * `tokensOwed{0,1}` are written by every operation that emits an
- * IncreaseLiquidity, DecreaseLiquidity or Collect event — and by nothing else.
- * Fees accruing in the pool do not touch them. So a fingerprint over those five
- * fields changes exactly when new events exist, and the cache can be trusted
- * without a single extra request.
- *
- * Verified against a live 5% withdrawal on Robinhood position 718740: the
- * decrease and collect at block 39913466 moved liquidity and tokensOwed, which
- * is precisely what invalidates this.
- *
- * Deliberately NOT "cache closed positions forever, re-poll open ones". That
- * rule sounds equivalent and is worse: it re-fetches every open position on
- * every view, which is the common case.
+ * A cached lifetime is only a canonical prefix, never proof that no later
+ * events exist. Every deliberate position refresh verifies the stored anchor
+ * block and replaces the tail after that anchor. This catches Collect-only and
+ * offsetting Increase/Decrease sequences even when positions() finishes with
+ * the same mutable values it had before the transactions.
  */
 
-const PREFIX = 'hist:';
-const MAX_ENTRIES = 400;   // keeps chrome.storage.local well clear of its quota
+const PREFIX = 'hist:v2:';
+const LEGACY_PREFIX = 'hist:';
+const MAX_ENTRIES = 400;
 
 // Falls back to memory outside an extension context so the module stays usable
 // in tests and in node.
@@ -58,8 +43,8 @@ const unpack = (rows) => rows.map((r) => ({
 }));
 
 /**
- * Fingerprint of the mutable half of a position. Changes if and only if the
- * position was touched, which is exactly when its event history grows.
+ * Cheap mutable-state signal. It can reveal a change, but equality is not
+ * treated as proof because multiple events can restore all five values.
  */
 export function fingerprint(p) {
   return [
@@ -71,59 +56,107 @@ export function fingerprint(p) {
   ].map((v) => (v === undefined ? '?' : String(v))).join(':');
 }
 
-const keyFor = (nfpm, tokenId) => `${PREFIX}${String(nfpm).toLowerCase()}:${tokenId}`;
-
-/** Cached events for this position, or null when absent or stale. */
-export async function readHistory(nfpm, tokenId, fp) {
-  const key = keyFor(nfpm, tokenId);
-  try {
-    const hit = store ? (await store.get(key))[key] : memory.get(key);
-    if (!hit || hit.fp !== fp || !Array.isArray(hit.events)) return null;
-    return { events: unpack(hit.events), source: hit.source, cached: true };
-  } catch {
-    return null;   // a broken cache must never break a load
-  }
+/** Static NFT identity that prevents a recycled or misrouted row being used. */
+export function historyIdentity(p) {
+  const token0 = String(p.token0 || '').toLowerCase();
+  const token1 = String(p.token1 || '').toLowerCase();
+  const fee = Number(p.fee);
+  const tickLower = Number(p.tickLower);
+  const tickUpper = Number(p.tickUpper);
+  if (!/^0x[0-9a-f]{40}$/.test(token0) || !/^0x[0-9a-f]{40}$/.test(token1)
+      || !Number.isInteger(fee) || fee < 0
+      || !Number.isInteger(tickLower) || !Number.isInteger(tickUpper)
+      || tickLower >= tickUpper) return null;
+  return [
+    token0, token1, String(fee), String(tickLower), String(tickUpper),
+  ].join(':');
 }
 
-/** Last cached event set even when its mutable-state fingerprint is stale. */
-export async function readHistoryAny(nfpm, tokenId) {
-  const key = keyFor(nfpm, tokenId);
+const keyFor = (chainKey, nfpm, tokenId) => (
+  `${PREFIX}${String(chainKey).toLowerCase()}:${String(nfpm).toLowerCase()}:${tokenId}`
+);
+const legacyKeyFor = (nfpm, tokenId) => (
+  `${LEGACY_PREFIX}${String(nfpm).toLowerCase()}:${tokenId}`
+);
+
+/**
+ * Last trusted canonical prefix for this exact chain and NFT identity.
+ * Version-1 unnamespaced rows are deliberately ignored.
+ */
+export async function readHistoryAny(chainKey, nfpm, tokenId, identity) {
+  const key = keyFor(chainKey, nfpm, tokenId);
   try {
     const hit = store ? (await store.get(key))[key] : memory.get(key);
-    if (!hit || !Array.isArray(hit.events)) return null;
+    if (!identity || !hit || hit.v !== 2 || hit.identity !== identity
+        || !Array.isArray(hit.events)
+        || !Number.isSafeInteger(hit.checkedThrough)
+        || !Number.isSafeInteger(hit.anchorBlock)
+        || hit.checkedThrough < 0
+        || hit.anchorBlock < 0
+        || !/^0x[0-9a-f]{64}$/i.test(String(hit.anchorHash || ''))
+        || hit.anchorBlock > hit.checkedThrough
+        || hit.events.some((event) => !Number.isSafeInteger(event.b)
+          || event.b < 0 || event.b > hit.checkedThrough)) return null;
     return {
-      events: unpack(hit.events), source: hit.source, fingerprint: hit.fp,
-      cached: true, stale: true,
+      events: unpack(hit.events),
+      source: hit.source,
+      fingerprint: hit.fp,
+      checkedThrough: hit.checkedThrough,
+      anchorBlock: hit.anchorBlock,
+      anchorHash: String(hit.anchorHash).toLowerCase(),
+      cached: true,
     };
   } catch {
     return null;
   }
 }
 
-export async function writeHistory(nfpm, tokenId, fp, events, source) {
-  // A minted position always has at least one IncreaseLiquidity. Caching
-  // an empty set would stick a false "no activity" across sessions.
-  if (!Array.isArray(events) || events.length === 0) return;
-  const key = keyFor(nfpm, tokenId);
-  const value = { fp, source, at: Date.now(), events: pack(events) };
+export async function writeHistory({
+  chainKey, nfpm, tokenId, identity, fp, events, source,
+  checkedThrough, anchorBlock, anchorHash,
+}) {
+  // A minted position always has at least one IncreaseLiquidity. Caching an
+  // empty or partial result could make a transient provider failure persistent.
+  if (!Array.isArray(events) || events.length === 0
+      || !Number.isSafeInteger(checkedThrough)
+      || !Number.isSafeInteger(anchorBlock)
+      || checkedThrough < 0
+      || anchorBlock < 0
+      || anchorBlock > checkedThrough
+      || events.some((event) => !Number.isSafeInteger(event.block)
+        || event.block < 0 || event.block > checkedThrough)
+      || !/^0x[0-9a-f]{64}$/i.test(String(anchorHash || ''))
+      || !identity) return;
+
+  const key = keyFor(chainKey, nfpm, tokenId);
+  const value = {
+    v: 2,
+    identity,
+    fp,
+    source,
+    at: Date.now(),
+    checkedThrough,
+    anchorBlock,
+    anchorHash: String(anchorHash).toLowerCase(),
+    events: pack(events),
+  };
   try {
     if (!store) {
       memory.set(key, value);
+      memory.delete(legacyKeyFor(nfpm, tokenId));
       return;
     }
     await store.set({ [key]: value });
-    await prune();
+    // Delete only this position's obsolete v1 row after its v2 replacement is
+    // safely stored. Other v1 rows remain ignored until individually replaced.
+    await store.remove(legacyKeyFor(nfpm, tokenId));
+    await prunePrefix(PREFIX, MAX_ENTRIES);
   } catch {
-    // Quota exceeded or storage unavailable: caching is an optimisation, so
-    // failing to cache is not an error worth surfacing.
+    // Caching is an optimisation. Storage failures must not break a position.
   }
 }
 
-/** Drop the oldest entries once the cache grows past MAX_ENTRIES. */
-async function prune() {
-  await prunePrefix(PREFIX, MAX_ENTRIES);
-}
-
+/** Drop the oldest v2 entries once the cache grows past MAX_ENTRIES. */
 async function prunePrefix(prefix, max) {
   if (!store) return;
   const all = await store.get(null);

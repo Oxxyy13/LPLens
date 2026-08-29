@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="popup.css?v=0.30">
+  <link rel="stylesheet" href="sidepanel.css?v=0.30">
+</head>
+<body class="sidepanel" data-surface="sidepanel">
+  <header class="pop-head">
+    <img class="mark" src="icons/icon48.png" width="24" height="24" alt="">
+    <div class="brand-copy">
+      <h1 class="pop-title">LPLens</h1>
+      <span class="product-kicker">Portfolio overview</span>
+    </div>
+    <span class="badge"><span class="badge-dot"></span>read-only</span>
+  </header>
+
+  <main class="pop-body">
+    <form id="form" class="scan-form">
+      <label class="field-label" for="address">Wallet address</label>
+      <div class="row addr-row">
+        <input id="address" type="text" placeholder="0x… wallet address" autocomplete="off" spellcheck="false" disabled>
+        <button type="button" id="addWallet" class="icon-button" title="Enter a valid 0x address" aria-label="Save wallet" disabled>+</button>
+      </div>
+      <div id="activeWallet" class="active-wallet" role="status" aria-live="polite">Overlay wallet: none selected</div>
+
+      <details class="saved" id="savedWallets">
+        <summary>Saved wallets</summary>
+        <div id="savedList" class="saved-list"></div>
+      </details>
+
+      <details class="scan-networks" id="scanNetworks">
+        <summary><span>Chains</span><span id="scanNetworkSummary">All</span></summary>
+        <fieldset>
+          <legend class="sr-only">Chains included in portfolio refreshes</legend>
+          <label class="network-option network-option-all">
+            <input type="checkbox" id="scanNetworkAll" checked>
+            <span>All chains</span>
+          </label>
+          <div id="scanNetworkList" class="network-list"></div>
+        </fieldset>
+      </details>
+
+      <div class="row scan-row">
+        <button id="go" class="primary-button" type="submit" aria-describedby="scanHint" disabled>Refresh wallet</button>
+        <button type="button" id="scanAll" class="secondary-button" aria-describedby="scanHint" disabled title="Refresh every saved wallet">Refresh all</button>
+      </div>
+      <label class="check">
+        <input type="checkbox" id="includeClosed"> <span>Include closed positions</span>
+      </label>
+      <label id="showHiddenOption" class="check" hidden>
+        <input type="checkbox" id="showHidden"> <span>Show hidden positions (<span id="hiddenCount">0</span>)</span>
+      </label>
+      <p id="scanHint" class="notice" role="status" aria-live="polite" hidden></p>
+    </form>
+
+    <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true">Checking access…</div>
+    <div id="snapshotStatus" class="snapshot-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+    <details id="scanDetails" class="scan-details" hidden>
+      <summary id="scanDetailsSummary">Help & diagnostics</summary>
+      <div id="scanDetailsBody" class="scan-details-body" hidden></div>
+      <div class="diagnostic-actions" aria-label="Support tools">
+        <button type="button" id="copyDiagnostics" class="text-button">Copy diagnostics</button>
+        <a id="reportIssue" href="https://github.com/Oxxyy13/LPLens/issues/new?template=bug_report.md" target="_blank">Report a problem</a>
+        <span id="diagnosticState" role="status"></span>
+      </div>
+    </details>
+
+    <nav id="filterBar" class="filter-bar" aria-label="Filter positions" hidden>
+      <button type="button" data-position-filter="all" class="active">All</button>
+      <button type="button" data-position-filter="in-range">In range</button>
+      <button type="button" data-position-filter="out-of-range">Out</button>
+      <button type="button" data-position-filter="closed">Closed</button>
+      <button type="button" data-position-filter="issues">Issues</button>
+    </nav>
+
+    <div id="results"></div>
+  </main>
+
+  <footer>
+    <div class="notice security-note">
+      <span class="security-icon" aria-hidden="true">✓</span>
+      <span>No wallet connection or page access.</span>
+      <a href="options.html" target="_blank">Settings <span aria-hidden="true">↗</span></a>
+    </div>
+  </footer>
+
+  <script src="render.js?v=0.30"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

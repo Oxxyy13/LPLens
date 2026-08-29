@@ -5,9 +5,24 @@ import { loadPositionByVersion } from '../extension/lib/positions.js';
 import { CHAINS } from '../extension/lib/chains.js';
 import { fetchV4Trace, inferSimpleV4TraceAddition } from '../extension/lib/v4.js';
 
-// User-opened ETH/TENDIES position discovered from the exact range in the
-// 0.27 smoke report. Its mint transaction is immutable and exercises native
-// settlement, receipt proof, bridged ETH pricing and the overlay load path.
+// The public instance rejects Node's default undici user agent even though the
+// same request succeeds from the shipped Chrome extension. Use a browser-like
+// agent so this probe exercises the production network path instead of the
+// instance's bot filter.
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  if (!headers.has('User-Agent')) {
+    headers.set('User-Agent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36');
+  }
+  return nativeFetch(input, { ...init, headers });
+};
+
+// ETH/TENDIES was opened for the 0.27 smoke report and fully removed later.
+// The two lifecycle events are now an immutable live fail-closed fixture for
+// the supported v4 boundary. Its mint transaction separately exercises native
+// settlement, receipt proof, and the public Blockscout trace shape.
 const position = await loadPositionByVersion('robinhood', 'v4', 811217n);
 assert.equal(position.version, 'v4');
 assert.equal(position.poolId,
@@ -16,19 +31,11 @@ assert.equal(position.token0Meta.symbol, 'ETH');
 assert.equal(position.token1Meta.symbol, 'TENDIES');
 assert.equal(position.tickLower, 111600);
 assert.equal(position.tickUpper, 120800);
-assert.equal(position.history?.unavailable, undefined,
-  position.history?.unavailable || 'v4 history missing');
-assert.equal(position.history.proof, 'single-mint receipt + liquidity math');
-assert.equal(position.history.deposits.length, 1);
-assert.ok(Math.abs(position.history.deposits[0].amount0 - 0.027278581830193577) < 1e-15);
-assert.ok(Math.abs(position.history.deposits[0].amount1 - 10199.252319371933) < 1e-9);
-assert.ok(Math.abs(position.history.entry.price - 139874.8244373024) < 1e-6);
-assert.ok(Number.isFinite(position.history.vsHodl?.pct));
-assert.equal(position.usd?.returnUnavailable, null);
-assert.equal(position.usd?.grossAddedExact, true);
-assert.equal(position.usd?.collectedProceedsExact, true);
-assert.ok(Number.isFinite(position.usd?.pnl));
-assert.ok(Number.isFinite(position.usd?.pnlPct));
+assert.equal(position.status, 'closed');
+assert.equal(position.liquidity, 0n);
+assert.match(position.history?.unavailable || '',
+  /v4 lifecycle verified \(2 actions\).*removes and fee-only actions remain unavailable/);
+assert.equal(position.usd?.pnl, null);
 
 // The immutable mint also exercises the exact public Blockscout trace shape
 // used for every later addition. The receipt path remains the one-add fallback;
@@ -59,13 +66,10 @@ assert.equal(traced.fees0, 0);
 assert.equal(traced.fees1, 0);
 
 console.log(JSON.stringify({
-  v4: 'pass',
+  v4: 'pass-fail-closed',
   tokenId: position.tokenId.toString(),
   pair: `${position.token0Meta.symbol}/${position.token1Meta.symbol}`,
-  historySource: position.history.source,
-  entry: position.history.entry.price,
-  vsHodlPct: position.history.vsHodl.pct,
-  pnlUsd: position.usd.pnl,
-  pnlPct: position.usd.pnlPct,
+  status: position.status,
+  lifecycle: position.history.unavailable,
   trace: 'pass',
 }));

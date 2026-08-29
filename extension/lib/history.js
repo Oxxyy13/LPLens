@@ -12,7 +12,10 @@
  * Topic hashes were derived with keccak256 (`eth_utils`) and then cross-checked
  * against a live log, not recalled. See docs/build-notes.md.
  */
-import { fetchPositionLogs, fetchRecentPositionLogs } from './logs.js';
+import {
+  fetchBlockCheckpoint, fetchPositionLogs, fetchPositionLogsRange,
+  fetchRecentPositionLogs,
+} from './logs.js';
 import { sqrtRatioAtTick } from './v3.js';
 
 export const TOPIC = {
@@ -61,11 +64,39 @@ export function decodePositionLogs(logs) {
   return events;
 }
 
-export async function fetchRecentHistory(source, nfpm, tokenId) {
-  const got = await fetchRecentPositionLogs({ rpc: source.rpc, nfpm, tokenId });
+export async function fetchRecentHistory(source, nfpm, tokenId, range = {}) {
+  const got = await fetchRecentPositionLogs({
+    rpc: source.rpc, nfpm, tokenId, ...range,
+  });
   if (got.unavailable) return { unavailable: got.unavailable };
-  return { events: decodePositionLogs(got.logs), source: got.source };
+  return {
+    events: decodePositionLogs(got.logs),
+    source: got.source,
+    fromBlock: got.fromBlock,
+    toBlock: got.toBlock,
+  };
 }
+
+/** Exact bounded history interval. Empty is valid unless this is a lifetime. */
+export async function fetchHistoryRange(
+  source, nfpm, tokenId, fromBlock, toBlock, requireNonEmpty = false,
+) {
+  const got = await fetchPositionLogsRange({
+    ...source, nfpm, tokenId, fromBlock, toBlock, requireNonEmpty,
+  });
+  if (got.unavailable) return { unavailable: got.unavailable };
+  return {
+    events: decodePositionLogs(got.logs),
+    source: got.source,
+    fromBlock: got.fromBlock,
+    toBlock: got.toBlock,
+  };
+}
+
+/** Canonical block checkpoint used by the persistent cache. */
+export const fetchHistoryCheckpoint = (source, block = 'latest') => (
+  fetchBlockCheckpoint(source.rpc, block)
+);
 
 const semanticKey = (e) => [
   e.block, e.kind, e.liquidity, e.amount0, e.amount1,
@@ -105,6 +136,35 @@ export function mergeHistoryEvents(...sets) {
   }
   return out.sort((a, b) =>
     (a.block - b.block) || ((a.logIndex ?? 0) - (b.logIndex ?? 0)));
+}
+
+/** Replace the non-final tail while keeping only the verified cached prefix. */
+export function replaceHistoryTail(cached, anchorBlock, canonicalTail) {
+  return mergeHistoryEvents(
+    (cached || []).filter((event) => event.block <= anchorBlock),
+    canonicalTail || [],
+  );
+}
+
+/** True for additions, removals, or identity changes after a reorg. */
+export function historyChanged(before, after) {
+  const key = (event) => (
+    event.transactionHash && event.logIndex !== null && event.logIndex !== undefined
+      ? `${String(event.transactionHash).toLowerCase()}:${event.logIndex}:${semanticKey(event)}`
+      : semanticKey(event)
+  );
+  const counts = (events) => {
+    const out = new Map();
+    for (const event of events || []) {
+      const id = key(event);
+      out.set(id, (out.get(id) || 0) + 1);
+    }
+    return out;
+  };
+  const left = counts(before), right = counts(after);
+  if (left.size !== right.size) return true;
+  for (const [id, count] of left) if (right.get(id) !== count) return true;
+  return false;
 }
 
 /** True when the refreshed union contains an event absent from the old cache. */

@@ -9,8 +9,8 @@ const css = readFileSync(new URL('../extension/popup.css', import.meta.url), 'ut
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
 
-assert.equal(manifest.version, '0.28.1');
-assert.match(html, /id="activeWallet"[^>]*role="status"[^>]*>ProjectX wallet: none selected</);
+assert.equal(manifest.version, '0.30.0');
+assert.match(html, /id="activeWallet"[^>]*role="status"[^>]*>Overlay wallet: none selected</);
 assert.match(css, /\.active-wallet\.pending/);
 assert.match(css, /\.active-wallet\.empty/);
 assert.match(css, /\.saved-row\.active \.saved-load/);
@@ -20,8 +20,10 @@ assert.match(popup, /activeAddress = normalizeAddress\(latest\.address\)/,
   'startup must restore the explicit legacy-compatible address key');
 assert.doesNotMatch(popup, /else if \(book\[0\]\)/,
   'startup must not make the first saved wallet look selected');
-assert.match(popup, /ProjectX wallet: \$\{identity\}/);
+assert.match(popup, /Overlay wallet: \$\{identity\}/);
 assert.match(popup, /typed wallet not selected yet/);
+assert.match(popup, /classList\.toggle\('empty', !activeAddress && !pending\)/,
+  'a valid typed wallet must keep the pending warning style until selected');
 assert.match(popup, /row\.classList\.toggle\('active', active\)/);
 assert.match(popup, /load\.setAttribute\('aria-pressed', String\(active\)\)/);
 
@@ -33,7 +35,7 @@ assert.match(popup, /if \(e\.target\.closest\('\.saved-load'\)\) \{\s*await setA
   'clicking a saved wallet must select it immediately');
 assert.match(popup, /await setActiveAddress\(\$\('address'\)\.value\)/,
   'saving a new wallet must select it');
-assert.match(popup, /Removed from saved wallets\. It remains the ProjectX wallet\./,
+assert.match(popup, /Removed from saved wallets\. It remains the overlay wallet\./,
   'removing a saved row must not silently change the active wallet');
 
 assert.match(popup,
@@ -80,6 +82,7 @@ const context = vm.createContext({
   portfolioCard: () => '',
 });
 vm.runInContext(`
+  let torndown = false;
   let lastKey = null;
   ${controller}
   globalThis.startProjectX = syncProjectXPortfolio;

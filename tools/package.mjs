@@ -32,6 +32,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXT = join(ROOT, 'extension');
 const BUILD = join(ROOT, 'build');
 const START_MARKER = 'TESTING ONLY - STRIP THIS BLOCK BEFORE ANY DISTRIBUTION';
+const RETIRED_CHART_MARKER = 'LPLENS_LOCAL_CHART_EXPERIMENT';
 const FENCE_RE = /^\s*\/\/\s*-{10,}\s*$/;
 
 function abort(msg) {
@@ -62,6 +63,22 @@ export function assertNoFence(srcText) {
   }
 }
 
+/**
+ * The former local chart prototype is now a production feature with explicit
+ * consent and disclosure. Its retired marker must never re-enter a package.
+ * Run this check before deleting or writing any build output.
+ */
+export function assertNoRetiredChartPrototype(dir = EXT) {
+  const marker = Buffer.from(RETIRED_CHART_MARKER, 'utf8');
+  for (const file of walk(dir)) {
+    if (readFileSync(file).includes(marker)) {
+      abort('retired Dexscreener chart prototype marker found in '
+        + relative(ROOT, file).replace(/\\/g, '/') + '. Remove the legacy '
+        + 'LPLENS_LOCAL_CHART_EXPERIMENT marker before building a release.');
+    }
+  }
+}
+
 function isHexAddressOrHash(token) {
   return /^[0-9A-Fa-f]+$/.test(token) && (token.length === 40 || token.length === 64);
 }
@@ -78,8 +95,12 @@ function isHexAddressOrHash(token) {
  * indistinguishable from a scan that silently covers nothing.
  */
 export function envSecrets() {
-  const file = join(ROOT, '.env');
-  if (!existsSync(file)) return [];
+  const override = String(process.env.LPLENS_ENV_FILE || '').trim();
+  const file = override ? resolve(override) : join(ROOT, '.env');
+  if (!existsSync(file)) {
+    if (override) abort('LPLENS_ENV_FILE does not exist');
+    return [];
+  }
   const vals = [];
   for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
     const t = line.trim();
@@ -255,6 +276,7 @@ function listZip(zipPath) {
 }
 
 async function main() {
+  assertNoRetiredChartPrototype();
   const scanOnly = process.argv.includes('--scan-only');
   const skipLiveProbe = process.argv.includes('--skip-live-probe');
   assertNoFence(readFileSync(join(EXT, 'lib/chains.js'), 'utf8'));

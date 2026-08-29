@@ -17,9 +17,10 @@ const TOKEN_ID = 533076n;
 const chain = CHAINS.hyperevm;
 
 function localEnv() {
-  const url = new URL('../.env', import.meta.url);
-  if (!existsSync(url)) return {};
-  return Object.fromEntries(readFileSync(url, 'utf8').split(/\r?\n/).flatMap((line) => {
+  const file = String(process.env.LPLENS_ENV_FILE || '').trim()
+    || new URL('../.env', import.meta.url);
+  if (!existsSync(file)) return {};
+  return Object.fromEntries(readFileSync(file, 'utf8').split(/\r?\n/).flatMap((line) => {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) return [];
     const at = trimmed.indexOf('=');
