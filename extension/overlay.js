@@ -2,7 +2,7 @@
  * On-page overlay for app.uniswap.org position pages, the ProjectX portfolio
  * at www.prjx.com, and Dexscreener pair pages.
  *
- * SECURITY POSTURE — read this before changing anything here.
+ * SECURITY POSTURE: read this before changing anything here.
  *
  * This is the persistent LPLens code that runs on a web page, and it runs on
  * pages where transactions may get approved. Three properties keep that safe,
@@ -13,9 +13,9 @@
  *      before you sign.
  *   2. ISOLATED WORLD. This content script cannot see page JavaScript, so
  *      `window.ethereum` and the wallet remain unreachable from here. The
- *      local Dexscreener chart experiment asks the service worker for a
- *      one-shot chart measurement. It never injects from this file or creates
- *      a persistent bridge.
+ *      separately approved Dexscreener chart feature asks the service worker
+ *      for short-lived chart measurements. It never injects from this file or
+ *      creates a persistent bridge.
  *   3. NO NETWORK. MV3 content scripts have no cross-origin privileges. Every
  *      RPC call happens in the service worker; this file only messages it.
  *
@@ -34,9 +34,7 @@ const {
   rebalanceLine, dexscreenerOrientation, dexscreenerRangeRuler,
 } = globalThis.LPLens;
 
-// The packager blocks this literal. This branch is a local feasibility build,
-// not a Chrome Web Store candidate.
-const LOCAL_CHART_EXPERIMENT = 'LPLENS_LOCAL_CHART_EXPERIMENT';
+const DEXSCREENER_CHART_CONSENT_KEY = 'dexscreenerChartConsentV1';
 
 // v4 reads through a different manager and view contract, but the URL shape
 // is identical, so the route captures the version and passes it through.
@@ -562,12 +560,12 @@ const VERSION = (() => {
 })();
 
 const head = (right) => `
-  <div class="hd${ON_DEXSCREENER ? ' local-experiment-header' : ''}">
+  <div class="hd${ON_DEXSCREENER ? ' chart-range-header' : ''}">
     <span class="brand">LPLens <span class="tag">read-only v${esc(VERSION)}</span></span>
     ${ON_DEXSCREENER ? '<span class="panel-drag-mark" aria-hidden="true">⠿</span>' : ''}
     <span class="right">${right || ''}<button id="lplens-toggle" type="button"
       title="collapse" aria-expanded="true" aria-label="Collapse LPLens panel">−</button></span>
-    ${ON_DEXSCREENER ? '<span class="local-experiment-banner">local chart experiment</span>' : ''}
+    ${ON_DEXSCREENER ? '<span class="chart-range-banner">chart range</span>' : ''}
   </div>`;
 
 
@@ -615,6 +613,8 @@ function body(d) {
 function teardown() {
   if (finishActiveDexscreenerPanelDrag) finishActiveDexscreenerPanelDrag();
   stopDexscreenerChartSession();
+  if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
+  dexscreenerDataTimer = null;
   dexscreenerHref = '';
   if (dexscreenerPanelResizeObserver) {
     dexscreenerPanelResizeObserver.disconnect();
@@ -890,13 +890,14 @@ async function syncProjectXPortfolio() {
 }
 
 /* ---------------------------------------------------------------------------
- * Local-only Dexscreener chart alignment experiment.
+ * Optional Dexscreener chart alignment.
  *
  * The persistent content script stays in Chrome's isolated world. It sends
  * only anonymous numeric ranges plus the exact URL to the service worker. The
- * worker performs a one-shot chart measurement and returns viewport geometry.
- * This layer treats that response as hostile input, paints its own SVG, and
- * never touches the chart, the page's JavaScript, or a wallet provider.
+ * worker performs short-lived chart measurements only after separate consent
+ * and returns viewport geometry. This layer treats each response as hostile
+ * input, paints its own SVG, and never touches the chart, page JavaScript, or a
+ * wallet provider.
  * ------------------------------------------------------------------------- */
 
 // BEGIN PURE DEXSCREENER CHART RECOVERY
@@ -905,7 +906,7 @@ const DEXSCREENER_CHART_RETRY_MS = [100, 200, 400];
 const DEXSCREENER_CHART_NOTICE_MS = 1_500;
 const DEXSCREENER_CHART_TRANSIENT_FAILURES = new Set([
   'chart-frame-ambiguous', 'chart-frame-unavailable', 'chart-api-unavailable',
-  'unsupported-chart-mode', 'chart-mode-conflict',
+  'unsupported-chart-mode', 'chart-mode-conflict', 'chart-mode-unverified',
   'chart-geometry-unavailable', 'coordinate-unavailable',
   'measurement-failed', 'execution-timeout', 'execution-failed', 'invalid-result',
   'isolated-validation-failed', 'paint-failed',
@@ -1081,7 +1082,6 @@ function chartLayerHost() {
   if (existing) return existing.__shadow ? existing : null;
   const host = document.createElement('div');
   host.id = DEXSCREENER_CHART_HOST_ID;
-  host.dataset.experiment = LOCAL_CHART_EXPERIMENT;
   host.setAttribute('aria-hidden', 'true');
   for (const [name, value] of Object.entries({
     all: 'initial', position: 'fixed', inset: '0', width: '100vw', height: '100vh',
@@ -1367,14 +1367,52 @@ function startDexscreenerChartSession(key, generation, href, ranges) {
  * Dexscreener pair pages.
  *
  * Only the route is used: /<chain>/<pool-address-or-v4-pool-id>. The address
- * still comes from LPLens local storage through the service worker. The local
- * experiment also requests chart-scale geometry through the worker. This
- * isolated script reads no page text, connected wallet or provider object.
+ * still comes from LPLens local storage through the service worker. With
+ * separate chart consent, this script also requests chart-scale geometry
+ * through the worker. This isolated script reads no page text, connected
+ * wallet or provider object.
  */
 let dexscreenerBusy = false;
 let dexscreenerPending = false;
 let dexscreenerGeneration = 0;
 let dexscreenerHref = '';
+let dexscreenerChartConsented = false;
+let dexscreenerDataTimer = null;
+const DEXSCREENER_DATA_REFRESH_MS = 65_000;
+
+function scheduleDexscreenerDataRefresh() {
+  if (!ON_DEXSCREENER || torndown) return;
+  if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
+  dexscreenerDataTimer = setTimeout(() => {
+    dexscreenerDataTimer = null;
+    if (torndown || !dexscreenerRoute()) return;
+    dexscreenerGeneration++;
+    stopDexscreenerChartSession();
+    lastKey = null;
+    void syncDexscreener();
+  }, DEXSCREENER_DATA_REFRESH_MS);
+}
+
+function applyDexscreenerChartConsent(value) {
+  const next = value === true;
+  if (next === dexscreenerChartConsented) return;
+  dexscreenerChartConsented = next;
+  if (!ON_DEXSCREENER) return;
+  dexscreenerGeneration++;
+  stopDexscreenerChartSession();
+  if (dexscreenerBusy) dexscreenerPending = true;
+  lastKey = null;
+  void syncDexscreener();
+}
+
+try {
+  chrome.storage.local.get(DEXSCREENER_CHART_CONSENT_KEY, (stored) => {
+    applyDexscreenerChartConsent(
+      stored && stored[DEXSCREENER_CHART_CONSENT_KEY],
+    );
+  });
+} catch { /* orphaned context; chart alignment stays off */ }
+
 function dexscreenerRoute() {
   if (!ON_DEXSCREENER) return null;
   const parts = location.pathname.split('/').filter(Boolean);
@@ -1451,7 +1489,9 @@ async function syncDexscreener() {
     const address = String(res.data && res.data.address || '');
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
     const shown = positions.slice(0, 8);
-    const prepared = prepareDexscreenerChartRanges(shown, pair, wrappedNative);
+    const prepared = dexscreenerChartConsented
+      ? prepareDexscreenerChartRanges(shown, pair, wrappedNative)
+      : { ranges: [], rangeIdByIndex: new Map() };
     const overflow = positions.length - shown.length;
     const content = positions.length
       ? shown.map((position, index) => dexscreenerPortfolioCard(
@@ -1459,11 +1499,18 @@ async function syncDexscreener() {
       )).join('')
         + (overflow > 0 ? `<div class="note">${overflow} more matching position${overflow === 1 ? '' : 's'} not shown here.</div>` : '')
       : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
+    const chartNote = dexscreenerChartConsented
+      ? 'Chart alignment is on. Up to three unlabelled low, current, and high range values are shared with this page while the overlay is open. The pool and bounds are public on-chain, so Dexscreener could correlate them to a position and owner.'
+      : 'Chart alignment is off. LPLens is using its own exact on-chain range ruler. Enable chart alignment in Settings to place it on the chart.';
     render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. Local chart alignment shares up to three anonymous range bounds with this page. Dexscreener wallet data is not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. ${esc(chartNote)} Dexscreener wallet data is not read.</div>
       ${content}
     </div>`);
-    startDexscreenerChartSession(key, generation, href, prepared.ranges);
+    if (dexscreenerChartConsented) {
+      startDexscreenerChartSession(key, generation, href, prepared.ranges);
+    } else {
+      stopDexscreenerChartSession();
+    }
   } finally {
     dexscreenerBusy = false;
     if (torndown) {
@@ -1474,7 +1521,9 @@ async function syncDexscreener() {
       dexscreenerPending = false;
       lastKey = null;
       void syncDexscreener();
+      return;
     }
+    scheduleDexscreenerDataRefresh();
   }
 }
 
@@ -1624,6 +1673,8 @@ function shutdownOrphan(target) {
   if (torndown) return;
   torndown = true;
   stopDexscreenerChartSession();
+  if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
+  dexscreenerDataTimer = null;
   try { clearInterval(pollTimer); } catch {}
   try { clearTimeout(listTimer); } catch {}
   try { listObserver.disconnect(); } catch {}
@@ -1762,8 +1813,18 @@ window.addEventListener('popstate', () => {
 // overlay follows that explicit choice without reading the site's wallet state.
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes.address
-        || (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER)) return;
+    if (area !== 'local') return;
+    const addressChanged = !!changes.address;
+    const chartConsentChanged = ON_DEXSCREENER
+      && !!changes[DEXSCREENER_CHART_CONSENT_KEY];
+    if (!addressChanged && !chartConsentChanged) return;
+    if (chartConsentChanged) {
+      applyDexscreenerChartConsent(
+        changes[DEXSCREENER_CHART_CONSENT_KEY].newValue,
+      );
+      if (!addressChanged) return;
+    }
+    if (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER) return;
     if (ON_DEXSCREENER) {
       dexscreenerGeneration++;
       stopDexscreenerChartSession();

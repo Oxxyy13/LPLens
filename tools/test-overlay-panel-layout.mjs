@@ -85,7 +85,7 @@ assert.match(overlay, /aria-label/);
 
 assert.match(render, /\.panel\.dexscreener-panel\.collapsed\s*\{/);
 assert.match(render, /width:\s*fit-content !important/);
-assert.match(render, /\.panel\.dexscreener-panel\.collapsed \.local-experiment-banner/);
+assert.match(render, /\.panel\.dexscreener-panel\.collapsed \.chart-range-banner/);
 assert.match(render, /\.dexscreener-panel \.panel-drag-handle \{ cursor: grab/);
 assert.match(render, /button:focus-visible/);
 

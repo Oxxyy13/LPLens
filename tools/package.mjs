@@ -32,7 +32,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXT = join(ROOT, 'extension');
 const BUILD = join(ROOT, 'build');
 const START_MARKER = 'TESTING ONLY - STRIP THIS BLOCK BEFORE ANY DISTRIBUTION';
-const LOCAL_EXPERIMENT_MARKER = 'LPLENS_LOCAL_CHART_EXPERIMENT';
+const RETIRED_CHART_MARKER = 'LPLENS_LOCAL_CHART_EXPERIMENT';
 const FENCE_RE = /^\s*\/\/\s*-{10,}\s*$/;
 
 function abort(msg) {
@@ -64,17 +64,16 @@ export function assertNoFence(srcText) {
 }
 
 /**
- * MAIN-world chart measurement is intentionally a local feasibility experiment.
- * Refuse to package any extension tree that still carries its marker. This scan
- * must run before package.mjs deletes or writes build output.
+ * The former local chart prototype is now a production feature with explicit
+ * consent and disclosure. Its retired marker must never re-enter a package.
+ * Run this check before deleting or writing any build output.
  */
-export function assertNoLocalExperiment(dir = EXT) {
-  const marker = Buffer.from(LOCAL_EXPERIMENT_MARKER, 'utf8');
+export function assertNoRetiredChartPrototype(dir = EXT) {
+  const marker = Buffer.from(RETIRED_CHART_MARKER, 'utf8');
   for (const file of walk(dir)) {
     if (readFileSync(file).includes(marker)) {
-      abort('LOCAL-ONLY Dexscreener chart experiment marker found in '
-        + relative(ROOT, file).replace(/\\/g, '/') + '. '
-        + 'This experiment cannot be packaged. Remove the experiment and its '
+      abort('retired Dexscreener chart prototype marker found in '
+        + relative(ROOT, file).replace(/\\/g, '/') + '. Remove the legacy '
         + 'LPLENS_LOCAL_CHART_EXPERIMENT marker before building a release.');
     }
   }
@@ -273,7 +272,7 @@ function listZip(zipPath) {
 }
 
 async function main() {
-  assertNoLocalExperiment();
+  assertNoRetiredChartPrototype();
   const scanOnly = process.argv.includes('--scan-only');
   const skipLiveProbe = process.argv.includes('--skip-live-probe');
   assertNoFence(readFileSync(join(EXT, 'lib/chains.js'), 'utf8'));

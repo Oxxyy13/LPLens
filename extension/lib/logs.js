@@ -162,16 +162,42 @@ async function explorerGetLogs(url, fields, slot, label) {
   return parseExplorerLogs(await res.json(), label);
 }
 
-async function viaEtherscan(chainId, key, nfpm, topic1) {
-  const rows = await explorerGetLogs(ETHERSCAN_V2, {
-    chainid: String(chainId),
-    address: nfpm,
-    topic1,
-    fromBlock: '0',
-    toBlock: 'latest',
-    apikey: key,
-  }, etherscanSlot, 'etherscan');
-  return rows.map(normalise);
+async function viaEtherscan(
+  chainId, key, nfpm, topic1, fromBlock = 0, toBlock = 'latest',
+) {
+  const collected = [];
+  const seen = new Set();
+  let cursor = Number(fromBlock || 0);
+
+  for (let page = 0; page < BLOCKSCOUT_MAX_PAGES; page++) {
+    const rows = await explorerGetLogs(ETHERSCAN_V2, {
+      chainid: String(chainId),
+      address: nfpm,
+      topic1,
+      fromBlock: String(cursor),
+      toBlock: String(toBlock),
+      apikey: key,
+    }, etherscanSlot, 'etherscan');
+
+    let newest = cursor;
+    for (const row of rows) {
+      const rowKey = `${row.transactionHash}:${row.logIndex}`;
+      if (seen.has(rowKey)) continue;
+      seen.add(rowKey);
+      collected.push(row);
+      const block = Number(BigInt(row.blockNumber));
+      if (block > newest) newest = block;
+    }
+    if (rows.length < BLOCKSCOUT_PAGE) return collected.map(normalise);
+    const oldest = Number(BigInt(rows[0].blockNumber));
+    if (oldest === newest) {
+      throw new Error(
+        `etherscan: ${BLOCKSCOUT_PAGE} logs in block ${newest}, result cap would truncate`);
+    }
+    cursor = newest;
+  }
+  throw new Error(
+    `etherscan: exceeded ${BLOCKSCOUT_MAX_PAGES * BLOCKSCOUT_PAGE} log page cap`);
 }
 
 /**
@@ -185,13 +211,14 @@ async function viaEtherscan(chainId, key, nfpm, topic1) {
 async function viaBlockscoutRaw(baseUrl, fields) {
   const collected = [];
   const seen = new Set();
-  let fromBlock = 0;
+  let fromBlock = Number(fields.fromBlock || 0);
+  const toBlock = fields.toBlock === undefined ? 'latest' : String(fields.toBlock);
 
   for (let page = 0; page < BLOCKSCOUT_MAX_PAGES; page++) {
     const rows = await explorerGetLogs(baseUrl, {
       ...fields,
       fromBlock: String(fromBlock),
-      toBlock: 'latest',
+      toBlock,
     }, blockscoutSlot, 'blockscout');
 
     let newest = fromBlock;
@@ -287,12 +314,13 @@ async function viaHistoryRelayRaw(relay, chainId, fields) {
   const collected = [];
   const seen = new Set();
   let fromBlock = Number(fields.fromBlock || 0);
+  const toBlock = fields.toBlock === undefined ? 'latest' : String(fields.toBlock);
 
   for (let page = 0; page < BLOCKSCOUT_MAX_PAGES; page++) {
     const rows = await historyRelayPage(relay, chainId, {
       ...fields,
       fromBlock: String(fromBlock),
-      toBlock: 'latest',
+      toBlock,
     });
 
     let newest = fromBlock;
@@ -610,26 +638,137 @@ export async function fetchPositionLogs({
 }
 
 /**
+ * Exact bounded counterpart used to extend a trusted cached prefix.
+ *
+ * Unlike a lifetime read, an empty bounded interval is a successful chain
+ * fact. RPC is tried first because a small direct tail is freshest and does
+ * not consume hosted-relay allowance. Indexed sources are fallbacks for a
+ * longer dormant interval that a public RPC refuses.
+ */
+export async function fetchPositionLogsRange({
+  nfpm, tokenId, rpc, etherscanKey, etherscanChainId, blockscout,
+  historyRelay, historyRelayChainId, blockscoutRelay, blockscoutChainId,
+  fromBlock, toBlock, requireNonEmpty = false,
+}) {
+  const from = Number(fromBlock);
+  const to = Number(toBlock);
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)
+      || from < 0 || to < from) {
+    return { unavailable: 'invalid bounded history range' };
+  }
+
+  const hostedRelay = historyRelay || blockscoutRelay;
+  const hostedChainId = historyRelayChainId || blockscoutChainId;
+  const topic1 = '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
+  const errors = [];
+
+  const trySource = async (label, fn) => {
+    try {
+      const logs = await fn();
+      if (!Array.isArray(logs)) throw new Error(`${label}: malformed log result`);
+      if (logs.some((log) => !Number.isSafeInteger(log.block)
+          || log.block < from || log.block > to)) {
+        throw new Error(`${label}: returned a log outside the requested range`);
+      }
+      if (requireNonEmpty && logs.length === 0) {
+        throw new Error(`${label}: zero logs for a position lifetime`);
+      }
+      return { logs, source: label, fromBlock: from, toBlock: to };
+    } catch (err) {
+      errors.push(err.message || String(err));
+      return null;
+    }
+  };
+
+  let hit = await trySource('rpc-tail', () => viaRpcRange(rpc, nfpm, topic1, from, to));
+  if (hit) return hit;
+  if (etherscanKey && etherscanChainId) {
+    hit = await trySource('etherscan-tail',
+      () => viaEtherscan(etherscanChainId, etherscanKey, nfpm, topic1, from, to));
+    if (hit) return hit;
+  }
+  if (hostedRelay && hostedChainId) {
+    hit = await trySource(`${hostedRelayLabel(hostedChainId)}-tail`,
+      () => viaHistoryRelay(hostedRelay, hostedChainId, {
+        address: nfpm,
+        fromBlock: String(from),
+        toBlock: String(to),
+        topic1,
+      }));
+    if (hit) return hit;
+  }
+  if (blockscout) {
+    hit = await trySource('blockscout-tail',
+      () => viaBlockscout(blockscout, {
+        address: nfpm,
+        fromBlock: String(from),
+        toBlock: String(to),
+        topic1,
+      }));
+    if (hit) return hit;
+  }
+  return { unavailable: errors.join('; ') || 'bounded history unavailable' };
+}
+
+/** Canonical block number and hash for cache anchoring and reorg checks. */
+export async function fetchBlockCheckpoint(rpc, block = 'latest') {
+  try {
+    const tag = block === 'latest'
+      ? 'latest' : '0x' + BigInt(block).toString(16);
+    const header = await rpcCall(rpc, 'eth_getBlockByNumber', [tag, false]);
+    if (!header || header.number === undefined
+        || !/^0x[0-9a-f]{64}$/i.test(String(header.hash || ''))) {
+      throw new Error('block checkpoint unavailable');
+    }
+    const returnedBlock = Number(BigInt(header.number));
+    if (block !== 'latest' && returnedBlock !== Number(block)) {
+      throw new Error('block checkpoint did not match the requested block');
+    }
+    return {
+      block: returnedBlock,
+      hash: String(header.hash).toLowerCase(),
+    };
+  } catch (err) {
+    return { unavailable: err.message || String(err) };
+  }
+}
+
+/**
  * Read just-mined position events directly from the selected RPC. Explorer
  * indexes can lag a Collect/Increase/Decrease. Normal RPCs accept the initial
  * 128-block request; Alchemy free currently needs the ten-block fallback.
  */
-export async function fetchRecentPositionLogs({ rpc, nfpm, tokenId, lookback = 128 }) {
+export async function fetchRecentPositionLogs({
+  rpc, nfpm, tokenId, lookback = 128, fromBlock = null, toBlock = null,
+}) {
   const topic1 = '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
   try {
-    const latest = await rpcCall(rpc, 'eth_getBlockByNumber', ['latest', false]);
-    if (!latest || latest.number === undefined) throw new Error('latest block unavailable');
-    const to = Number(BigInt(latest.number));
-    const from = Math.max(0, to - lookback + 1);
+    let to;
+    if (toBlock === null || toBlock === undefined) {
+      const latest = await rpcCall(rpc, 'eth_getBlockByNumber', ['latest', false]);
+      if (!latest || latest.number === undefined) throw new Error('latest block unavailable');
+      to = Number(BigInt(latest.number));
+    } else {
+      to = Number(toBlock);
+    }
+    const from = fromBlock === null || fromBlock === undefined
+      ? Math.max(0, to - lookback + 1) : Number(fromBlock);
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to)
+        || from < 0 || to < from) throw new Error('invalid recent history range');
     try {
-      return { logs: await viaRpcRange(rpc, nfpm, topic1, from, to), source: 'recent-rpc' };
+      return {
+        logs: await viaRpcRange(rpc, nfpm, topic1, from, to),
+        source: 'recent-rpc', fromBlock: from, toBlock: to,
+      };
     } catch {
       const logs = [];
       for (let start = from; start <= to; start += 10) {
         const end = Math.min(to, start + 9);
         logs.push(...await viaRpcRange(rpc, nfpm, topic1, start, end));
       }
-      return { logs, source: 'recent-rpc-chunked' };
+      return {
+        logs, source: 'recent-rpc-chunked', fromBlock: from, toBlock: to,
+      };
     }
   } catch (err) {
     return { unavailable: err.message || String(err) };

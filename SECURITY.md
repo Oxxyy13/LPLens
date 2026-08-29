@@ -32,8 +32,8 @@ The extension has no wallet-provider or signing integration. It does not call
 The persistent optional Uniswap, ProjectX, and Dexscreener page scripts run in
 Chrome's isolated world. Their site permissions are separately granted, off at
 install, and revocable. None can access another extension's storage or wallet
-keys. The local-only Dexscreener chart experiment described below has one
-narrow, explicitly disclosed MAIN-world measurement step.
+keys. Dexscreener chart alignment has a separate, versioned consent control and
+uses the narrow, explicitly disclosed MAIN-world measurement described below.
 
 ## Permissions and data flow
 
@@ -57,21 +57,35 @@ Dexscreener contains only the pair page's URL-derived chain and pool identifier.
 It does not include the active wallet. The response supplies base/quote token
 addresses used to orient the independent LPLens range display.
 
-**LOCAL-ONLY EXPERIMENT:** This branch also tests chart-aligned range graphics.
-For one measurement at a time, the service worker passes anonymous LP range
-numbers to a narrowly scoped function in Dexscreener's MAIN world. The function
-reads chart mode, the latest public chart close, plot geometry, and
-price-to-coordinate results through a private TradingView interface. It receives
-no wallet address, token ID, PnL,
-access key, custom endpoint, or provider key. Its implementation does not read
-or call the wallet provider, create a TradingView drawing, alter autoscale, move
-the visible range, or otherwise change chart state. The persistent isolated
-content script validates the returned numbers and draws the LPLens SVG. Because
-the function runs in the page's world, Dexscreener page code could technically
-observe the anonymous range numbers. The private interface is brittle and may
-stop working when Dexscreener changes. This experiment is marked
-`LPLENS_LOCAL_CHART_EXPERIMENT`, and release packaging aborts while that marker
-exists anywhere in `extension/`.
+Chart alignment remains off unless `dexscreenerChartConsentV1` is strictly
+`true` in `chrome.storage.local`, and it also requires the independently granted
+Dexscreener site permission. A missing, false, malformed, or older consent value
+fails closed to LPLens's exact on-chain ruler. While a matching overlay is open,
+the service worker repeatedly executes a packaged, short-lived function in
+Dexscreener's MAIN world so the range follows chart movement and mode changes.
+Each call receives at most three unlabelled LP range values for low, current,
+and high, plus public pair-conversion values. The call receives no wallet address,
+token or position ID, PnL, access key, custom endpoint, or provider key directly.
+Unlabelled does not mean anonymous: the pool and bounds are public
+on-chain, so Dexscreener could correlate them with a specific position and owner
+while each call runs. The function reads chart mode, the latest public chart
+close once per measurement, plot geometry, and price-to-coordinate results
+through a private TradingView interface. Its
+implementation does not read or call the wallet provider, create a TradingView
+drawing, alter autoscale, move the visible range, or otherwise change chart
+state. The persistent isolated content script validates every returned result
+and draws the LPLens SVG. The public chart close stays inside the short-lived
+MAIN-world call. Only validated chart mode, plot geometry, and numeric
+coordinates return to the isolated overlay for drawing; the close is not
+returned. The returned result is not stored, logged, or transmitted over the network.
+Turning chart consent off stops measurement and removes the SVG. The
+private interface is brittle, so a failure falls back to the on-chain ruler.
+
+All executable JavaScript, including the MAIN-world measurement function, ships
+inside the extension package. LPLens does not download, import, evaluate, or
+interpret remote JavaScript or Wasm. The packaged function calls the chart
+interface already present on the page and treats its numeric result as untrusted
+data.
 
 When enabled in Settings, anonymous scan telemetry is limited to extension
 version, popup or side-panel surface, coarse outcome/count/duration buckets,
@@ -95,9 +109,9 @@ diff -r extension build/lplens-0.30.0
 
 The final `diff` must print nothing on a release commit. `tools/package.mjs`
 also parses every JavaScript file, runs a live public-history probe, and aborts
-if it detects a credential-shaped value or a development-key fence. This local
-experiment branch is intentionally not reproducible as a release package:
-packaging aborts before touching `build/` while the local chart marker remains.
+if it detects a credential-shaped value or a development-key fence. It also
+rejects the chart-prototype development marker if that marker ever reappears in
+`extension/`.
 
 ## Secrets
 

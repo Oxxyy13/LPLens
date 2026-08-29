@@ -4,10 +4,10 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const worker = readFileSync(new URL('../extension/sw.js', import.meta.url), 'utf8');
-const experiment = worker.match(
-  /\/\* BEGIN LPLENS DEXSCREENER MAIN-WORLD EXPERIMENT[\s\S]*?\*\/([\s\S]*?)\/\* END LPLENS DEXSCREENER MAIN-WORLD EXPERIMENT \*\//,
+const bridge = worker.match(
+  /\/\* BEGIN LPLENS DEXSCREENER MAIN-WORLD CHART BRIDGE[\s\S]*?\*\/([\s\S]*?)\/\* END LPLENS DEXSCREENER MAIN-WORLD CHART BRIDGE \*\//,
 );
-assert.ok(experiment, 'service worker is missing the fenced local chart experiment');
+assert.ok(bridge, 'service worker is missing the production chart bridge');
 
 const context = vm.createContext({ URL });
 context.innerWidth = 1200;
@@ -15,7 +15,7 @@ context.innerHeight = 800;
 context.getComputedStyle = (node) => node.__style || ({
   display: 'block', visibility: 'visible', opacity: '1',
 });
-vm.runInContext(`${experiment[1]}
+vm.runInContext(`${bridge[1]}
 globalThis.__bridge = {
   sanitizeDexscreenerChartRequest,
   measureDexscreenerChart,
@@ -44,7 +44,7 @@ const request = sanitize({
 }, sender);
 assert.equal(request.ok, true);
 assert.deepEqual(plain(request.ranges), [{ id: 'r0', lo: 1, now: 4, hi: 3 }],
-  'request sanitizer must reconstruct only anonymous bounds');
+  'request sanitizer must reconstruct only unlabelled bounds');
 assert.equal(request.tabId, 17);
 assert.equal(request.chainSlug, 'robinhood');
 assert.equal(request.poolRef, '0x2b0d0183d017c58b924401ca8ac362f6e01f0e9e');
@@ -55,7 +55,7 @@ for (const secret of ['wallet', 'tokenId', 'pnl', 'accessKey', 'must-not-cross',
 assert.equal(sanitize({
   type: 'LPLENS_DEXSCREENER_CHART_GEOMETRY', href,
   ranges: [{ id: 'r1', lo: 1, now: 2, hi: 3 }],
-}, sender).reason, 'invalid-ranges', 'anonymous range ids must be sequential');
+}, sender).reason, 'invalid-ranges', 'unlabelled range ids must be sequential');
 assert.equal(sanitize({
   type: 'LPLENS_DEXSCREENER_CHART_GEOMETRY', href,
   ranges: [0, 1, 2, 3].map((n) => ({ id: `r${n}`, lo: 1, now: 2, hi: 3 })),
@@ -209,7 +209,7 @@ function installChart({
   };
 }
 
-installChart();
+installChart({ seriesClose: 4 });
 const measured = plain(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
@@ -273,7 +273,7 @@ installChart({ frameTitles: [
   'Switch to market cap chart',
   'Switch to price in WETH',
   { title: 'Switch to USD price', visibility: 'hidden' },
-] });
+], seriesClose: 10 });
 assert.equal(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
@@ -528,7 +528,7 @@ assert.equal(invertedNativeMeasured.inverted, true);
 assert.ok(invertedNativeMeasured.ranges[0].hiY > invertedNativeMeasured.ranges[0].loY,
   'an inverted native scale must preserve its real coordinate direction');
 
-installChart({ chartTitle: 'Switch to price chart' });
+installChart({ chartTitle: 'Switch to price chart', seriesClose: 100 });
 const marketCapUsdMeasured = plain(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
@@ -537,7 +537,11 @@ const marketCapUsdMeasured = plain(measure({
 assert.equal(marketCapUsdMeasured.displayMode, 'mcap-usd');
 assert.deepEqual(marketCapUsdMeasured.ranges.map(({ loValue, nowValue, hiValue }) =>
   ({ loValue, nowValue, hiValue })), [{ loValue: 50, nowValue: 100, hiValue: 150 }]);
-installChart({ chartTitle: 'Switch to price chart', unitTitle: 'Switch to USD price' });
+installChart({
+  chartTitle: 'Switch to price chart',
+  unitTitle: 'Switch to USD price',
+  seriesClose: 20,
+});
 const marketCapNativeMeasured = plain(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
@@ -564,6 +568,7 @@ installChart({
     { checkVisible: false, priceToCoordinate: () => 999 },
     {},
   ],
+  seriesClose: 4,
 });
 assert.equal(measure({
   href,
@@ -577,6 +582,7 @@ installChart({
     {},
   ],
   elementsFromPoint: (_x, _y, frames) => [frames[1], frames[0]],
+  seriesClose: 4,
 });
 assert.equal(measure({
   href,
@@ -589,6 +595,7 @@ installChart({
     { rect: { left: 650, top: 50, width: 500, height: 250 } },
   ],
   elementsFromPoint: (x, _y, frames) => x < 600 ? [frames[0]] : [frames[1]],
+  seriesClose: 4,
 });
 assert.equal(measure({
   href,
@@ -601,6 +608,7 @@ installChart({
     { display: 'none', priceToCoordinate: () => 999 },
     {},
   ],
+  seriesClose: 4,
 });
 assert.equal(measure({
   href,
@@ -612,6 +620,7 @@ installChart({
     {},
     { rect: { left: 700, top: 50, width: 100, height: 50 }, priceToCoordinate: () => 999 },
   ],
+  seriesClose: 4,
 });
 assert.equal(measure({
   href,
@@ -621,7 +630,7 @@ assert.equal(measure({
 installChart({ plotRects: [
   { rect: { left: 20, top: 40, width: 900, height: 420 }, display: 'none' },
   { left: 30, top: 50, width: 700, height: 350 },
-] });
+], seriesClose: 4 });
 assert.equal(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
@@ -630,7 +639,7 @@ assert.equal(measure({
 installChart({ plotRects: [
   { left: 20, top: 40, width: 600, height: 250 },
   { left: 10, top: 10, width: 900, height: 450 },
-] });
+], seriesClose: 4 });
 assert.equal(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
@@ -682,7 +691,8 @@ assert.equal(measure({
   href,
   ranges: [{ id: 'r0', lo: 1, now: 2, hi: 3 }],
   pair: {},
-}).reason, 'pair-conversion-unavailable');
+}).reason, 'chart-mode-unverified',
+'a converted chart without public quote evidence must fail before coordinate conversion');
 
 const validationRequest = {
   ...request,
@@ -744,7 +754,7 @@ assert.equal(validate({
 }, validationRequest, pairMetadata).reason, 'invalid-result',
 'page-world labels must match worker-known conversion inputs');
 
-const bridgeSource = experiment[1];
+const bridgeSource = bridge[1];
 for (const forbidden of [
   /postMessage\s*\(/,
   /addEventListener\s*\(/,
@@ -764,7 +774,11 @@ assert.match(worker, /func:\s*measureDexscreenerChart/);
 assert.match(worker, /Promise\.race\(\[execution, timeout\]\)/);
 assert.match(worker, /timedOut \? 'execution-timeout' : 'execution-failed'/);
 assert.doesNotMatch(worker, /allFrames:\s*true/);
-assert.match(worker, /priceNative:\s*positiveNumber\(pair\.priceNative\)/);
-assert.match(worker, /marketCap:\s*positiveNumber\(pair\.marketCap\)/);
+assert.match(worker,
+  /priceNative:\s*metadata && metadata\.quoteFresh === true[\s\S]*?finitePositive\(metadata\.priceNative\)/,
+  'MAIN-world conversion payload must receive only a fresh native quote');
+assert.match(worker,
+  /marketCap:\s*metadata && metadata\.quoteFresh === true[\s\S]*?finitePositive\(metadata\.marketCap\)/,
+  'MAIN-world conversion payload must receive only a fresh market-cap quote');
 
 console.log('Dexscreener MAIN bridge: strict payload, chart conversion, viewport geometry and fail-closed validation pass');

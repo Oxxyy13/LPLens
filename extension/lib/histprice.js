@@ -274,7 +274,7 @@ async function referenceBlockOnChain(chainKey, target, timestamp, opts = {}) {
 }
 
 /** Resolve the chain's USDC/WETH reference pool from the factory, once. */
-async function referencePool(chainKey, rpc) {
+export async function referencePool(chainKey, rpc) {
   if (poolCache.has(chainKey)) return poolCache.get(chainKey);
   const chain = CHAINS[chainKey];
   const ref = chain && chain.usdRef;
@@ -296,7 +296,10 @@ async function referencePool(chainKey, rpc) {
       break;
     } catch { /* try the next fee tier */ }
   }
-  poolCache.set(chainKey, resolved);
+  // A configured reference pool can be deployed later, and a zero response is
+  // indistinguishable from a lagging or misbehaving RPC. Only a successfully
+  // decoded nonzero pool is immutable enough to cache.
+  if (resolved) poolCache.set(chainKey, resolved);
   return resolved;
 }
 

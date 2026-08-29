@@ -6,6 +6,7 @@ import vm from 'node:vm';
 const renderSource = readFileSync(new URL('../extension/render.js', import.meta.url), 'utf8');
 const overlaySource = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const workerSource = readFileSync(new URL('../extension/sw.js', import.meta.url), 'utf8');
+const pairCacheSource = readFileSync(new URL('../extension/lib/dexscreener.js', import.meta.url), 'utf8');
 const context = vm.createContext({ globalThis: {} });
 vm.runInContext(renderSource, context, { filename: 'render.js' });
 
@@ -147,8 +148,10 @@ assert.match(overlaySource, /function dexscreenerPortfolioCard[\s\S]*position #/
 const pairStart = workerSource.indexOf('async function cachedDexscreenerPair');
 const pairEnd = workerSource.indexOf("chrome.runtime.onMessage.addListener", pairStart);
 const pairBlock = workerSource.slice(pairStart, pairEnd);
-assert.match(pairBlock, /api\.dexscreener\.com\/latest\/dex\/pairs/);
 assert.match(pairBlock, /async function cachedDexscreenerPair\(chainKey, poolRef\)/);
+assert.match(pairBlock, /return dexscreenerPairs\.get\(apiChain, poolRef\)/);
+assert.match(pairCacheSource, /api\.dexscreener\.com\/latest\/dex\/pairs/);
+assert.match(pairCacheSource, /AbortSignal\.timeout\(5_000\)/);
 assert.doesNotMatch(pairBlock, /address,\s*store|store\.address|walletAddress|activeAddress/,
   'Dexscreener pair metadata request must not receive the active wallet');
 assert.match(workerSource, /nativeEquivalent \? String\(usdRef\.weth/,

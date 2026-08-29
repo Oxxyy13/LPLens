@@ -26,20 +26,28 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.30.0 candidate - support diagnostics and Dexscreener context
+## Status: 0.30.0 production candidate
 
-> **LOCAL-ONLY EXPERIMENT:** This branch tests chart-aligned LP ranges on
-> Dexscreener. It is not the Store candidate described below and cannot be
-> packaged. For one measurement at a time, the service worker gives a narrowly
-> scoped MAIN-world function anonymous LP range numbers and reads the chart mode,
-> latest public chart close, and geometry through Dexscreener's private TradingView interface. It does not
-> provide a wallet address, token ID, PnL, access key, endpoint, or provider key.
-> It does not read or call the wallet provider and does not change chart state.
-> The persistent isolated content script draws LPLens's own overlay from the
-> returned numeric coordinates. Dexscreener page code could technically observe
-> the range numbers while the function runs, and the private chart interface may
-> break when Dexscreener changes. `tools/package.mjs` rejects the experiment
-> marker so this code cannot become a release accidentally.
+Dexscreener chart alignment has a separate, versioned consent control and is
+off until the user enables it. Site permission alone shows the existing exact
+on-chain range ruler and does not start chart measurement. While a matching
+overlay is open with chart alignment enabled, the service worker repeatedly
+runs a packaged, short-lived MAIN-world function so the range follows chart
+movement and mode changes. Each call receives at most three unlabelled LP range
+values for low, current, and high, plus public pair-conversion values. The call
+receives no wallet address, token or position ID, PnL, access key, endpoint, or
+provider key directly. Unlabelled does not mean anonymous: the pool and
+bounds are public on-chain, so Dexscreener could correlate them with a specific
+position and owner while each call runs. The function reads chart mode, the
+latest public chart close once per measurement, plot geometry, and numeric price
+coordinates through Dexscreener's private TradingView interface. The close stays
+inside that short-lived MAIN-world call. Only validated chart mode, plot geometry,
+and numeric coordinates return to LPLens's isolated overlay for the drawing; the
+close is not returned. The returned result is not stored, logged, or transmitted
+over the network. The function does not read or call the wallet provider and does
+not change chart state. Turning chart alignment off stops the measurement and
+removes the chart graphic immediately. Because the interface is private,
+alignment is best effort and falls back to LPLens's own range ruler.
 
 On Dexscreener, drag the dotted panel header to move LPLens anywhere in the
 viewport. Its position is stored only in `chrome.storage.local` and is clamped
@@ -48,8 +56,8 @@ the panel to a small LPLens pill; double-clicking the header restores the defaul
 dock. These layout preferences apply only to Dexscreener and do not change the
 Uniswap or ProjectX overlays.
 
-The Chrome Web Store currently serves 0.28.0. This 0.30.0 candidate includes the
-browser-managed portfolio side panel that can stay open while the user changes
+Version 0.30.0 includes the browser-managed portfolio side panel that can stay
+open while the user changes
 tabs. It restores the most recent rendered portfolio view immediately, then
 refreshes only when the user asks. The snapshot stays in
 `chrome.storage.local`, is never used as an input to calculations, and is
@@ -57,14 +65,17 @@ bounded so a large portfolio cannot exhaust extension storage. Each position's
 price unit can be flipped without changing its accounting, and `vs holding`
 shows both dollars and percentage when available. Unwanted or unsolicited LP
 NFTs can be hidden locally from the side panel; hidden cards are excluded from
-portfolio counts and totals and can be restored at any time. Multi-wallet scan
-progress stays compact, while per-wallet and per-chain outcomes remain available
-under an expandable `Scan details` control. Portfolio scans still default to all
-supported networks, but the popup and side panel now expose a profile-local
-network selector. Turning off a network affects portfolio sweeps only, and the
-saved panel view records its exact network scope so a changed selection is never
-mistaken for an already-refreshed result. Robinhood's public RPC reads are
-batched in groups of 25 with item retries and a single-call fallback.
+portfolio counts and totals and can be restored at any time. The normal panel
+keeps only useful state such as the last refresh, a compact chain-change prompt,
+or a short refresh or failure message. Routine scan fractions, empty-chain
+chatter, wallet counts, position counts, and NFT identifiers stay out of the
+main view. Friendly issue summaries, sanitized diagnostics, and the report link
+live under `Help & diagnostics`. Portfolio scans still default to all supported
+networks, but the popup and side panel expose a profile-local network checklist.
+Turning off a network affects portfolio sweeps only, and the saved panel view
+records its exact network scope so a changed selection is never mistaken for an
+already-refreshed result. Robinhood's public RPC reads are batched in groups of
+25 with item retries and a single-call fallback.
 
 Portfolio totals now distinguish complete, partial, and unavailable metrics.
 Positive and negative return values are colored consistently, while coverage
@@ -113,9 +124,8 @@ diff -r extension build/lplens-0.30.0
 That diff is empty on a release commit. `tools/package.mjs` also refuses to
 produce a package if it finds anything credential-shaped in the output, and
 aborts outright if anyone reintroduces a hardcoded key into
-`extension/lib/chains.js`. On this local experiment branch, the package command
-is expected to abort before changing `build/` while
-`LPLENS_LOCAL_CHART_EXPERIMENT` remains anywhere in `extension/`.
+`extension/lib/chains.js`. It also rejects the development-fence marker used
+during chart prototyping if that marker ever reappears in `extension/`.
 
 Two claims worth checking directly, because they are the ones that matter:
 
@@ -332,23 +342,31 @@ understanding rather than skimming:
   wallet does not change that selection. It never
   reads balances, forms, connected-wallet state, wallet-provider objects, or
   signing prompts. Its only page writes are its own closed-shadow-root panel and
-  local experiment range graphic; it never moves or rewrites anything either
-  site rendered.
+  optional range graphic; it never moves or rewrites anything either site
+  rendered.
 - The persistent script runs in Chrome's **isolated world**, so
   `window.ethereum`, the page's JavaScript, and the wallet are unreachable from
-  that script by construction. The local chart experiment is a disclosed,
-  narrow exception: the service worker executes a one-shot MAIN-world function
-  on Dexscreener. That function receives at most anonymous LP low, current, and
-  high range numbers. It reads only chart mode, the latest public chart close,
-  plot geometry, and the numeric price-to-coordinate mapping from Dexscreener's
-  private TradingView interface.
-  It receives no wallet address, token ID, PnL, access key, custom endpoint, or
-  provider key. Its code does not read or call a wallet provider and does not
-  create drawings, change the visible range, alter autoscale, or otherwise
-  change chart state. The page could technically observe the range numbers
-  during that MAIN-world call. The isolated content script validates the result
-  and draws the SVG itself. Because the chart interface is private, alignment is
-  best effort and may stop working after a Dexscreener change.
+  that script by construction. Chart alignment is a separately disclosed and
+  versioned opt-in. While a matching overlay is open, the service worker repeats
+  a packaged, short-lived MAIN-world function so the graphic follows chart
+  changes. Each call receives at most three unlabelled LP range values for low,
+  current, and high, plus public pair-conversion values. The call receives no
+  wallet address, token or position ID, PnL, access key, custom endpoint, or
+  provider key directly. Unlabelled does not mean anonymous: the pool and bounds are
+  public on-chain, so Dexscreener could correlate them with a specific position
+  and owner while each call runs. It reads only chart mode, the latest public
+  chart close once per measurement, plot geometry, and the numeric
+  price-to-coordinate mapping from Dexscreener's private TradingView interface.
+  Its code does not read or call a wallet provider
+  and does not create drawings, change the visible range, alter autoscale, or
+  otherwise change chart state. The public chart close stays inside the
+  short-lived MAIN-world call. Only validated chart mode, plot geometry, and
+  numeric coordinates return to the isolated script for drawing; the close is
+  not returned. The returned result is not stored, logged, or transmitted over
+  the network. The isolated content script validates every result and draws the SVG itself. Turning the consent
+  off removes that SVG and returns to the exact on-chain ruler. Because the
+  chart interface is private, alignment is best effort and may stop working
+  after a Dexscreener change.
 - It has **no network access**. MV3 stripped cross-origin privileges from
   content scripts, so every RPC call happens in the service worker and the
   overlay only ever receives finished data.
@@ -375,19 +393,24 @@ text-node context, never inside an attribute, so no element or handler can be
 constructed. Verified against five injection payloads. MV3's default CSP
 (`script-src 'self'`) blocks inline handlers as a second layer.
 
-**Privacy, not security:** the address you paste is sent to the RPC endpoint and
-to DexScreener, which learn that your IP is interested in that address. For v4
-ownership enumeration, an address-bearing log filter also passes through the
-LPLens Worker to Blockscout Pro; it is processed but not stored. Point the
-options page at your own RPC to reduce direct RPC exposure. If a v4 NFT has
+**Privacy, not security:** the address you paste is sent to the RPC and history
+services needed for the scan. Dexscreener receives token contract addresses for
+price marks and, for its optional overlay, the URL-derived chain and pool
+identifier without the wallet address. Those hosts see ordinary HTTPS metadata,
+including your IP address. For v4 ownership enumeration, an address-bearing log
+filter also passes through the LPLens Worker to Blockscout Pro; it is processed
+but not stored. Point the options page at your own RPC to reduce direct RPC
+exposure. If a v4 NFT has
 later additions, its public transaction hashes are sent directly to that
 chain's public Blockscout trace endpoint; this is what makes the principal/fee
 split exact without sending wallet credentials or requesting a signature.
-Saved addresses and the most recently rendered portfolio view are stored with
-`chrome.storage.local`, deliberately **not** `chrome.storage.sync`, so they are
-never carried into a Google account. The saved view is local display output,
-not accounting input, and is replaced after a successful refresh. The Copy
-diagnostics control saves only version, UI surface, coarse scan counts,
+Saved addresses, chain choices, hidden-position choices, overlay layout,
+Dexscreener chart consent, and the most recently rendered portfolio view are
+stored with `chrome.storage.local`, deliberately **not**
+`chrome.storage.sync`, so they are never carried into a Google account. The
+saved view is local display output, not accounting input, and is replaced after
+a successful refresh. The Copy diagnostics control saves only version, UI
+surface, coarse scan counts,
 allowlisted error categories, and local feature state. It excludes wallets,
 labels, tokens, pools, positions, keys, custom endpoints, and raw errors, and it
 leaves the browser only when the user copies it. If anonymous scan outcomes are

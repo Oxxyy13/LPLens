@@ -15,12 +15,12 @@
 import { loadPositionByVersion, loadPositions } from './lib/positions.js';
 import { entitlement, historyRelayCredentials } from './lib/license.js';
 import { CHAINS } from './lib/chains.js';
+import { createDexscreenerPairCache } from './lib/dexscreener.js';
 
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
 const dexscreenerScanCache = new Map();
-const dexscreenerPairCache = new Map();
+const dexscreenerPairs = createDexscreenerPairCache();
 const DEXSCREENER_CACHE_MS = 60_000;
-const DEXSCREENER_PAIR_CACHE_MS = 10 * 60_000;
 const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
 
 async function dexscreenerPageAccess(sender) {
@@ -31,6 +31,19 @@ async function dexscreenerPageAccess(sender) {
   } catch {
     return false;
   }
+}
+
+async function dexscreenerChartConsent() {
+  try {
+    const saved = await chrome.storage.local.get(['dexscreenerChartConsentV1']);
+    return saved.dexscreenerChartConsentV1 === true;
+  } catch {
+    return false;
+  }
+}
+
+async function dexscreenerChartAccess(sender) {
+  return (await dexscreenerPageAccess(sender)) && (await dexscreenerChartConsent());
 }
 
 // Concurrency limit across ALL callers. One position load issues 6-10 fetches,
@@ -91,57 +104,10 @@ async function cachedDexscreenerPositions(chainKey, address, store) {
 async function cachedDexscreenerPair(chainKey, poolRef) {
   // This request contains only the two values already present in the pair-page
   // URL. The active LPLens wallet is deliberately not accepted by this helper.
-  const key = `${chainKey}:${poolRef}`;
-  const existing = dexscreenerPairCache.get(key);
-  if (existing && Object.prototype.hasOwnProperty.call(existing, 'data')
-      && Date.now() - existing.at < DEXSCREENER_PAIR_CACHE_MS) {
-    return existing.data;
-  }
-  if (existing && existing.promise) return existing.promise;
-
-  const promise = (async () => {
-    const chain = CHAINS[chainKey];
-    const apiChain = String(chain && chain.dexscreener || '').toLowerCase();
-    if (!apiChain) return null;
-    const url = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(apiChain)}/${encodeURIComponent(poolRef)}`;
-    const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-    if (!response.ok) throw new Error(`Dexscreener pair lookup failed: HTTP ${response.status}`);
-    const json = await response.json();
-    const candidates = Array.isArray(json && json.pairs) ? json.pairs : [];
-    const pair = candidates.find((item) =>
-      String(item && item.pairAddress || '').toLowerCase() === poolRef);
-    if (!pair) return null;
-
-    const token = (value) => {
-      const address = String(value && value.address || '').toLowerCase();
-      if (!/^0x[0-9a-f]{40}$/.test(address)) return null;
-      return { address, symbol: String(value && value.symbol || '').slice(0, 32) };
-    };
-    const baseToken = token(pair.baseToken);
-    const quoteToken = token(pair.quoteToken);
-    const positiveNumber = (value) => {
-      const number = Number(value);
-      return Number.isFinite(number) && number > 0 ? number : null;
-    };
-    return baseToken && quoteToken ? {
-      baseToken,
-      quoteToken,
-      priceNative: positiveNumber(pair.priceNative),
-      priceUsd: positiveNumber(pair.priceUsd),
-      marketCap: positiveNumber(pair.marketCap),
-      fdv: positiveNumber(pair.fdv),
-    } : null;
-  })();
-
-  dexscreenerPairCache.set(key, { promise });
-  try {
-    const data = await promise;
-    dexscreenerPairCache.set(key, { data, at: Date.now() });
-    return data;
-  } catch (err) {
-    dexscreenerPairCache.delete(key);
-    throw err;
-  }
+  const chain = CHAINS[chainKey];
+  const apiChain = String(chain && chain.dexscreener || '').toLowerCase();
+  if (!apiChain) return null;
+  return dexscreenerPairs.get(apiChain, poolRef);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -249,6 +215,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         pairError = 'pair-metadata-unavailable';
       }
     }
+    // Permission may be revoked while the gated scan or pair request is in
+    // flight. Never return a wallet address or position payload afterward.
+    if (!(await dexscreenerPageAccess(sender))) {
+      return {
+        ok: false,
+        permissionRevoked: true,
+        error: 'Dexscreener page access was turned off.',
+      };
+    }
     const usdRef = CHAINS[chainKey].usdRef || {};
     const wrappedNative = usdRef.nativeEquivalent ? String(usdRef.weth || '').toLowerCase() : '';
     const safe = JSON.parse(JSON.stringify({ address, positions, pair, pairError, wrappedNative }, (_key, value) =>
@@ -262,18 +237,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-/* BEGIN LPLENS DEXSCREENER MAIN-WORLD EXPERIMENT
+/* BEGIN LPLENS DEXSCREENER MAIN-WORLD CHART BRIDGE
  *
- * LPLENS_LOCAL_CHART_EXPERIMENT
- *
- * This is intentionally a local feasibility experiment. A single, synchronous
- * MAIN-world call measures Dexscreener's chart coordinate system, then exits.
+ * A single, synchronous MAIN-world call measures Dexscreener's chart
+ * coordinate system, then exits.
  * It never installs a listener, sends a page message, creates a TradingView
- * drawing, or reads wallet/provider state. The caller still discloses the three
- * anonymous LP price bounds to page-world code, which is why this marker is a
- * hard packaging fence rather than a production feature flag.
+ * drawing, or reads wallet/provider state. The caller still discloses up to
+ * three unlabelled LP price bounds to page-world code. Because the pool and
+ * bounds are public on-chain, page code could correlate them with a position
+ * and owner. This bridge runs only after both optional site permission and
+ * explicit chart consent are enabled.
  */
-const LPLENS_LOCAL_CHART_EXPERIMENT = true;
 
 function sanitizeDexscreenerChartRequest(msg, sender) {
   const fail = (reason) => ({ ok: false, reason });
@@ -567,7 +541,7 @@ function measureDexscreenerChart(payload) {
     const marketCap = pairValue('marketCap') || pairValue('fdv');
     let seriesMode = null;
     const now = ranges[0].now;
-    const expectedModes = [
+    const modeCandidates = [
       { mode: 'price-native', kind: 'price', unit: 'native', value: now },
       { mode: 'price-usd', kind: 'price', unit: 'usd',
         value: priceNative && priceUsd ? now * priceUsd / priceNative : null },
@@ -575,9 +549,16 @@ function measureDexscreenerChart(payload) {
         value: priceUsd && marketCap ? now * marketCap / priceUsd : null },
       { mode: 'mcap-usd', kind: 'mcap', unit: 'usd',
         value: priceNative && marketCap ? now * marketCap / priceNative : null },
-    ].filter((candidate) => (titleMode || !chartKind || candidate.kind === chartKind)
-      && (titleMode || !currentUnit || candidate.unit === currentUnit));
-    if (expectedModes.length && expectedModes.every((candidate) => positive(candidate.value))) {
+    ];
+    const expectedModes = titleMode
+      ? modeCandidates.filter((candidate) => positive(candidate.value))
+      : modeCandidates.filter((candidate) =>
+        (!chartKind || candidate.kind === chartKind)
+          && (!currentUnit || candidate.unit === currentUnit));
+    if (!titleMode && expectedModes.some((candidate) => !positive(candidate.value))) {
+      expectedModes.length = 0;
+    }
+    if (expectedModes.length) {
       let displayedClose = null;
       try {
         const series = typeof chart.getSeries === 'function' ? chart.getSeries() : null;
@@ -608,6 +589,12 @@ function measureDexscreenerChart(payload) {
     }
     const displayMode = titleMode || seriesMode;
     if (!displayMode) return fail('unsupported-chart-mode');
+    // Native price needs no external conversion. Every converted mode does,
+    // so require the public displayed close to independently agree with the
+    // selected mode instead of trusting a control title alone.
+    if (displayMode !== 'price-native' && !seriesMode) {
+      return fail('chart-mode-unverified');
+    }
 
     let factor = 1;
     if (displayMode === 'price-usd') {
@@ -744,6 +731,7 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
     'stale-route', 'invalid-ranges', 'chart-frame-ambiguous',
     'chart-frame-unavailable', 'chart-api-unavailable',
     'unsupported-price-scale', 'unsupported-chart-mode', 'chart-mode-conflict',
+    'chart-mode-unverified',
     'pair-conversion-unavailable', 'chart-geometry-unavailable',
     'coordinate-unavailable', 'measurement-failed',
   ]);
@@ -847,15 +835,17 @@ function validateDexscreenerChartResult(raw, expected, pairMetadata = {}) {
     },
   };
 }
-/* END LPLENS DEXSCREENER MAIN-WORLD EXPERIMENT */
+/* END LPLENS DEXSCREENER MAIN-WORLD CHART BRIDGE */
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.type !== 'LPLENS_DEXSCREENER_CHART_GEOMETRY') return false;
 
   (async () => {
-    if (!LPLENS_LOCAL_CHART_EXPERIMENT) return { ok: false, reason: 'experiment-disabled' };
     if (!(await dexscreenerPageAccess(sender))) {
       return { ok: false, reason: 'permission-revoked' };
+    }
+    if (!(await dexscreenerChartConsent())) {
+      return { ok: false, reason: 'chart-consent-required' };
     }
     const request = sanitizeDexscreenerChartRequest(msg, sender);
     if (!request.ok) return request;
@@ -879,12 +869,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       href: request.href,
       ranges: request.ranges.map(({ id, lo, now, hi }) => ({ id, lo, now, hi })),
       pair: {
-        priceNative: finitePositive(metadata && metadata.priceNative),
-        priceUsd: finitePositive(metadata && metadata.priceUsd),
-        marketCap: finitePositive(metadata && metadata.marketCap),
-        fdv: finitePositive(metadata && metadata.fdv),
+        priceNative: metadata && metadata.quoteFresh === true
+          ? finitePositive(metadata.priceNative) : null,
+        priceUsd: metadata && metadata.quoteFresh === true
+          ? finitePositive(metadata.priceUsd) : null,
+        marketCap: metadata && metadata.quoteFresh === true
+          ? finitePositive(metadata.marketCap) : null,
+        fdv: metadata && metadata.quoteFresh === true
+          ? finitePositive(metadata.fdv) : null,
       },
     };
+
+    // Re-check after pair lookup. Site permission or chart consent can change
+    // while the network request is pending.
+    if (!(await dexscreenerChartAccess(sender))) {
+      return { ok: false, reason: 'permission-revoked' };
+    }
 
     let timer = null;
     let timedOut = false;
@@ -904,6 +904,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const injected = await Promise.race([execution, timeout]);
       if (!Array.isArray(injected) || injected.length !== 1) {
         return { ok: false, reason: 'invalid-result' };
+      }
+      if (!(await dexscreenerChartAccess(sender))) {
+        return { ok: false, reason: 'permission-revoked' };
       }
       return validateDexscreenerChartResult(injected[0].result, request, payload.pair);
     } catch {

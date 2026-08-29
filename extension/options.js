@@ -101,9 +101,11 @@ document.getElementById('save').addEventListener('click', () => {
 const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
 const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
 const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
+const DEXSCREENER_CHART_CONSENT_KEY = 'dexscreenerChartConsentV1';
 const permBox = document.getElementById('overlayPerm');
 const projectxPermBox = document.getElementById('projectxOverlayPerm');
 const dexscreenerPermBox = document.getElementById('dexscreenerOverlayPerm');
+const dexscreenerChartConsentBox = document.getElementById('dexscreenerChartConsent');
 const report = document.getElementById('permReport');
 
 /** Oxford-comma join of RPC method names as <code> tags. Driven by RPC_METHODS. */
@@ -116,14 +118,18 @@ function rpcMethodList(methods) {
 
 async function paintPermissions() {
   const mf = chrome.runtime.getManifest();
-  const [granted, projectxGranted, dexscreenerGranted] = await Promise.all([
+  const [granted, projectxGranted, dexscreenerGranted, chartConsentStore] = await Promise.all([
     chrome.permissions.contains({ origins: [OVERLAY_ORIGIN] }),
     chrome.permissions.contains({ origins: [PROJECTX_OVERLAY_ORIGIN] }),
     chrome.permissions.contains({ origins: [DEXSCREENER_OVERLAY_ORIGIN] }),
+    chrome.storage.local.get(DEXSCREENER_CHART_CONSENT_KEY),
   ]);
+  const chartConsented = chartConsentStore
+    && chartConsentStore[DEXSCREENER_CHART_CONSENT_KEY] === true;
   permBox.checked = granted;
   projectxPermBox.checked = projectxGranted;
   dexscreenerPermBox.checked = dexscreenerGranted;
+  dexscreenerChartConsentBox.checked = chartConsented;
 
   const pageRows = [];
   if (granted) pageRows.push(`<li class="yes"><b>app.uniswap.org position pages</b> — can read and add
@@ -134,13 +140,22 @@ async function paintPermissions() {
   if (dexscreenerGranted) pageRows.push(`<li class="yes"><b>dexscreener.com pair pages</b> - can read
     the chain and pool identifier in the URL and append a matching-position panel.
     It sends those two route values, without the wallet address, to api.dexscreener.com to match
-    token orientation. It uses the active overlay wallet selected in LPLens. This local experiment
-    also gives a one-shot MAIN-world function up to three anonymous ranges so it can read only the
-    chart mode, latest public chart close, plot geometry and numeric price coordinates. It does not give that function the
-    wallet address, position ID, PnL, access key, endpoint or provider key.</li>`);
+    token orientation. It uses the active overlay wallet selected in LPLens.</li>`);
   const pageAccess = pageRows.length ? pageRows.join('')
     : `<li class="no"><b>No web page at all.</b> All overlays are off, so no
          content script is registered anywhere.</li>`;
+  const chartAccess = chartConsented
+    ? `<li class="yes"><b>Separately approved.</b> While a matching overlay is open,
+       a packaged short-lived MAIN-world function repeats so the range follows the chart.
+       It receives up to three unlabelled ranges plus public pair-conversion values.
+       The pool and bounds are public on-chain, so the page could correlate them to a
+       position and owner. The latest public chart close stays inside the MAIN-world call;
+       only validated chart mode, geometry and numeric coordinates return to the overlay.
+       The call is not directly given a wallet address, position ID, PnL, access key,
+       endpoint or provider key.
+       ${dexscreenerGranted ? '' : 'It cannot run until Dexscreener site access is also enabled.'}</li>`
+    : `<li class="no"><b>Off.</b> Site access alone uses LPLens's exact on-chain range ruler
+       and does not start chart measurement.</li>`;
 
   const hosts = (mf.host_permissions || []).map((h) =>
     `<li class="net">${escape(h)}</li>`).join('');
@@ -148,6 +163,8 @@ async function paintPermissions() {
   report.innerHTML = `
     <h3>Web pages it can read or modify</h3>
     <ul>${pageAccess}</ul>
+    <h3>Dexscreener chart alignment</h3>
+    <ul>${chartAccess}</ul>
     <h3>Servers it can send requests to</h3>
     <ul>${hosts}</ul>
     <h3>Browser permissions</h3>
@@ -157,14 +174,14 @@ async function paintPermissions() {
       <li>No wallet access. It never calls <code>eth_sendTransaction</code>,
           <code>personal_sign</code> or <code>eth_requestAccounts</code>. Persistent
           content scripts run in an isolated world where <code>window.ethereum</code>
-          is unreachable. The local chart experiment's one-shot MAIN-world function
+          is unreachable. The separately approved short-lived MAIN-world chart function
           is implemented not to read or call a wallet provider.</li>
       <li>The only JSON-RPC methods it issues are ${rpcMethodList(RPC_METHODS)}.
           All are reads; none can move a token or sign anything.</li>
       <li>No <code>tabs</code>, <code>activeTab</code>, <code>cookies</code>,
-          <code>webRequest</code> or <code>&lt;all_urls&gt;</code> — so it cannot
-          see your browsing, and cannot reach any exchange or wallet site.</li>
-      <li>An overlay adds only its own panel and, in the local experiment, its own
+          <code>webRequest</code> or <code>&lt;all_urls&gt;</code>, so it cannot
+          see browsing outside the sites you enable or reach an exchange or wallet site.</li>
+      <li>An overlay adds only its own panel and, when separately approved, its own
           non-interactive chart graphic. It never rewrites the site's markup, so
           it cannot alter an address or amount shown to you.</li>
     </ul>`;
@@ -203,6 +220,17 @@ dexscreenerPermBox.addEventListener('change', async () => {
     if (!ok) dexscreenerPermBox.checked = false;
   } else {
     await removeOverlayPermission(DEXSCREENER_OVERLAY_ORIGIN);
+  }
+  paintPermissions();
+});
+
+dexscreenerChartConsentBox.addEventListener('change', async () => {
+  if (dexscreenerChartConsentBox.checked) {
+    await chrome.storage.local.set({
+      [DEXSCREENER_CHART_CONSENT_KEY]: true,
+    });
+  } else {
+    await chrome.storage.local.remove(DEXSCREENER_CHART_CONSENT_KEY);
   }
   paintPermissions();
 });

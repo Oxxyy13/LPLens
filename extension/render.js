@@ -226,8 +226,8 @@
     var(--signal); box-shadow: 0 3px 9px color-mix(in srgb, var(--signal) 22%, transparent); }
 .tag { padding: 3px 6px; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--panel) 70%, transparent);
   font-size: 8.5px; color: var(--ink-3); font-weight: 500; font-family: var(--mono); letter-spacing: .055em; text-transform: uppercase; }
-.hd.local-experiment-header { flex-wrap: wrap; row-gap: 6px; }
-.local-experiment-banner { flex: 1 0 100%; padding: 3px 7px; box-sizing: border-box;
+.hd.chart-range-header { flex-wrap: wrap; row-gap: 6px; }
+.chart-range-banner { flex: 1 0 100%; padding: 3px 7px; box-sizing: border-box;
   border: 1px solid color-mix(in srgb, var(--signal) 55%, var(--line)); border-radius: 6px;
   background: color-mix(in srgb, var(--signal-soft) 72%, var(--panel)); color: var(--signal-strong);
   font: 700 8.5px/1.25 var(--mono); letter-spacing: .08em; text-align: center; text-transform: uppercase; }
@@ -256,7 +256,7 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 }
 .panel.dexscreener-panel.collapsed .tag,
 .panel.dexscreener-panel.collapsed .pill,
-.panel.dexscreener-panel.collapsed .local-experiment-banner,
+.panel.dexscreener-panel.collapsed .chart-range-banner,
 .panel.dexscreener-panel.collapsed .grip { display: none; }
 .panel.dexscreener-panel.collapsed .brand { gap: 6px; }
 .panel.dexscreener-panel.collapsed .brand::before { width: 20px; height: 20px; }

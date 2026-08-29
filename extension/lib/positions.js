@@ -6,10 +6,13 @@ import {
 } from './abi.js';
 import { ethCall, ethCallBatch, mapLimit } from './rpc.js';
 import {
-  fetchHistory, fetchRecentHistory, mergeHistoryEvents, hasNewHistoryEvent,
+  fetchHistoryCheckpoint, fetchHistoryRange, fetchRecentHistory,
+  historyChanged, mergeHistoryEvents, replaceHistoryTail,
   solveSqrtPrice, accounting, reconciles, lifetimeFees,
 } from './history.js';
-import { fingerprint, readHistory, readHistoryAny, writeHistory } from './cache.js';
+import {
+  fingerprint, historyIdentity, readHistoryAny, writeHistory,
+} from './cache.js';
 import { enumerateV4, loadV4Position, V4 } from './v4.js';
 import {
   costBasisUsd, collectedProceedsUsd, strategyReturn, usdPairAt,
@@ -17,6 +20,7 @@ import {
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
+const HISTORY_REORG_OVERLAP = 128;
 
 /**
  * Exact USD token-price moves from the first liquidity addition to now.
@@ -132,18 +136,24 @@ async function readMany(rpc, calls, configuredBatchSize = 0) {
   return out;
 }
 
-async function tokenMeta(rpc, chainKey, addr) {
+export async function tokenMeta(rpc, chainKey, addr) {
   const key = `${chainKey}:${addr.toLowerCase()}`;
   if (tokenCache.has(key)) return tokenCache.get(key);
   const [symRaw, decRaw] = await Promise.all([
     retryRead(() => ethCall(rpc, addr, SELECTOR.symbol)).catch(() => null),
     retryRead(() => ethCall(rpc, addr, SELECTOR.decimals)).catch(() => null),
   ]);
-  const meta = {
-    symbol: symRaw ? decodeSymbol(symRaw) : '?',
-    decimals: decRaw ? Number(toUint(words(decRaw)[0] || '0')) : 18,
-  };
-  tokenCache.set(key, meta);
+  const symbol = symRaw ? decodeSymbol(symRaw) : '?';
+  const decimalWord = decRaw ? words(decRaw)[0] : null;
+  const decodedDecimals = decimalWord ? Number(toUint(decimalWord)) : null;
+  const decimals = Number.isInteger(decodedDecimals)
+    && decodedDecimals >= 0 && decodedDecimals <= 255 ? decodedDecimals : 18;
+  const meta = { symbol, decimals };
+  // A fallback helps the current card render, but it is not a chain fact and
+  // must not make a transient RPC failure sticky for the worker's lifetime.
+  if (symbol && symbol !== '?' && decimalWord && decimals === decodedDecimals) {
+    tokenCache.set(key, meta);
+  }
   return meta;
 }
 
@@ -243,7 +253,9 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   // exists; a refusal (including the HTTP-200 Base paywall) falls through to
   // the licensed Blockscout Pro relay, then public Blockscout, then RPC.
   const source = historySource(chain, rpc, opts);
-  const withHistory = await mapLimit(rendered, 3, (p) => attachHistory(source, chain, p));
+  const withHistory = await mapLimit(
+    rendered, 3, (p) => attachHistory(source, chainKey, chain, p),
+  );
 
   const v3Positions = withHistory.filter((p) => p && !p.__error);
   const historyUnreadable = withHistory.length - v3Positions.length;
@@ -737,78 +749,146 @@ async function enrichPosition(rpc, chain, chainKey, owner, p) {
  * that refuses wide ranges degrades to `history.unavailable` rather than
  * failing the position.
  */
-async function attachHistory(source, chain, p) {
-  // The cache check is free: the fingerprint comes from `positions(tokenId)`,
-  // which this load already fetched. A hit skips the only request that needs a
-  // keyed or rate-limited endpoint.
+async function attachHistory(source, chainKey, chain, p) {
   const fp = fingerprint(p);
-  let h = await readHistory(chain.nfpm, p.tokenId, fp);
-  // A cache entry that no longer explains on-chain liquidity is treated as a
-  // miss, not trusted. Belt and braces behind the fingerprint. An empty set
-  // is also a miss: a minted position cannot have zero lifetime events, and
-  // a pre-fix cache entry must not stick a false "no activity".
-  if (h && (!h.events.length || !reconciles(h.events, p.liquidity))) h = null;
+  const identity = historyIdentity(p);
+  if (!identity) {
+    return { ...p, history: { unavailable: 'position identity is incomplete' } };
+  }
 
-  if (!h) {
-    const previous = await readHistoryAny(chain.nfpm, p.tokenId);
-    const [full, recent] = await Promise.all([
-      fetchHistory(source, chain.nfpm, p.tokenId),
-      fetchRecentHistory(source, chain.nfpm, p.tokenId),
-    ]);
+  const previous = await readHistoryAny(
+    chainKey, chain.nfpm, p.tokenId, identity,
+  );
+  const head = await fetchHistoryCheckpoint(source, 'latest');
+  if (head.unavailable) {
+    return {
+      ...p,
+      history: { unavailable: `history head unavailable: ${head.unavailable}` },
+    };
+  }
 
-    // A complete lifetime result is the base. If it is unavailable, a stale
-    // complete cache plus newly mined RPC events is also sufficient. Recent
-    // events alone are never mistaken for an old NFT's whole lifetime.
-    if (!full.unavailable) {
-      h = {
-        events: mergeHistoryEvents(
-          previous && previous.events, full.events, recent && recent.events),
-        source: [full.source, recent && !recent.unavailable ? recent.source : null]
-          .filter(Boolean).join('+'),
-      };
-    } else if (previous && recent && !recent.unavailable
-        && hasNewHistoryEvent(previous.events, recent.events)) {
-      h = {
-        events: mergeHistoryEvents(previous.events, recent.events),
-        source: `${previous.source || 'cache'}+${recent.source}`,
-      };
+  let h = null;
+  let incrementalFailure = null;
+
+  // A matching anchor proves the cached prefix through that block is still on
+  // the canonical chain. Replace everything after it, even when the mutable
+  // positions() fingerprint is unchanged.
+  if (previous && previous.checkedThrough <= head.block
+      && previous.anchorBlock <= head.block) {
+    const anchor = await fetchHistoryCheckpoint(source, previous.anchorBlock);
+    if (!anchor.unavailable && anchor.hash === previous.anchorHash) {
+      const fromBlock = previous.anchorBlock + 1;
+      const tail = fromBlock <= head.block
+        ? await fetchHistoryRange(
+          source, chain.nfpm, p.tokenId, fromBlock, head.block,
+        )
+        : { events: [], source: 'empty-tail' };
+      if (!tail.unavailable) {
+        let recent = { events: [], source: null };
+        // Indexed tails can lag at the head. Supplement the fixed last 128
+        // blocks directly from RPC so a just-mined net-zero sequence is seen.
+        if (tail.source !== 'rpc-tail' && tail.source !== 'empty-tail') {
+          recent = await fetchRecentHistory(source, chain.nfpm, p.tokenId, {
+            fromBlock: Math.max(0, head.block - HISTORY_REORG_OVERLAP + 1),
+            toBlock: head.block,
+          });
+        }
+        if (!recent.unavailable) {
+          h = {
+            events: replaceHistoryTail(
+              previous.events,
+              previous.anchorBlock,
+              mergeHistoryEvents(tail.events, recent.events),
+            ),
+            source: [previous.source || 'cache-v2', tail.source, recent.source]
+              .filter(Boolean).join('+'),
+          };
+        } else {
+          incrementalFailure = recent.unavailable;
+        }
+      } else {
+        incrementalFailure = tail.unavailable;
+      }
     } else {
+      incrementalFailure = anchor.unavailable || 'history cache anchor changed';
+    }
+  }
+
+  // Missing/invalid/reorged caches get a complete bounded rebuild through the
+  // captured head. An indexed result is accepted only with a direct recent
+  // RPC supplement at that same head.
+  if (!h) {
+    const full = await fetchHistoryRange(
+      source, chain.nfpm, p.tokenId, 0, head.block, true,
+    );
+    if (full.unavailable) {
       h = {
-        unavailable: [full.unavailable, recent && recent.unavailable]
+        unavailable: [incrementalFailure, full.unavailable]
           .filter(Boolean).join('; ') || 'history refresh unavailable',
       };
+    } else {
+      let recent = { events: [], source: null };
+      if (full.source !== 'rpc-tail') {
+        recent = await fetchRecentHistory(source, chain.nfpm, p.tokenId, {
+          fromBlock: Math.max(0, head.block - HISTORY_REORG_OVERLAP + 1),
+          toBlock: head.block,
+        });
+      }
+      if (recent.unavailable) {
+        h = { unavailable: `recent history unavailable: ${recent.unavailable}` };
+      } else {
+        h = {
+          events: mergeHistoryEvents(full.events, recent.events),
+          source: [full.source, recent.source].filter(Boolean).join('+'),
+        };
+      }
     }
+  }
 
-    // A fingerprint miss proves positions() changed. If no source contains a
-    // new event yet, do not cache old figures under the new fingerprint.
-    if (!h.unavailable && previous
-        && !hasNewHistoryEvent(previous.events, h.events)) {
-      return {
-        ...p,
-        history: { unavailable: 'latest transaction is not indexed yet — retry in a moment' },
-      };
+  // A changed positions() state with an identical canonical event set means
+  // the newest transaction is still missing. Do not stamp old history as new.
+  if (!h.unavailable && previous && previous.fingerprint !== fp
+      && !historyChanged(previous.events, h.events)) {
+    return {
+      ...p,
+      history: { unavailable: 'latest transaction is not indexed yet; retry in a moment' },
+    };
+  }
+  if (!h.unavailable && (!h.events || h.events.length === 0)) {
+    return {
+      ...p,
+      history: {
+        unavailable: 'zero lifetime events; a minted position must have at least one IncreaseLiquidity',
+      },
+    };
+  }
+  if (!h.unavailable && !reconciles(h.events, p.liquidity)) {
+    // Never cache an incomplete set, and never derive figures from one.
+    return {
+      ...p,
+      history: {
+        unavailable: 'event history incomplete; entry price and PnL cannot be trusted for this position',
+      },
+    };
+  }
+  if (!h.unavailable) {
+    const anchorBlock = Math.max(0, head.block - HISTORY_REORG_OVERLAP);
+    const anchor = anchorBlock === head.block
+      ? head : await fetchHistoryCheckpoint(source, anchorBlock);
+    if (!anchor.unavailable) {
+      await writeHistory({
+        chainKey,
+        nfpm: chain.nfpm,
+        tokenId: p.tokenId,
+        identity,
+        fp,
+        events: h.events,
+        source: h.source,
+        checkedThrough: head.block,
+        anchorBlock,
+        anchorHash: anchor.hash,
+      });
     }
-    if (!h.unavailable && (!h.events || h.events.length === 0)) {
-      return {
-        ...p,
-        history: {
-          unavailable: 'zero lifetime events — a minted position must have at '
-            + 'least one IncreaseLiquidity',
-        },
-      };
-    }
-    if (!h.unavailable && !reconciles(h.events, p.liquidity)) {
-      // Never cache an incomplete set, and never quietly derive numbers from
-      // one — a truncated history produces confident, wrong figures.
-      return {
-        ...p,
-        history: {
-          unavailable: 'event history incomplete — the log source returned a '
-            + 'partial set, so entry price and PnL cannot be trusted for this position',
-        },
-      };
-    }
-    if (!h.unavailable) await writeHistory(chain.nfpm, p.tokenId, fp, h.events, h.source);
   }
   if (h.unavailable) return { ...p, history: { unavailable: h.unavailable } };
 
@@ -1008,7 +1088,9 @@ export async function loadPosition(chainKey, tokenId, opts = {}) {
 
   const enriched = await enrichPosition(rpc, chain, chainKey, owner, { tokenId, ...pos });
   if (enriched.error) return { ...enriched, owner };
-  const full = await attachHistory(historySource(chain, rpc, opts), chain, enriched);
+  const full = await attachHistory(
+    historySource(chain, rpc, opts), chainKey, chain, enriched,
+  );
   const priced = opts.withUsd === false ? full : await attachUsd(chainKey, full, opts);
   return { ...priced, owner, version: 'v3', protocol: chain.protocol || null };
 }

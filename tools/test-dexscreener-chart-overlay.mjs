@@ -216,13 +216,35 @@ assert.match(overlay, /pointerEvents:\s*'none'/);
 assert.match(overlay, /DEXSCREENER_CHART_POLL_MS = 750/);
 assert.match(overlay, /DEXSCREENER_CHART_RETRY_MS = \[100, 200, 400\]/);
 assert.match(overlay, /DEXSCREENER_CHART_NOTICE_MS = 1_500/);
+assert.match(overlay, /const DEXSCREENER_DATA_REFRESH_MS = 65_000/,
+  'unchanged pair routes must age past the worker scan cache before reloading data');
+const dataRefreshStart = overlay.indexOf('function scheduleDexscreenerDataRefresh');
+const dataRefreshEnd = overlay.indexOf('function applyDexscreenerChartConsent', dataRefreshStart);
+assert.ok(dataRefreshStart > 0 && dataRefreshEnd > dataRefreshStart);
+const dataRefresh = overlay.slice(dataRefreshStart, dataRefreshEnd);
+assert.match(dataRefresh, /clearTimeout\(dexscreenerDataTimer\)/);
+assert.match(dataRefresh, /dexscreenerDataTimer = setTimeout/);
+assert.match(dataRefresh, /dexscreenerDataTimer = null/);
+assert.match(dataRefresh, /if \(torndown \|\| !dexscreenerRoute\(\)\) return/);
+assert.match(dataRefresh,
+  /dexscreenerGeneration\+\+;[\s\S]*stopDexscreenerChartSession\(\);[\s\S]*lastKey = null;[\s\S]*void syncDexscreener\(\)/,
+  'a timed data refresh must invalidate stale chart work before rescanning');
+assert.match(overlay,
+  /finally \{[\s\S]*scheduleDexscreenerDataRefresh\(\);[\s\S]*\}\n\}\n\nasync function syncList/,
+  'every completed unchanged-route scan must schedule the next data refresh');
+assert.match(overlay,
+  /function teardown\(\) \{[\s\S]*clearTimeout\(dexscreenerDataTimer\);[\s\S]*dexscreenerDataTimer = null/,
+  'route teardown must clear the data refresh timer');
+assert.match(overlay,
+  /function shutdownOrphan\(target\) \{[\s\S]*clearTimeout\(dexscreenerDataTimer\);[\s\S]*dexscreenerDataTimer = null/,
+  'an orphaned extension context must clear the data refresh timer');
 assert.match(refresh, /session\.misses \+= 1/);
 assert.match(refresh, /session\.firstMissAt/);
 assert.match(refresh, /showDexscreenerChartAligning\(\)/);
 assert.match(refresh, /isolated-validation-failed/);
 assert.match(refresh, /paint-failed/);
 assert.match(refresh, /if \(recovery\.showFailure\) showDexscreenerChartFailure\(reason\)/,
-  'a stable local experiment failure must name its reason in the card');
+  'a stable chart-alignment failure must name its reason in the card');
 assert.match(refresh,
   /clearDexscreenerChartVisual\(\);[\s\S]*recovery\.showFailure[\s\S]*recovery\.showAligning/,
   'the first miss must remove stale chart geometry before showing a neutral recovery state');
@@ -232,8 +254,9 @@ assert.match(overlay, /if \(!panelShadow\) return true;/,
 assert.match(overlay, /session\.generation !== dexscreenerGeneration/);
 assert.match(overlay, /window\.addEventListener\('pagehide',[\s\S]*stopDexscreenerChartSession/);
 assert.match(overlay, /changes\.address[\s\S]*stopDexscreenerChartSession/);
-assert.match(overlay, /LOCAL_CHART_EXPERIMENT = 'LPLENS_LOCAL_CHART_EXPERIMENT'/);
-assert.match(overlay, /local-experiment-banner/);
+assert.doesNotMatch(overlay, /LPLENS_LOCAL_CHART_EXPERIMENT|LOCAL_CHART_EXPERIMENT/,
+  'production overlay must not retain the prototype release fence');
+assert.match(overlay, /chart-range-banner/);
 assert.match(overlay, /Range drawn on chart/);
 assert.match(overlay, /class="gc-sub dex-chart-status" hidden/);
 assert.match(render, /\.portfolio-card\.chart-range-aligned \.dex-range \{ display: none; \}/);
