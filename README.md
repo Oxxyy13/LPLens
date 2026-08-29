@@ -26,7 +26,7 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.30.0 production candidate
+## Status: 0.30.0 release
 
 Dexscreener chart alignment has a separate, versioned consent control and is
 off until the user enables it. Site permission alone shows the existing exact
