@@ -95,8 +95,12 @@ function isHexAddressOrHash(token) {
  * indistinguishable from a scan that silently covers nothing.
  */
 export function envSecrets() {
-  const file = join(ROOT, '.env');
-  if (!existsSync(file)) return [];
+  const override = String(process.env.LPLENS_ENV_FILE || '').trim();
+  const file = override ? resolve(override) : join(ROOT, '.env');
+  if (!existsSync(file)) {
+    if (override) abort('LPLENS_ENV_FILE does not exist');
+    return [];
+  }
   const vals = [];
   for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
     const t = line.trim();
