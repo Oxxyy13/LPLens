@@ -26,7 +26,12 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.30.0 release
+## Status: 0.31.0 development candidate
+
+The public Store release remains 0.30.0 while the fast-refresh and v4
+ownership-checkpoint changes below are tested locally. Do not upload 0.31.0
+until the deterministic suite, rendered harness, machine-local dev mirror, and
+real-wallet smoke tests all pass.
 
 Dexscreener chart alignment has a separate, versioned consent control and is
 off until the user enables it. Site permission alone shows the existing exact
@@ -77,6 +82,16 @@ records its exact network scope so a changed selection is never mistaken for an
 already-refreshed result. Robinhood's public RPC reads are batched in groups of
 25 with item retries and a single-call fallback.
 
+The side panel separates two manual actions. **Refresh current** verifies and
+re-reads the known open position IDs from the last successful full discovery,
+including live ownership, liquidity, fees, prices, and history tails. **Full
+rescan** is the authoritative discovery action for new, transferred, or
+reopened NFTs. A compact scope selector applies either action to the selected
+wallet or every saved wallet. The current-position index is local operational
+state, not rendered HTML and not an accounting input. If a Full rescan cannot
+prove a wallet and chain completely, Refresh current stays disabled for that
+scope until a complete Full rescan succeeds.
+
 Portfolio totals now distinguish complete, partial, and unavailable metrics.
 Positive and negative return values are colored consistently, while coverage
 and the exact unavailable reason remain visible in text. A missing historical
@@ -118,7 +133,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.30.0
+diff -r extension build/lplens-0.31.0
 ```
 
 That diff is empty on a release commit. `tools/package.mjs` also refuses to
@@ -188,8 +203,10 @@ Two claims worth checking directly, because they are the ones that matter:
 - Opens a persistent browser side panel from the popup. It can show the last
   portfolio view on any tab without reading that tab, filter cards by range or
   data status, flip every displayed position price into either token direction,
-  hide or restore unwanted LP NFTs locally, and refresh one saved wallet or the
-  full local address book. Hidden cards do not contribute to portfolio counts
+  hide or restore unwanted LP NFTs locally, and refresh either the selected
+  wallet or the full local address book. A fast current-position refresh skips
+  ownership discovery; Full rescan finds new, transferred, and reopened NFTs.
+  Hidden cards do not contribute to portfolio counts
   or totals. Refresh is manual so simply leaving the panel open does not consume
   provider quota. The headline scan status stays short; complete chain outcomes
   and provider failures are kept in an expandable details section
@@ -405,12 +422,16 @@ later additions, its public transaction hashes are sent directly to that
 chain's public Blockscout trace endpoint; this is what makes the principal/fee
 split exact without sending wallet credentials or requesting a signature.
 Saved addresses, the separately selected active overlay wallet address, chain
-choices, hidden-position choices, overlay layout, Dexscreener chart consent,
-and the most recently rendered portfolio view are
+and refresh-scope choices, hidden-position choices, overlay layout,
+Dexscreener chart consent, the local current-position ID index, the exact v4
+ownership block checkpoint, and the most recently rendered portfolio view are
 stored with `chrome.storage.local`, deliberately **not**
 `chrome.storage.sync`, so they are never carried into a Google account. The
 saved view is local display output, not accounting input, and is replaced after
-a successful refresh. The Copy diagnostics control saves only version, UI
+a successful refresh. The two position caches hold only public wallet, chain,
+position ID, ownership, and block-checkpoint data. They are verified against
+live chain state before reuse and are not price or accounting inputs. The Copy
+diagnostics control saves only version, UI
 surface, coarse scan counts,
 allowlisted error categories, and local feature state. It excludes wallets,
 labels, tokens, pools, positions, keys, custom endpoints, and raw errors, and it
@@ -445,13 +466,20 @@ applies to any unpacked extension, not just this one.
 
 ## Known limits
 
-- `MAX_POSITIONS = 1000` per address per chain. Every ownership index below the
-  guard and every corresponding `positions()` record is read on every load.
-  There is no ownership cache and no early stop on closed positions: an
+- `MAX_POSITIONS = 1000` per address per chain. **Full rescan** reads every v3
+  ownership index below the guard and every corresponding `positions()` record.
+  It has no early stop on closed positions: an
   ERC721Enumerable swap-and-pop can change the middle of a list without
   changing either its count or newest token, and an old closed NFT can be
   revived with `increaseLiquidity`. Each unreadable ownership/position record
-  and anything beyond the guard is named in the status line.
+  and anything beyond the guard is named in diagnostics. **Refresh current**
+  instead verifies and reads only known open IDs, so it cannot discover a new
+  or reopened NFT. The UI says when Full rescan is required.
+- v4 Full rescan may reuse an exact local ownership checkpoint only after its
+  block hash is still canonical and `balanceOf` plus `ownerOf` prove the entire
+  candidate set at one captured block. A changed owner, count, hash, or
+  unreadable proof falls through to a bounded Transfer tail and then full
+  reconstruction. Stale checkpoint output is never rendered.
 - **Anything held but not rendered is named in the status line**, per wallet and
   per chain. Closed-but-owned NFTs are distinguished from failed reads. A live
   Base wallet that previously read `230 v4 unreadable` now enumerates all 230
@@ -560,8 +588,10 @@ extension/
   lib/histprice.js   USD at any block, from a reference pool's Swap events
   lib/logs.js        log retrieval; Etherscan V2, Blockscout, or eth_getLogs
   lib/cache.js       bounded persistent caches
+  lib/current-position-index.js  verified open-ID index for fast refresh
   lib/dashboard-snapshot.js  bounded last-rendered side-panel view
   lib/scan-preferences.js  local portfolio network selection
+  lib/v4-ownership-cache.js  exact block-anchored v4 ownership checkpoint
   lib/diagnostics.js  sanitized local support report and error categories
   lib/telemetry.js    optional anonymous aggregate scan outcomes
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync

@@ -42,6 +42,8 @@ jobs:
           node tools/test-price-orientation.mjs
           node tools/test-hidden-positions.mjs
           node tools/test-chain-preferences.mjs
+          node tools/test-current-position-index.mjs
+          node tools/test-current-position-refresh.mjs
           node tools/test-portfolio-presentation.mjs
           node tools/test-sidepanel.mjs
           node tools/test-blockscout-relay.mjs
@@ -53,6 +55,8 @@ jobs:
           node tools/test-histprice-blockscout.mjs
           node tools/test-last-log-retry.mjs
           node tools/test-v4-history.mjs
+          node tools/test-v4-ownership-cache.mjs
+          node tools/test-v4-ownership-checkpoint.mjs
           node tools/test-mutation-refresh.mjs
           node tools/test-cashflow-pnl.mjs
       - name: Build the byte-identical extension tree

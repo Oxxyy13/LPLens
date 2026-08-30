@@ -12,7 +12,7 @@ const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
 const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
 
-assert.equal(manifest.version, '0.30.0');
+assert.equal(manifest.version, '0.31.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -29,6 +29,12 @@ assert.match(panel, /id="scanDetailsBody"/);
 assert.match(panel, /id="scanNetworks"/);
 assert.match(panel, /id="scanNetworkAll"/);
 assert.match(panel, /id="scanNetworkList"/);
+assert.match(panel, /id="refreshScope"/);
+assert.match(panel, /<option value="wallet">Selected wallet<\/option>/);
+assert.match(panel, /<option value="all">All saved wallets<\/option>/);
+assert.match(panel, /id="go"[^>]*>Refresh current<\/button>/);
+assert.match(panel, /id="scanAll"[^>]*>Full rescan<\/button>/);
+assert.match(panel, /Current re-checks known open positions\. Full finds new, transferred, or reopened positions\./);
 assert.match(popup, /id="scanNetworks"/);
 assert.match(panel, /id="scanHint"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(panel, /id="status"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
@@ -46,7 +52,8 @@ assert.ok(panel.indexOf('id="copyDiagnostics"') > panel.indexOf('id="scanDetails
   'support actions must stay inside the collapsed panel details');
 assert.match(controller, /chrome\.sidePanel\.open\(\{ windowId: currentWindowId \}\)/);
 assert.doesNotMatch(controller, /function legacyScanPresentation/);
-assert.match(controller, /Last refreshed \$\{snapshotAge\(snapshot\.at\)\}/);
+assert.match(controller, /Full rescan completed \$\{snapshotAge\(snapshot\.at\)\}/);
+assert.match(controller, /Current positions refreshed \$\{snapshotAge\(snapshot\.at\)\}/);
 assert.match(controller, /details:\s*issueLines\.filter\(Boolean\)\.join\('\\n'\)/);
 assert.doesNotMatch(controller, /network scans|Saved view ·|Current view ·|\$\{inflight\} reading/);
 assert.doesNotMatch(controller, /closed v3 hidden|closed v4 hidden|Skipped locally/);
@@ -72,7 +79,7 @@ assert.match(controller, /display\.state === 'unavailable' \? 'Not enough data'/
 assert.match(controller, /async function setActiveAddress/);
 assert.match(controller, /if \(selectOverlayWallet\) await setActiveAddress\(owners\[0\]\.address\)/,
   'only an explicit one-wallet load may select the overlay wallet');
-assert.match(controller, /\{ selectOverlayWallet: true \}/,
+assert.match(controller, /\{ selectOverlayWallet: true, mode: 'full' \}/,
   'the one-wallet form must explicitly request overlay selection');
 assert.doesNotMatch(controller, /owners\.length === 1.*setActiveAddress/,
   'Scan all with one saved wallet must not change the overlay wallet');
@@ -88,6 +95,27 @@ assert.doesNotMatch(controller, /runSweep\(owners, Object\.keys\(CHAINS\)/,
   'a portfolio sweep must not silently restore all networks');
 assert.match(controller, /Chains changed\. Refresh to update\./,
   'a saved view must disclose when the local network scope changed');
+assert.match(controller, /Scope changed\. Refresh to update\./,
+  'a saved view must disclose when the wallet scope changed');
+assert.match(controller, /readCurrentPositionJobs\(owners, chainKeys\)/,
+  'fast refresh readiness must come from the operational ID index');
+assert.match(controller, /mode === 'full' && state\.ok === false[\s\S]*markCurrentPositionScopeIncomplete/,
+  'a failed Full rescan must disable fast refresh for that wallet and chain');
+assert.match(controller, /await loadKnownSweep\(owners, chainKeys, currentScopes, progressOptions\)/,
+  'Refresh current must use the known-position loader');
+assert.match(controller, /await loadSweep\(owners, chainKeys, progressOptions\)/,
+  'Full rescan must retain authoritative ownership discovery');
+assert.match(controller, /preserveExistingView: canPreserveCurrentView/,
+  'a failed fast refresh must preserve the saved dashboard');
+assert.match(controller,
+  /const preserveView = mode === 'current' && preserveExistingView\s*&& \(!snap\.complete \|\| snap\.issueCount > 0\)/,
+  'an incomplete fast refresh must not replace the last good cards');
+assert.match(controller,
+  /refreshScope: renderedRefreshScope \|\| \(previous && previous\.refreshScope\)/,
+  'hide and restore must preserve the saved wallet scope');
+assert.match(controller,
+  /refreshMode: renderedRefreshMode \|\| \(previous && previous\.refreshMode\) \|\| 'full'/,
+  'hide and restore must preserve the saved refresh mode');
 assert.match(controller, /\$\('scanNetworks'\)\.open = false/,
   'starting a refresh must collapse the network selector');
 const startScanSource = controller.slice(
@@ -96,10 +124,10 @@ const startScanSource = controller.slice(
 );
 assert.ok(startScanSource.indexOf('if (scanBusy || dashboardMutationBusy) return;') >= 0);
 assert.ok(startScanSource.indexOf('if (scanBusy || dashboardMutationBusy) return;')
-    < startScanSource.indexOf('await scanPreferencesReady;'),
+    < startScanSource.indexOf('await Promise.all([scanPreferencesReady, refreshScopeReady]);'),
   'the scan lock must be acquired before the first await');
 assert.ok(startScanSource.indexOf('scanBusy = true;')
-    < startScanSource.indexOf('await scanPreferencesReady;'),
+    < startScanSource.indexOf('await Promise.all([scanPreferencesReady, refreshScopeReady]);'),
   'rapid clicks must not launch overlapping sweeps');
 const gateSource = controller.slice(
   controller.indexOf('(async function gateOnOpen()'),
@@ -160,6 +188,8 @@ assert.equal(await writeDashboardSnapshot({
   wallets: 1,
   chains: ['ethereum', 'robinhood'],
   includeClosed: false,
+  refreshScope: 'all',
+  refreshMode: 'current',
 }), true);
 let snapshot = await readDashboardSnapshot();
 assert.equal(snapshot.html, '<div class="position-card">one</div>');
@@ -170,6 +200,8 @@ assert.equal(snapshot.issues, 0);
 assert.equal(snapshot.showWalletLabels, null,
   'legacy snapshots must preserve their already-rendered wallet labels');
 assert.deepEqual(snapshot.chains, ['ethereum', 'robinhood']);
+assert.equal(snapshot.refreshScope, 'all');
+assert.equal(snapshot.refreshMode, 'current');
 
 assert.equal(await writeDashboardSnapshot({
   html: 'x'.repeat(MAX_SNAPSHOT_HTML + 1),

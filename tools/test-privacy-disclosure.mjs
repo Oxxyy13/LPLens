@@ -9,8 +9,8 @@ const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url)
 const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
 const optionsJs = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 
-assert.match(worker, /Effective 29 August 2026/,
-  'privacy policy effective date must match the 0.30 data-boundary change');
+assert.match(worker, /Effective 30 August 2026/,
+  'privacy policy effective date must match the local position-cache boundary change');
 assert.match(worker, /saved addresses and labels/i,
   'privacy policy must describe the current all-chain wallet selection model');
 assert.match(worker, /separately selected active overlay wallet address/i,
@@ -43,6 +43,10 @@ for (const [name, body] of [['options', options], ['README', readme], ['privacy 
     `${name} omits the Dexscreener pair-request wallet exclusion`);
   assert.match(body, /api\.dexscreener\.com|Dexscreener(?:'s)? API/i,
     `${name} omits the Dexscreener pair-request destination`);
+  assert.match(body, /current-position ID index/i,
+    `${name} omits the local fast-refresh position index`);
+  assert.match(body, /v4\s+ownership block checkpoint/i,
+    `${name} omits the local v4 ownership checkpoint`);
 }
 assert.match(panel, /No wallet connection or page access/i);
 assert.match(options, /id="licenseKey"\s+type="password"/,

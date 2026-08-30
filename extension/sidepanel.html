@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="popup.css?v=0.30">
-  <link rel="stylesheet" href="sidepanel.css?v=0.30">
+  <link rel="stylesheet" href="popup.css?v=0.31">
+  <link rel="stylesheet" href="sidepanel.css?v=0.31">
 </head>
 <body class="sidepanel" data-surface="sidepanel">
   <header class="pop-head">
@@ -42,10 +42,17 @@
         </fieldset>
       </details>
 
+      <label class="field-label" for="refreshScope">Refresh scope</label>
+      <select id="refreshScope" aria-describedby="refreshModeHint" disabled>
+        <option value="wallet">Selected wallet</option>
+        <option value="all">All saved wallets</option>
+      </select>
+
       <div class="row scan-row">
-        <button id="go" class="primary-button" type="submit" aria-describedby="scanHint" disabled>Refresh wallet</button>
-        <button type="button" id="scanAll" class="secondary-button" aria-describedby="scanHint" disabled title="Refresh every saved wallet">Refresh all</button>
+        <button id="go" class="primary-button" type="submit" aria-describedby="refreshModeHint scanHint" disabled>Refresh current</button>
+        <button type="button" id="scanAll" class="secondary-button" aria-describedby="refreshModeHint scanHint" disabled>Full rescan</button>
       </div>
+      <p id="refreshModeHint" class="refresh-mode-hint">Current re-checks known open positions. Full finds new, transferred, or reopened positions.</p>
       <label class="check">
         <input type="checkbox" id="includeClosed"> <span>Include closed positions</span>
       </label>
@@ -86,7 +93,7 @@
     </div>
   </footer>
 
-  <script src="render.js?v=0.30"></script>
+  <script src="render.js?v=0.31"></script>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

@@ -41,8 +41,11 @@ import {
 } from './v3.js';
 import { CHAINS } from './chains.js';
 import {
-  fetchFilteredLogs, fetchRecentFilteredLogs, fetchTransfers,
+  fetchBlockCheckpoint, fetchFilteredLogs, fetchRecentFilteredLogs, fetchTransfers,
 } from './logs.js';
+import {
+  readV4OwnershipCheckpoint, writeV4OwnershipCheckpoint,
+} from './v4-ownership-cache.js';
 
 // Selectors derived with keccak256 and cross-checked against the in-production
 // `PortfolioManager/scripts/robinhood_chain_lp.py`, which pins the same values.
@@ -724,61 +727,42 @@ async function v4Fees(rpc, chain, poolId, tickLower, tickUpper, tokenId) {
   };
 }
 
-/**
- * Enumerate the v4 positions an address currently holds.
- *
- * Replays Transfer logs in order rather than counting them, because a token can
- * be received, sent away and received again. The result is checked against
- * `balanceOf`: a mismatch means the log source returned a partial set, and a
- * silently short list would read as "you have fewer positions" rather than as
- * an error.
- */
-export async function enumerateV4(chainKey, owner, opts = {}) {
-  const chain = CHAINS[chainKey];
-  if (!chain || !chain.v4PositionManager) return { unavailable: 'no v4 deployment configured' };
-  const rpc = opts.rpcOverride || chain.rpc;
+const sortUniqueTokenIds = (values) => [...new Set((values || []).map(String))]
+  .map(BigInt)
+  .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
-  let onChainCount;
-  try {
-    const hex = await retryRead(() =>
-      ethCall(rpc, chain.v4PositionManager, V4.balanceOf + encAddress(owner)));
-    onChainCount = Number(toUint(words(hex)[0]));
-  } catch (err) {
-    return { unavailable: `v4 balance could not be verified — ${err.message || String(err)}` };
+function replayTransfers(seed, events) {
+  const held = new Set(sortUniqueTokenIds(seed).map(String));
+  for (const event of events || []) {
+    const id = BigInt(event.tokenId).toString();
+    if (event.direction === 'in') held.add(id);
+    else held.delete(id);
   }
-  if (onChainCount === 0) {
-    return { tokenIds: [], balanceOf: 0, reconciles: true, source: 'balanceOf' };
-  }
+  return sortUniqueTokenIds([...held]);
+}
 
-  // A configured Alchemy RPC also exposes its NFT ownership index. It avoids
-  // the full-history getLogs limits that break large v4 wallets. The index is
-  // never trusted alone: ownerOf verifies every candidate and the final count
-  // must equal balanceOf from the same RPC.
-  let alchemyError = null;
-  try {
-    const indexed = await alchemyOwnedTokenIds(rpc, chain.v4PositionManager, owner);
-    if (indexed) {
-      const verified = await verifyOwnedIds(
-        rpc, chain.v4PositionManager, owner, indexed.tokenIds);
-      if (verified.unreadable === 0
-          && verified.tokenIds.length === onChainCount
-          && indexed.tokenIds.length === onChainCount) {
-        return {
-          tokenIds: verified.tokenIds,
-          balanceOf: onChainCount,
-          reconciles: true,
-          source: 'alchemy-nft+ownerOf',
-        };
-      }
-      alchemyError = `Alchemy NFT index gave ${indexed.tokenIds.length}, `
-        + `ownerOf verified ${verified.tokenIds.length}, balanceOf reports ${onChainCount}`;
-    }
-  } catch (err) {
-    // Never include the URL here: it contains the user's API key.
-    alchemyError = `Alchemy NFT ownership lookup failed — ${err.message || String(err)}`;
-  }
+async function v4BalanceAt(rpc, manager, owner, blockTag) {
+  const hex = await retryRead(() => ethCall(
+    rpc, manager, V4.balanceOf + encAddress(owner), null, blockTag,
+  ));
+  const count = Number(toUint(words(hex)[0]));
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error('invalid balanceOf result');
+  return count;
+}
 
-  const got = await fetchTransfers({
+async function proveOwnedSet(rpc, manager, owner, candidates, balanceOf, blockTag) {
+  const ids = sortUniqueTokenIds(candidates);
+  const verified = await verifyOwnedIds(rpc, manager, owner, ids, blockTag);
+  return {
+    tokenIds: verified.tokenIds,
+    unreadable: verified.unreadable,
+    exact: verified.unreadable === 0 && verified.tokenIds.length === balanceOf,
+  };
+}
+
+async function transferWindow(chain, owner, opts, rpc, fromBlock, toBlock) {
+  if (fromBlock > toBlock) return { events: [], source: 'empty-tail' };
+  const args = {
     contract: chain.v4PositionManager,
     owner,
     rpc: opts.rpcOverride || chain.logsRpc || chain.rpc,
@@ -787,26 +771,174 @@ export async function enumerateV4(chainKey, owner, opts = {}) {
     historyRelay: opts.historyRelay || opts.blockscoutRelay || null,
     historyRelayChainId: chain.etherscanChainId || null,
     blockscout: chain.blockscout || null,
+    fromBlock,
+    toBlock,
+  };
+  const indexed = await fetchTransfers(args);
+  const recentFrom = Math.max(fromBlock, toBlock - 127);
+  const recent = await fetchTransfers({
+    ...args,
+    rpc,
+    etherscanKey: null,
+    historyRelay: null,
+    blockscout: null,
+    fromBlock: recentFrom,
+    rpcOnly: true,
   });
+  if (indexed.unavailable) {
+    if (!recent.unavailable && recentFrom === fromBlock) return recent;
+    return indexed;
+  }
+  if (recent.unavailable) return indexed;
+  return {
+    events: [
+      ...indexed.events.filter((event) => event.block < recentFrom),
+      ...recent.events,
+    ],
+    source: `${indexed.source}+recent-rpc`,
+    fromBlock,
+    toBlock,
+  };
+}
+
+async function saveOwnershipProof({
+  chainKey, manager, owner, rpc, head, balanceOf, tokenIds, source,
+}) {
+  // The result is still usable if local storage fails. Only persist after the
+  // captured block and its balance are confirmed unchanged.
+  const stable = await fetchBlockCheckpoint(rpc, head.block);
+  if (stable.unavailable || stable.hash !== head.hash) return;
+  try {
+    if (await v4BalanceAt(rpc, manager, owner, '0x' + BigInt(head.block).toString(16))
+        !== balanceOf) return;
+  } catch { return; }
+  await writeV4OwnershipCheckpoint({
+    chainKey,
+    manager,
+    owner,
+    checkedThrough: head.block,
+    checkpointHash: head.hash,
+    balanceOf,
+    tokenIds,
+    source,
+  });
+}
+
+/**
+ * Enumerate v4 ownership at one captured block. Every accepted candidate set
+ * is proven complete by balanceOf plus ownerOf. A persistent exact checkpoint
+ * avoids replaying Transfer history for an unchanged wallet.
+ */
+export async function enumerateV4(chainKey, owner, opts = {}) {
+  const chain = CHAINS[chainKey];
+  if (!chain || !chain.v4PositionManager) return { unavailable: 'no v4 deployment configured' };
+  const rpc = opts.rpcOverride || chain.rpc;
+  const manager = chain.v4PositionManager;
+  const head = await fetchBlockCheckpoint(rpc, 'latest');
+  if (head.unavailable) return { unavailable: `v4 head could not be verified: ${head.unavailable}` };
+  const blockTag = '0x' + BigInt(head.block).toString(16);
+
+  let onChainCount;
+  try {
+    onChainCount = await v4BalanceAt(rpc, manager, owner, blockTag);
+  } catch (err) {
+    return { unavailable: `v4 balance could not be verified: ${err.message || String(err)}` };
+  }
+
+  const accept = async (proof, source, indexWarning = null) => {
+    await saveOwnershipProof({
+      chainKey, manager, owner, rpc, head,
+      balanceOf: onChainCount, tokenIds: proof.tokenIds, source,
+    });
+    return {
+      tokenIds: proof.tokenIds,
+      verifiedTokenIds: proof.tokenIds,
+      balanceOf: onChainCount,
+      reconciles: true,
+      source,
+      indexWarning,
+      checkedThrough: head.block,
+    };
+  };
+
+  if (onChainCount === 0) {
+    return accept({ tokenIds: [], exact: true, unreadable: 0 }, 'balanceOf+checkpoint');
+  }
+
+  let checkpointError = null;
+  const checkpoint = await readV4OwnershipCheckpoint({ chainKey, manager, owner });
+  if (checkpoint && checkpoint.checkedThrough <= head.block) {
+    const anchor = await fetchBlockCheckpoint(rpc, checkpoint.checkedThrough);
+    if (!anchor.unavailable && anchor.hash === checkpoint.checkpointHash) {
+      const direct = await proveOwnedSet(
+        rpc, manager, owner, checkpoint.tokenIds, onChainCount, blockTag,
+      );
+      if (direct.exact) return accept(direct, 'ownership-checkpoint+ownerOf');
+
+      const tail = await transferWindow(
+        chain, owner, opts, rpc, checkpoint.checkedThrough + 1, head.block,
+      );
+      if (!tail.unavailable) {
+        const candidates = replayTransfers(checkpoint.tokenIds, tail.events);
+        const extended = await proveOwnedSet(
+          rpc, manager, owner, candidates, onChainCount, blockTag,
+        );
+        if (extended.exact) return accept(extended, 'ownership-checkpoint+tail+ownerOf');
+        checkpointError = `checkpoint tail verified ${extended.tokenIds.length}, `
+          + `balanceOf reports ${onChainCount}`;
+      } else {
+        checkpointError = `checkpoint tail unavailable: ${tail.unavailable}`;
+      }
+    } else {
+      checkpointError = 'ownership checkpoint was invalidated by a block change';
+    }
+  }
+
+  // A configured Alchemy RPC also exposes its NFT ownership index. It is never
+  // trusted alone; the same captured-block ownerOf proof remains mandatory.
+  let alchemyError = null;
+  try {
+    const indexed = await alchemyOwnedTokenIds(rpc, manager, owner);
+    if (indexed) {
+      const verified = await proveOwnedSet(
+        rpc, manager, owner, indexed.tokenIds, onChainCount, blockTag,
+      );
+      if (verified.exact) return accept(verified, 'alchemy-nft+ownerOf', checkpointError);
+      alchemyError = `Alchemy NFT index gave ${indexed.tokenIds.length}, `
+        + `ownerOf verified ${verified.tokenIds.length}, balanceOf reports ${onChainCount}`;
+    }
+  } catch (err) {
+    // Never include the URL here: it contains the user's API key.
+    alchemyError = `Alchemy NFT ownership lookup failed: ${err.message || String(err)}`;
+  }
+
+  const got = await transferWindow(chain, owner, opts, rpc, 0, head.block);
   if (got.unavailable) {
     return {
       balanceOf: onChainCount,
-      unavailable: [alchemyError, got.unavailable].filter(Boolean).join('; '),
+      unavailable: [checkpointError, alchemyError, got.unavailable].filter(Boolean).join('; '),
     };
   }
-
-  const held = new Set();
-  for (const ev of got.events) {
-    if (ev.direction === 'in') held.add(ev.tokenId);
-    else held.delete(ev.tokenId);
+  const candidates = replayTransfers([], got.events);
+  const verified = await proveOwnedSet(
+    rpc, manager, owner, candidates, onChainCount, blockTag,
+  );
+  if (verified.exact) {
+    return accept(verified, 'transfer-logs+ownerOf', [checkpointError, alchemyError]
+      .filter(Boolean).join('; ') || null);
   }
-
   return {
-    tokenIds: [...held].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    tokenIds: candidates,
+    verifiedTokenIds: verified.tokenIds,
     balanceOf: onChainCount,
-    reconciles: onChainCount === held.size,
-    source: 'transfer-logs',
-    indexWarning: alchemyError,
+    reconciles: false,
+    source: 'transfer-logs+ownerOf',
+    indexWarning: [
+      checkpointError,
+      alchemyError,
+      `ownerOf verified ${verified.tokenIds.length}, balanceOf reports ${onChainCount}`,
+    ].filter(Boolean).join('; '),
+    checkedThrough: head.block,
   };
 }
 
@@ -850,7 +982,7 @@ export async function alchemyOwnedTokenIds(rpc, contract, owner) {
   throw new Error('pagination exceeded 50 pages');
 }
 
-export async function verifyOwnedIds(rpc, contract, owner, tokenIds) {
+export async function verifyOwnedIds(rpc, contract, owner, tokenIds, block = 'latest') {
   const want = String(owner).toLowerCase();
   const rows = [];
   for (let offset = 0; offset < tokenIds.length; offset += 25) {
@@ -861,7 +993,7 @@ export async function verifyOwnedIds(rpc, contract, owner, tokenIds) {
       let hexes;
       try {
         hexes = await ethCallBatch(rpc, pending.map(({ tokenId }) => ({
-          to: contract, data: dataOwnerOf(tokenId),
+          to: contract, data: dataOwnerOf(tokenId), block,
         })));
       } catch {
         if (attempt < 3) await wait(2000 * (attempt + 1));
@@ -877,7 +1009,20 @@ export async function verifyOwnedIds(rpc, contract, owner, tokenIds) {
       pending = retry;
       if (pending.length && attempt < 3) await wait(2000 * (attempt + 1));
     }
-    for (const item of pending) resolved[item.index] = { __error: 'ownerOf unreadable' };
+    // Providers that reject JSON-RPC batches may still serve the exact same
+    // proof as scalar eth_call. Retry only unresolved items and keep the block
+    // tag fixed so balanceOf and ownerOf describe one state.
+    for (const item of pending) {
+      try {
+        const hex = await retryRead(() => ethCall(
+          rpc, contract, dataOwnerOf(item.tokenId), null, block,
+        ), 2);
+        resolved[item.index] = toAddress(words(hex)[0]).toLowerCase() === want
+          ? item.tokenId : null;
+      } catch {
+        resolved[item.index] = { __error: 'ownerOf unreadable' };
+      }
+    }
     rows.push(...resolved);
     if (offset + chunk.length < tokenIds.length) await wait(250);
   }

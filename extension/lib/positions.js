@@ -213,6 +213,10 @@ export async function loadPositions(chainKey, owner, opts = {}) {
       attempted: 0, enumUnreadable: 0, positionUnreadable: 0, closedHidden: 0,
       positions, v4,
       enumSource: 'empty',
+      discovery: {
+        v3: { complete: true, ids: [] },
+        v4: v4.discovery,
+      },
     };
   }
 
@@ -289,6 +293,10 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     enumSource: 'rpc-verified',
     positions,
     v4,
+    discovery: {
+      v3: v3.discovery,
+      v4: v4.discovery,
+    },
   };
 }
 
@@ -332,6 +340,179 @@ export async function loadSweep(owners, chainKeys, opts = {}) {
   });
 }
 
+function knownScopeMap(scopes) {
+  return new Map((Array.isArray(scopes) ? scopes : []).map((job) => [
+    `${String(job.owner || '').toLowerCase()}@${job.chainKey}`,
+    job.scope || null,
+  ]));
+}
+
+/**
+ * Fast wallet x chain sweep over IDs proven by the last Full rescan.
+ *
+ * It never calls tokenOfOwnerByIndex and never reconstructs v4 ownership from
+ * Transfer history. Every remembered ID is first checked with ownerOf, then
+ * its present state, fees, prices and incremental history are read live.
+ */
+export async function loadKnownSweep(owners, chainKeys, scopes, opts = {}) {
+  const onProgress = opts.onProgress || (() => {});
+  const byScope = knownScopeMap(scopes);
+  const jobs = [];
+  const seen = new Set();
+  for (const owner of owners || []) {
+    const address = String(typeof owner === 'string' ? owner : owner.address || '')
+      .trim().toLowerCase();
+    if (!address || seen.has(address)) continue;
+    seen.add(address);
+    const label = typeof owner === 'string' ? '' : String(owner.label || '');
+    for (const chainKey of chainKeys || []) jobs.push({ address, label, chainKey });
+  }
+  return mapLimit(jobs, ALL_CHAIN_CONCURRENCY, async (job) => {
+    const meta = { owner: job.address, label: job.label, chainKey: job.chainKey };
+    try { await onProgress({ ...meta, phase: 'start' }); } catch { /* UI must not fail */ }
+    try {
+      const scope = byScope.get(`${job.address}@${job.chainKey}`);
+      if (!scope || !scope.v3?.complete || !scope.v4?.complete) {
+        throw new Error('Run Full rescan once to discover positions');
+      }
+      const rpcOverride = (opts.rpcOverrides && opts.rpcOverrides[job.chainKey]) || null;
+      const result = await loadKnownPositions(job.chainKey, job.address, scope, {
+        ...opts, rpcOverride,
+      });
+      result.positions = (result.positions || []).map((p) => ({
+        ...p,
+        ownerAddress: job.address,
+        ownerLabel: job.label,
+      }));
+      const payload = { ...meta, ok: true, result };
+      try { await onProgress(payload); } catch { /* */ }
+      return payload;
+    } catch (err) {
+      const payload = { ...meta, ok: false, error: err.message || String(err) };
+      try { await onProgress(payload); } catch { /* */ }
+      return payload;
+    }
+  });
+}
+
+function rememberedIds(scope, version) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of scope?.[version]?.ids || []) {
+    try {
+      const tokenId = BigInt(raw);
+      const key = tokenId.toString();
+      if (tokenId < 0n || seen.has(key)) continue;
+      seen.add(key);
+      out.push(tokenId);
+    } catch { /* malformed local state is ignored */ }
+  }
+  return out;
+}
+
+function positionIsClosed(version, position) {
+  if (version === 'v4') return position.liquidity === 0n;
+  return position.liquidity === 0n
+    && position.tokensOwed0 === 0n
+    && position.tokensOwed1 === 0n;
+}
+
+/** Re-read remembered open IDs without performing ownership discovery. */
+export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
+  const chain = CHAINS[chainKey];
+  if (!chain) throw new Error(`unknown chain ${chainKey}`);
+  if (!scope || !scope.v3?.complete || !scope.v4?.complete) {
+    throw new Error('Run Full rescan once to discover positions');
+  }
+  const rpc = opts.rpcOverride || chain.rpc;
+  const wanted = [
+    ...rememberedIds(scope, 'v3').map((tokenId) => ({ version: 'v3', tokenId })),
+    ...rememberedIds(scope, 'v4').map((tokenId) => ({ version: 'v4', tokenId })),
+  ];
+  const ownerHexes = await readMany(rpc, wanted.map((item) => ({
+    to: item.version === 'v4' ? chain.v4PositionManager : chain.nfpm,
+    data: dataOwnerOf(item.tokenId),
+  })), chain.rpcBatchSize);
+
+  const expectedOwner = String(owner).toLowerCase();
+  const verified = [];
+  const keep = { v3: [], v4: [] };
+  let enumUnreadable = 0;
+  for (let i = 0; i < wanted.length; i++) {
+    const item = wanted[i], hex = ownerHexes[i];
+    if (!hex || hex.__error) {
+      enumUnreadable++;
+      keep[item.version].push(item.tokenId.toString());
+      continue;
+    }
+    let actual;
+    try { actual = toAddress(words(hex)[0]).toLowerCase(); }
+    catch {
+      enumUnreadable++;
+      keep[item.version].push(item.tokenId.toString());
+      continue;
+    }
+    // A different owner is positive proof that this remembered ID no longer
+    // belongs in the fast index. No Transfer replay is required.
+    if (actual === expectedOwner) verified.push(item);
+  }
+
+  const loaded = await mapLimit(verified, 3, async (item) => ({
+    item,
+    position: await loadPositionByVersion(chainKey, item.version, item.tokenId, opts),
+  }));
+  const positions = [];
+  let positionUnreadable = 0;
+  let closedHidden = 0;
+  let v4ClosedHidden = 0;
+  let v4Unreadable = 0;
+  for (let i = 0; i < verified.length; i++) {
+    const item = verified[i], row = loaded[i];
+    if (!row || row.__error || !row.position) {
+      if (item.version === 'v4') v4Unreadable++;
+      else positionUnreadable++;
+      keep[item.version].push(item.tokenId.toString());
+      continue;
+    }
+    const position = row.position;
+    if (positionIsClosed(item.version, position)) {
+      if (!opts.includeClosed) {
+        closedHidden++;
+        if (item.version === 'v4') v4ClosedHidden++;
+        continue;
+      }
+    } else {
+      keep[item.version].push(item.tokenId.toString());
+    }
+    positions.push(tagPosition(position, chainKey));
+  }
+
+  return {
+    chain: chainKey,
+    count: wanted.length,
+    attempted: wanted.length,
+    scanned: wanted.length - enumUnreadable,
+    enumUnreadable,
+    positionUnreadable,
+    closedHidden,
+    truncated: false,
+    stoppedEarly: false,
+    enumSource: 'remembered-ownerOf',
+    refreshMode: 'current',
+    positions,
+    currentIndex: keep,
+    v4: {
+      positions: positions.filter((position) => position.version === 'v4'),
+      held: rememberedIds(scope, 'v4').length,
+      shown: positions.filter((position) => position.version === 'v4').length,
+      closedHidden: v4ClosedHidden,
+      unreadable: v4Unreadable,
+      unavailable: null,
+      source: 'remembered-ownerOf',
+    },
+  };
+}
+
 /**
  * All-chains sweep for one owner. Isolation and progress match loadSweep.
  */
@@ -365,21 +546,37 @@ export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = f
   let scanned = 0;
   let positionUnreadable = 0;
   let closedHidden = 0;
+  const currentIds = [];
   const posHexes = await readMany(rpc, tokenIds.map((tokenId) => ({
     to: chain.nfpm, data: dataPositions(tokenId),
   })), chain.rpcBatchSize);
   for (let i = 0; i < tokenIds.length; i++) {
     const hex = posHexes[i];
-    if (!hex || hex.__error) { positionUnreadable++; continue; }
+    if (!hex || hex.__error) {
+      positionUnreadable++;
+      currentIds.push(tokenIds[i]);
+      continue;
+    }
     const pos = decodePositions(hex);
-    if (!pos) { positionUnreadable++; continue; }
+    if (!pos) {
+      positionUnreadable++;
+      currentIds.push(tokenIds[i]);
+      continue;
+    }
     const p = { tokenId: tokenIds[i], ...pos };
     scanned++;
     const dead = p.liquidity === 0n && p.tokensOwed0 === 0n && p.tokensOwed1 === 0n;
+    if (!dead) currentIds.push(p.tokenId);
     if (dead && !includeClosed) closedHidden++;
     if (!dead || includeClosed) live.push(p);
   }
-  return { live, attempted, scanned, enumUnreadable, positionUnreadable, closedHidden };
+  return {
+    live, attempted, scanned, enumUnreadable, positionUnreadable, closedHidden,
+    discovery: {
+      complete: attempted === count && enumUnreadable === 0,
+      ids: currentIds.map(String),
+    },
+  };
 }
 
 /**
@@ -510,6 +707,7 @@ async function scanV4(chainKey, owner, opts = {}) {
     return {
       positions: [], held: 0, shown: 0, closedHidden: 0, unreadable: 0,
       unavailable: null,
+      discovery: { complete: true, ids: [] },
     };
   }
   const rpc = opts.rpcOverride || chain.rpc;
@@ -520,6 +718,7 @@ async function scanV4(chainKey, owner, opts = {}) {
       positions: [], held: found.balanceOf ?? null, shown: 0,
       closedHidden: 0, unreadable: found.balanceOf ?? null,
       unavailable: found.unavailable,
+      discovery: { complete: false, ids: [] },
     };
   }
   // A short list would read as "you hold fewer positions"; say so instead.
@@ -530,6 +729,10 @@ async function scanV4(chainKey, owner, opts = {}) {
       unreadable: Math.max(0, found.balanceOf - found.tokenIds.length),
       unavailable: `v4 enumeration incomplete — Transfer logs give ${found.tokenIds.length}`
         + ` positions but balanceOf reports ${found.balanceOf}`,
+      discovery: {
+        complete: false,
+        ids: (found.verifiedTokenIds || []).map(String),
+      },
     };
   }
 
@@ -543,6 +746,12 @@ async function scanV4(chainKey, owner, opts = {}) {
   });
   const liquidityUnreadable = checked.filter((row) => row && row.__error).length;
   const readable = checked.filter((row) => row && !row.__error);
+  const currentIds = [
+    ...readable.filter((row) => !row.closed).map((row) => row.tokenId),
+    ...checked.flatMap((row, index) => (
+      row && row.__error ? [found.tokenIds[index]] : []
+    )),
+  ];
   const closedHidden = opts.includeClosed ? 0 : readable.filter((row) => row.closed).length;
   const wanted = readable
     .filter((row) => opts.includeClosed || !row.closed)
@@ -564,6 +773,10 @@ async function scanV4(chainKey, owner, opts = {}) {
     unreadable: liquidityUnreadable + loadUnreadable,
     source: found.source,
     unavailable: null,
+    discovery: {
+      complete: true,
+      ids: currentIds.map(String),
+    },
   };
 }
 

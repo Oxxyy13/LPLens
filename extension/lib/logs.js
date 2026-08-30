@@ -162,20 +162,18 @@ async function explorerGetLogs(url, fields, slot, label) {
   return parseExplorerLogs(await res.json(), label);
 }
 
-async function viaEtherscan(
-  chainId, key, nfpm, topic1, fromBlock = 0, toBlock = 'latest',
-) {
+async function viaEtherscanRaw(chainId, key, fields) {
   const collected = [];
   const seen = new Set();
-  let cursor = Number(fromBlock || 0);
+  let cursor = Number(fields.fromBlock || 0);
+  const toBlock = fields.toBlock === undefined ? 'latest' : String(fields.toBlock);
 
   for (let page = 0; page < BLOCKSCOUT_MAX_PAGES; page++) {
     const rows = await explorerGetLogs(ETHERSCAN_V2, {
       chainid: String(chainId),
-      address: nfpm,
-      topic1,
+      ...fields,
       fromBlock: String(cursor),
-      toBlock: String(toBlock),
+      toBlock,
       apikey: key,
     }, etherscanSlot, 'etherscan');
 
@@ -188,7 +186,7 @@ async function viaEtherscan(
       const block = Number(BigInt(row.blockNumber));
       if (block > newest) newest = block;
     }
-    if (rows.length < BLOCKSCOUT_PAGE) return collected.map(normalise);
+    if (rows.length < BLOCKSCOUT_PAGE) return collected;
     const oldest = Number(BigInt(rows[0].blockNumber));
     if (oldest === newest) {
       throw new Error(
@@ -198,6 +196,17 @@ async function viaEtherscan(
   }
   throw new Error(
     `etherscan: exceeded ${BLOCKSCOUT_MAX_PAGES * BLOCKSCOUT_PAGE} log page cap`);
+}
+
+async function viaEtherscan(
+  chainId, key, nfpm, topic1, fromBlock = 0, toBlock = 'latest',
+) {
+  return (await viaEtherscanRaw(chainId, key, {
+    address: nfpm,
+    topic1,
+    fromBlock: String(fromBlock),
+    toBlock: String(toBlock),
+  })).map(normalise);
 }
 
 /**
@@ -376,57 +385,85 @@ function transferFilter(topics) {
 export async function fetchTransfers({
   contract, owner, rpc, etherscanKey, etherscanChainId, blockscout,
   historyRelay, historyRelayChainId, blockscoutRelay, blockscoutChainId,
+  fromBlock = 0, toBlock = 'latest', rpcOnly = false,
 }) {
   const hostedRelay = historyRelay || blockscoutRelay;
   const hostedChainId = historyRelayChainId || blockscoutChainId;
   const topicOwner = '0x' + String(owner).replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  const from = Number(fromBlock);
+  const to = toBlock === 'latest' ? 'latest' : Number(toBlock);
+  if (!Number.isSafeInteger(from) || from < 0
+      || (to !== 'latest' && (!Number.isSafeInteger(to) || to < from))) {
+    return { unavailable: 'invalid Transfer-log range' };
+  }
 
   const grab = async (topics) => {
     const filter = transferFilter(topics);
     const errors = [];
 
-    if (etherscanKey && etherscanChainId) {
+    if (!rpcOnly && etherscanKey && etherscanChainId) {
       try {
-        return await explorerGetLogs(ETHERSCAN_V2, {
-          chainid: String(etherscanChainId),
+        return { logs: await viaEtherscanRaw(etherscanChainId, etherscanKey, {
           address: contract,
-          fromBlock: '0',
-          toBlock: 'latest',
-          apikey: etherscanKey,
+          fromBlock: String(from),
+          toBlock: String(to),
           ...filter,
-        }, etherscanSlot, 'etherscan');
+        }), source: 'etherscan' };
       } catch (err) {
         errors.push(err.message || String(err));
       }
     }
 
-    if (hostedRelay && hostedChainId) {
+    if (!rpcOnly && hostedRelay && hostedChainId) {
       try {
-        return await viaHistoryRelayRaw(hostedRelay, hostedChainId, {
+        return { logs: await viaHistoryRelayRaw(hostedRelay, hostedChainId, {
           address: contract,
-          fromBlock: '0',
-          toBlock: 'latest',
+          fromBlock: String(from),
+          toBlock: String(to),
           ...filter,
-        });
+        }), source: hostedRelayLabel(hostedChainId) };
       } catch (err) {
         errors.push(err.message || String(err));
       }
     }
 
-    if (blockscout) {
+    if (!rpcOnly && blockscout) {
       try {
-        return await viaBlockscoutRaw(blockscout, { address: contract, ...filter });
+        return { logs: await viaBlockscoutRaw(blockscout, {
+          address: contract,
+          fromBlock: String(from),
+          toBlock: String(to),
+          ...filter,
+        }), source: 'blockscout' };
       } catch (err) {
         errors.push(err.message || String(err));
       }
     }
 
     try {
-      const logs = await rpcCall(rpc, 'eth_getLogs', [{
-        address: contract, fromBlock: '0x0', toBlock: 'latest', topics,
+      const query = (start, end) => rpcCall(rpc, 'eth_getLogs', [{
+        address: contract,
+        fromBlock: '0x' + BigInt(start).toString(16),
+        toBlock: end === 'latest' ? 'latest' : '0x' + BigInt(end).toString(16),
+        topics,
       }]);
+      let logs;
+      try {
+        logs = await query(from, to);
+      } catch (firstError) {
+        // Alchemy free accepts only ten blocks. The explicit RPC-only path is
+        // used for a short recent overlap, so it can be repaired safely with
+        // bounded chunks. Never try to walk all chain history this way.
+        if (!rpcOnly || to === 'latest' || to - from > 512) throw firstError;
+        logs = [];
+        for (let start = from; start <= to; start += 10) {
+          const rows = await query(start, Math.min(to, start + 9));
+          if (!Array.isArray(rows)) throw new Error('malformed getLogs result');
+          logs.push(...rows);
+        }
+      }
       if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
-      return logs;
+      return { logs, source: 'rpc' };
     } catch (err) {
       const rpcMsg = err.message || String(err);
       throw new Error(errors.length ? `${errors.join('; ')}; rpc fallback: ${rpcMsg}` : rpcMsg);
@@ -434,7 +471,7 @@ export async function fetchTransfers({
   };
 
   try {
-    const [inLogs, outLogs] = await Promise.all([
+    const [incoming, outgoing] = await Promise.all([
       grab([TRANSFER_TOPIC, null, topicOwner]),
       grab([TRANSFER_TOPIC, topicOwner, null]),
     ]);
@@ -444,10 +481,32 @@ export async function fetchTransfers({
       index: Number(BigInt(l.logIndex || '0x0')),
       tokenId: BigInt(l.topics[3]),
     }));
+    const tagged = [
+      ...tag(incoming.logs, 'in'),
+      ...tag(outgoing.logs, 'out'),
+    ];
+    // A self-transfer matches both filtered queries. It leaves ownership
+    // unchanged, so remove the paired in/out rows instead of replaying one
+    // after the other and accidentally deleting the NFT.
+    const directions = new Map();
+    for (const event of tagged) {
+      const key = `${event.block}:${event.index}:${event.tokenId}`;
+      if (!directions.has(key)) directions.set(key, new Set());
+      directions.get(key).add(event.direction);
+    }
     // Chronological replay: a token can be received, sent, and received again.
-    const events = [...tag(inLogs, 'in'), ...tag(outLogs, 'out')]
+    const events = tagged
+      .filter((event) => directions.get(
+        `${event.block}:${event.index}:${event.tokenId}`,
+      ).size === 1)
       .sort((a, b) => (a.block - b.block) || (a.index - b.index));
-    return { events };
+    const sources = [...new Set([incoming.source, outgoing.source].filter(Boolean))];
+    return {
+      events,
+      source: sources.join('+') || 'unknown',
+      fromBlock: from,
+      toBlock: to,
+    };
   } catch (err) {
     return { unavailable: err.message || String(err) };
   }

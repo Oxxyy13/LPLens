@@ -23,7 +23,10 @@ const {
   loadDisabledPortfolioChains,
   normalizeDisabledPortfolioChains,
   portfolioChainSummary,
+  loadPortfolioRefreshScope,
+  normalizePortfolioRefreshScope,
   saveDisabledPortfolioChains,
+  savePortfolioRefreshScope,
 } = await import('../extension/lib/scan-preferences.js?surface=a');
 
 const chains = ['ethereum', 'base', 'arbitrum', 'polygon', 'hyperevm', 'robinhood'];
@@ -50,5 +53,11 @@ assert.deepEqual(await secondSurface.loadDisabledPortfolioChains(chains), ['base
 stored.set(DISABLED_PORTFOLIO_CHAINS_KEY, ['base', 'unknown-chain']);
 assert.deepEqual(await secondSurface.loadDisabledPortfolioChains(chains), ['base'],
   'unknown stored chains must be discarded');
+assert.equal(normalizePortfolioRefreshScope('all'), 'all');
+assert.equal(normalizePortfolioRefreshScope('anything-else'), 'wallet');
+assert.equal(await loadPortfolioRefreshScope(), 'wallet');
+await savePortfolioRefreshScope('all');
+assert.equal(await secondSurface.loadPortfolioRefreshScope(), 'all',
+  'wallet scope must survive across popup and side-panel surfaces');
 
-console.log('portfolio chain preferences: defaults, filtering and summaries pass');
+console.log('portfolio scan preferences: chains and wallet scope pass');

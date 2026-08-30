@@ -9,6 +9,7 @@
  */
 
 export const DISABLED_PORTFOLIO_CHAINS_KEY = 'disabledPortfolioChainsV1';
+export const PORTFOLIO_REFRESH_SCOPE_KEY = 'portfolioRefreshScopeV1';
 
 const memory = {};
 const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
@@ -56,4 +57,26 @@ export async function saveDisabledPortfolioChains(disabled, chainKeys) {
   if (store) await store.set({ [DISABLED_PORTFOLIO_CHAINS_KEY]: value });
   else memory[DISABLED_PORTFOLIO_CHAINS_KEY] = value;
   return value;
+}
+
+export function normalizePortfolioRefreshScope(value) {
+  return value === 'all' ? 'all' : 'wallet';
+}
+
+export async function loadPortfolioRefreshScope() {
+  try {
+    const raw = store
+      ? (await store.get(PORTFOLIO_REFRESH_SCOPE_KEY))[PORTFOLIO_REFRESH_SCOPE_KEY]
+      : memory[PORTFOLIO_REFRESH_SCOPE_KEY];
+    return normalizePortfolioRefreshScope(raw);
+  } catch {
+    return 'wallet';
+  }
+}
+
+export async function savePortfolioRefreshScope(value) {
+  const scope = normalizePortfolioRefreshScope(value);
+  if (store) await store.set({ [PORTFOLIO_REFRESH_SCOPE_KEY]: scope });
+  else memory[PORTFOLIO_REFRESH_SCOPE_KEY] = scope;
+  return scope;
 }
