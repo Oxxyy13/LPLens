@@ -26,12 +26,12 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.31.0 development candidate
+## Status: 0.32.0 development candidate
 
-The public Store release remains 0.30.0 while the fast-refresh and v4
-ownership-checkpoint changes below are tested locally. Do not upload 0.31.0
-until the deterministic suite, rendered harness, machine-local dev mirror, and
-real-wallet smoke tests all pass.
+The public Store release remains 0.30.0 while the fast-refresh, v4
+ownership-checkpoint, refresh-delta, and verified replacement changes below are
+tested locally. Do not upload 0.32.0 until the deterministic suite, rendered
+harness, machine-local dev mirror, and real-wallet smoke tests all pass.
 
 Dexscreener chart alignment has a separate, versioned consent control and is
 off until the user enables it. Site permission alone shows the existing exact
@@ -92,6 +92,25 @@ state, not rendered HTML and not an accounting input. If a Full rescan cannot
 prove a wallet and chain completely, Refresh current stays disabled for that
 scope until a complete Full rescan succeeds.
 
+Version 0.32 adds consecutive-refresh context to each side-panel card. LPLens
+stores one bounded, manager-scoped local sample per position and, after the next
+accepted refresh, shows changes in LP return, vs holding, position value,
+cumulative token-denominated fees, and range state. Deposits or collections are
+called out as cash-flow changes so a larger position value is not mislabeled as
+profit. Failed scans, progressive paints, hidden-card changes, and a Current
+refresh that preserves the prior dashboard do not advance the baseline. Popup
+scans also leave this side-panel-only comparison point unchanged.
+
+The same version can group v3 NFTs only when the replacement is proven from a
+successful transaction receipt: one fully closed and paid-out predecessor, one
+successor NFT minted to the same owner, and one successor increase, with no
+other position-manager lifecycle action in that transaction. The receipt and
+canonical block hash are rechecked before the relationship renders. The UI
+calls this a **verified same-transaction replacement**, not a rollover, because
+the transaction sequence does not prove that the same fungible assets funded
+the successor. Initial discovery requires a Full rescan with closed positions
+included; v4 and ambiguous receipts stay unlinked.
+
 Portfolio totals now distinguish complete, partial, and unavailable metrics.
 Positive and negative return values are colored consistently, while coverage
 and the exact unavailable reason remain visible in text. A missing historical
@@ -133,7 +152,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.31.0
+diff -r extension build/lplens-0.32.0
 ```
 
 That diff is empty on a release commit. `tools/package.mjs` also refuses to
@@ -424,13 +443,18 @@ split exact without sending wallet credentials or requesting a signature.
 Saved addresses, the separately selected active overlay wallet address, chain
 and refresh-scope choices, hidden-position choices, overlay layout,
 Dexscreener chart consent, the local current-position ID index, the exact v4
-ownership block checkpoint, and the most recently rendered portfolio view are
-stored with `chrome.storage.local`, deliberately **not**
+ownership block checkpoint, bounded per-position refresh comparison samples,
+receipt-proven v3 replacement links, and the most recently rendered portfolio
+view are stored with `chrome.storage.local`, deliberately **not**
 `chrome.storage.sync`, so they are never carried into a Google account. The
+refresh samples and replacement links are not sent in telemetry and never fill
+missing current data. Replacement proofs are rechecked against the transaction
+receipt and canonical block before display. The
 saved view is local display output, not accounting input, and is replaced after
-a successful refresh. The two position caches hold only public wallet, chain,
-position ID, ownership, and block-checkpoint data. They are verified against
-live chain state before reuse and are not price or accounting inputs. The Copy
+a successful refresh. The current-position index and ownership checkpoint hold
+only public wallet, chain, position ID, ownership, and block-checkpoint data.
+They are verified against live chain state before reuse and are not price or
+accounting inputs. The Copy
 diagnostics control saves only version, UI
 surface, coarse scan counts,
 allowlisted error categories, and local feature state. It excludes wallets,
@@ -590,6 +614,8 @@ extension/
   lib/cache.js       bounded persistent caches
   lib/current-position-index.js  verified open-ID index for fast refresh
   lib/dashboard-snapshot.js  bounded last-rendered side-panel view
+  lib/refresh-deltas.js  bounded consecutive accepted-refresh samples
+  lib/position-lineage.js  receipt-verified v3 replacement graph
   lib/scan-preferences.js  local portfolio network selection
   lib/v4-ownership-cache.js  exact block-anchored v4 ownership checkpoint
   lib/diagnostics.js  sanitized local support report and error categories

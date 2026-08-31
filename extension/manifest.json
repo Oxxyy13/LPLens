@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "LPLens \u2014 Concentrated LP Position Reader",
-  "version": "0.31.0",
+  "version": "0.32.0",
   "description": "Read-only Uniswap and ProjectX LP position inspector. Paste any address; nothing is signed and no wallet is connected.",
   "permissions": [
     "storage",

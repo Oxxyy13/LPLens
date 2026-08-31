@@ -44,6 +44,8 @@ jobs:
           node tools/test-chain-preferences.mjs
           node tools/test-current-position-index.mjs
           node tools/test-current-position-refresh.mjs
+          node tools/test-refresh-deltas.mjs
+          node tools/test-position-lineage.mjs
           node tools/test-portfolio-presentation.mjs
           node tools/test-sidepanel.mjs
           node tools/test-blockscout-relay.mjs

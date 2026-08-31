@@ -12,7 +12,7 @@ const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
 const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
 
-assert.equal(manifest.version, '0.31.0');
+assert.equal(manifest.version, '0.32.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -70,6 +70,9 @@ assert.match(controller, /latestPortfolioShowsWallet,\s*\n\s*\);/,
   'single-wallet views must not repeat the wallet on every position card');
 assert.match(controller, /cleanRestoredDashboard\(snapshot\.showWalletLabels\)/,
   'old saved dashboards must receive the compact presentation immediately');
+assert.match(controller,
+  /for \(const lineage of resultsEl\.querySelectorAll\('\.position-lineage'\)\) lineage\.remove\(\)/,
+  'restored or preserved HTML must not retain a stale receipt-proof claim');
 assert.match(controller, /if \(!hiddenCount && showHidden\) showHidden\.checked = false/,
   'restoring the last hidden card must reset the now-hidden Show hidden toggle');
 assert.match(controller, /const hiddenCount = hiddenCards\.length/,
@@ -129,6 +132,49 @@ assert.ok(startScanSource.indexOf('if (scanBusy || dashboardMutationBusy) return
 assert.ok(startScanSource.indexOf('scanBusy = true;')
     < startScanSource.indexOf('await Promise.all([scanPreferencesReady, refreshScopeReady]);'),
   'rapid clicks must not launch overlapping sweeps');
+assert.match(startScanSource,
+  /const acceptedAt = !final\.allFailed && !preservedCurrentView \? Date\.now\(\) : null/,
+  'only an accepted dashboard may advance refresh context');
+assert.match(startScanSource,
+  /const deltaAcceptedAt = shouldAdvanceRefreshSamples\(\{[\s\S]*sidePanel: SIDE_PANEL,[\s\S]*allFailed: final\.allFailed,[\s\S]*preservedCurrentView,[\s\S]*\}\) \? acceptedAt : null/,
+  'only an accepted side-panel view may advance the visible comparison baseline');
+assert.ok(startScanSource.indexOf('const acceptedAt =')
+    > startScanSource.indexOf('const preservedCurrentView ='),
+  'the preservation decision must precede refresh-delta work');
+assert.ok(startScanSource.indexOf('deltaAcceptedAt ? readRefreshSamples(final.allPositions)')
+    > startScanSource.indexOf('if (contextAcceptedAt) {'),
+  'popup and progressive paints must never read or advance comparison samples');
+assert.ok(startScanSource.indexOf('writeRefreshSamples(final.allPositions, acceptedAt)')
+    === -1,
+  'the general accepted timestamp must not silently advance the side-panel baseline');
+assert.ok(startScanSource.indexOf('writeRefreshSamples(final.allPositions, deltaAcceptedAt)')
+    > startScanSource.indexOf('writeDashboardSnapshot({'),
+  'the accepted side-panel view must render and save before its next baseline is committed');
+assert.match(startScanSource,
+  /mode === 'full' && includeClosed[\s\S]*discoverLineageCandidates\(final\.allPositions, contextAcceptedAt\)/,
+  'automatic replacement discovery requires an explicit closed-position Full rescan');
+assert.match(startScanSource,
+  /const contextAcceptedAt = SIDE_PANEL \? acceptedAt : null/,
+  'popup scans must not spend receipt calls on side-panel-only lineage');
+assert.match(startScanSource,
+  /const relevantPrevious = relevantLineageEdges\(final\.allPositions, previousLineage\)/,
+  'stored replacement proofs must be revalidated before rendering');
+assert.match(startScanSource,
+  /knownProofKeys[\s\S]*filter\(\(candidate\) => !knownProofKeys\.has\(lineageProofKey\(candidate\)\)\)/,
+  'known replacement proofs must not be fetched again through fresh discovery');
+assert.match(startScanSource,
+  /const expectedLineage = \[\.\.\.relevantPrevious, \.\.\.newCandidates\][\s\S]*lineageWithinBudget = lineageReceiptGroupCount\(expectedLineage\)[\s\S]*<= MAX_LINEAGE_VALIDATIONS/,
+  'stored validation and discovery must be gated against one combined receipt budget');
+assert.match(startScanSource,
+  /acceptedLineage = lineageWithinBudget[\s\S]*completeLineageProofSet\([\s\S]*expectedLineage/,
+  'partial stored-plus-new proof sets must not render a manufactured graph head');
+assert.ok(startScanSource.indexOf('latestPositions = positionsWithoutLineage(latestPositions)')
+    < startScanSource.indexOf('const previousView ='),
+  'a failed refresh must preserve cards without preserving a stale lineage proof');
+assert.match(startScanSource, /html: dashboardHtmlWithoutLiveProofs\(\)/,
+  'dashboard snapshots must never persist a live verified-lineage badge');
+assert.match(startScanSource, /if \(storedLineage\) contextWrites\.push\(writeLineageEdges\(storedLineage\)\)/,
+  'a failed lineage-store read must not be overwritten');
 const gateSource = controller.slice(
   controller.indexOf('(async function gateOnOpen()'),
   controller.indexOf('async function startScan('),
@@ -173,6 +219,14 @@ assert.match(controller, /It remains the overlay wallet/,
 assert.match(panelCss, /body\.sidepanel \.hide-position\s*\{\s*display:\s*block/);
 assert.match(panelCss, /body\.sidepanel \.position-card\s*\{\s*container-type:\s*inline-size/);
 assert.match(panelCss, /@container \(max-width: 380px\)/);
+assert.match(panelCss, /\.refresh-delta-grid/);
+assert.match(panelCss, /\.position-lineage/);
+assert.match(controller, /Tracking started\. Refresh again to compare\./);
+assert.match(controller, /verified same transaction/);
+assert.match(controller, /data-refresh-baseline-at/,
+  'saved delta HTML must carry a display-only timestamp for age refresh');
+assert.match(controller, /age\.textContent = snapshotAge\(at\)/,
+  'restored comparison ages must not remain frozen in cached HTML');
 
 assert.equal(snapshotAge(1_000_000, 1_030_000), 'just now');
 assert.equal(snapshotAge(1_000_000, 1_420_000), '7m ago');

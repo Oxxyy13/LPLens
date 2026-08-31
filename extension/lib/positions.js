@@ -1119,6 +1119,9 @@ async function attachHistory(source, chainKey, chain, p) {
     time: e.time,
     transactionHash: e.transactionHash || null,
     logIndex: e.logIndex ?? null,
+    liquidityRaw: String(e.liquidity),
+    amount0Raw: String(e.amount0),
+    amount1Raw: String(e.amount1),
     amount0: scale(Number(e.amount0), d0),
     amount1: scale(Number(e.amount1), d1),
     entry: priced(e),
@@ -1137,6 +1140,8 @@ async function attachHistory(source, chainKey, chain, p) {
       time: e.time,
       transactionHash: e.transactionHash || null,
       logIndex: e.logIndex ?? null,
+      amount0Raw: String(e.amount0),
+      amount1Raw: String(e.amount1),
       amount0: scale(Number(e.amount0), d0),
       amount1: scale(Number(e.amount1), d1),
       entry: paired ? priced(paired) : null,
@@ -1161,6 +1166,17 @@ async function attachHistory(source, chainKey, chain, p) {
     exit: p.liquidity === 0n && lastRemove ? priced(lastRemove) : null,
     adds: acct.adds,
   };
+  const closedAt = p.liquidity === 0n && lastRemove ? {
+    block: lastRemove.block,
+    time: lastRemove.time,
+    transactionHash: lastRemove.transactionHash || null,
+    logIndex: lastRemove.logIndex ?? null,
+    liquidityRaw: String(lastRemove.liquidity),
+    amount0Raw: String(lastRemove.amount0),
+    amount1Raw: String(lastRemove.amount1),
+    amount0: scale(Number(lastRemove.amount0), d0),
+    amount1: scale(Number(lastRemove.amount1), d1),
+  } : null;
 
   return {
     ...p,
@@ -1168,6 +1184,11 @@ async function attachHistory(source, chainKey, chain, p) {
       entry: firstAdd ? priced(firstAdd) : null,
       // An exit price only exists once the position is actually closed.
       exit: p.liquidity === 0n && lastRemove ? priced(lastRemove) : null,
+      // Cross-NFT lineage is proven only from a unique same-transaction
+      // close-then-open sequence. Keep the exact final decrease event identity
+      // alongside the existing first-deposit identity so that proof never
+      // depends on token names, nearby blocks, or approximate amounts.
+      closedAt,
       deposits,
       collections,
       deposited0: scale(Number(acct.deposited0), d0),

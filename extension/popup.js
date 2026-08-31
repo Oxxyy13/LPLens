@@ -39,6 +39,17 @@ import {
 import {
   portfolioJobIssue, portfolioScanSummary, restoredPortfolioSummary,
 } from './lib/portfolio-presentation.js';
+import {
+  attachRefreshDeltas, readRefreshSamples, shouldAdvanceRefreshSamples,
+  writeRefreshSamples,
+} from './lib/refresh-deltas.js';
+import {
+  attachPositionLineage, completeLineageProofSet, discoverLineageCandidates,
+  mergeLineageEdges,
+  lineageProofKey, lineageReceiptGroupCount, MAX_LINEAGE_VALIDATIONS,
+  proveLineageCandidates, readLineageState, relevantLineageEdges,
+  validateLineageEdges, writeLineageEdges,
+} from './lib/position-lineage.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
@@ -791,10 +802,32 @@ function cleanRestoredDashboard(showWalletLabels) {
   }
   for (const notes of resultsEl.querySelectorAll('.totals-notes')) notes.remove();
   for (const meta of resultsEl.querySelectorAll('.position-card .meta')) meta.remove();
+  // Receipt and block-header proof is live-session state. Cached HTML must not
+  // carry a prior session's verified claim across a reopen.
+  for (const lineage of resultsEl.querySelectorAll('.position-lineage')) lineage.remove();
 
   if (showWalletLabels === false) {
     for (const label of resultsEl.querySelectorAll('.position-card .wallet-lbl')) label.remove();
   }
+  for (const age of resultsEl.querySelectorAll('[data-refresh-baseline-at]')) {
+    const at = Number(age.dataset.refreshBaselineAt);
+    if (Number.isFinite(at) && at > 0) age.textContent = snapshotAge(at);
+  }
+}
+
+function positionsWithoutLineage(positions) {
+  return (positions || []).map((position) => {
+    if (!position || !Object.hasOwn(position, 'lineage')) return position;
+    const copy = { ...position };
+    delete copy.lineage;
+    return copy;
+  });
+}
+
+function dashboardHtmlWithoutLiveProofs() {
+  const clone = resultsEl.cloneNode(true);
+  for (const lineage of clone.querySelectorAll('.position-lineage')) lineage.remove();
+  return clone.innerHTML;
 }
 
 async function restoreDashboard() {
@@ -919,8 +952,13 @@ async function startScan(
   scanBusy = true;
   const scanStartedAt = Date.now();
   const previousRefreshStatus = dashboardStatusBase;
+  // A new attempt invalidates the last session proof immediately. If receipt
+  // or header validation fails, the preserved cards remain useful but cannot
+  // continue to claim a verified replacement.
+  for (const lineage of resultsEl.querySelectorAll('.position-lineage')) lineage.remove();
+  latestPositions = positionsWithoutLineage(latestPositions);
   const previousView = {
-    html: resultsEl.innerHTML,
+    html: dashboardHtmlWithoutLiveProofs(),
     latestPositions: [...latestPositions],
     latestSweepText,
     latestSweepSummary,
@@ -1021,8 +1059,69 @@ async function startScan(
       reconcileHiddenCards();
       applyPositionFilter(activePositionFilter);
     }
+    // Consecutive-refresh deltas and cross-NFT lineage are presentation-only
+    // context. They advance only when this result becomes the accepted view.
+    // Progressive paints, failed scans, and a preserved prior dashboard never
+    // change either local store.
+    const acceptedAt = !final.allFailed && !preservedCurrentView ? Date.now() : null;
+    const contextAcceptedAt = SIDE_PANEL ? acceptedAt : null;
+    const deltaAcceptedAt = shouldAdvanceRefreshSamples({
+      sidePanel: SIDE_PANEL,
+      allFailed: final.allFailed,
+      preservedCurrentView,
+    }) ? acceptedAt : null;
+    let acceptedLineage = null;
+    let storedLineage = null;
+    if (contextAcceptedAt) {
+      const [previousSamples, lineageState] = await Promise.all([
+        deltaAcceptedAt ? readRefreshSamples(final.allPositions) : Promise.resolve(new Map()),
+        readLineageState(),
+      ]);
+      const previousLineage = lineageState.edges;
+      const relevantPrevious = relevantLineageEdges(final.allPositions, previousLineage);
+      const knownProofKeys = new Set(previousLineage.map(lineageProofKey).filter(Boolean));
+      const newCandidates = lineageState.ok && mode === 'full' && includeClosed
+        ? discoverLineageCandidates(final.allPositions, contextAcceptedAt)
+          .filter((candidate) => !knownProofKeys.has(lineageProofKey(candidate)))
+        : [];
+      const previousGroups = lineageReceiptGroupCount(relevantPrevious);
+      const expectedLineage = [...relevantPrevious, ...newCandidates];
+      const lineageWithinBudget = lineageReceiptGroupCount(expectedLineage)
+        <= MAX_LINEAGE_VALIDATIONS;
+      const newProofBudget = lineageWithinBudget
+        ? MAX_LINEAGE_VALIDATIONS - previousGroups : 0;
+      const [verifiedPrevious, discoveredLineage] = await Promise.all([
+        lineageState.ok && lineageWithinBudget ? validateLineageEdges(
+          relevantPrevious,
+          settings.rpcOverrides || {},
+          MAX_LINEAGE_VALIDATIONS,
+        ) : Promise.resolve([]),
+        newProofBudget > 0
+          ? proveLineageCandidates(newCandidates, settings.rpcOverrides || {}, newProofBudget)
+          : Promise.resolve([]),
+      ]);
+      // Keep stored proofs when a provider cannot re-check them, but never
+      // render or aggregate one until this refresh validates it again.
+      storedLineage = lineageState.ok
+        ? mergeLineageEdges(previousLineage, discoveredLineage) : null;
+      acceptedLineage = lineageWithinBudget
+        ? completeLineageProofSet(
+          expectedLineage,
+          mergeLineageEdges(verifiedPrevious, discoveredLineage),
+        )
+        : [];
+      const withDeltas = deltaAcceptedAt
+        ? attachRefreshDeltas(final.allPositions, previousSamples, deltaAcceptedAt)
+        : final.allPositions;
+      const withContext = attachPositionLineage(withDeltas, acceptedLineage);
+      const shown = paintPortfolio(withContext);
+      final.allPositions = withContext;
+      final.positions = shown.visible;
+      final.hiddenPositions = shown.hidden;
+    }
     const saved = !final.allFailed && !preservedCurrentView && await writeDashboardSnapshot({
-      html: resultsEl.innerHTML,
+      at: acceptedAt,
+      html: dashboardHtmlWithoutLiveProofs(),
       summaryHtml: totalsCard(final.positions),
       status: final.summary,
       details: final.details,
@@ -1035,6 +1134,14 @@ async function startScan(
       refreshScope: scanRefreshScope,
       refreshMode: mode,
     });
+    if (contextAcceptedAt) {
+      const contextWrites = [];
+      if (storedLineage) contextWrites.push(writeLineageEdges(storedLineage));
+      if (deltaAcceptedAt) {
+        contextWrites.push(writeRefreshSamples(final.allPositions, deltaAcceptedAt));
+      }
+      await Promise.all(contextWrites);
+    }
     await recordScanDiagnostic(scanStartedAt, final, includeClosed);
     if (SIDE_PANEL) {
       if (preservedCurrentView) {
@@ -1375,6 +1482,86 @@ async function runSweep(owners, chainKeys, opts) {
   return { ...paint(), jobs, states };
 }
 
+function signedMoney(value) {
+  if (!Number.isFinite(value)) return '—';
+  const abs = Math.abs(value);
+  const digits = abs < 100 ? 2 : 0;
+  const body = '$' + abs.toLocaleString('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+  return value > 0 ? `+${body}` : value < 0 ? `−${body}` : body;
+}
+
+const deltaTone = (value) => value > 0 ? 'up' : value < 0 ? 'down' : 'muted';
+const readableRangeStatus = (status) => ({
+  'in-range': 'in range', below: 'below', above: 'above', closed: 'closed',
+})[status] || 'unknown';
+const inverseRangeStatus = (status) => status === 'below' ? 'above' : status === 'above' ? 'below' : status;
+
+function refreshDeltaBlock(position, priceViews, s0, s1) {
+  if (!SIDE_PANEL || !position.refreshDelta) return '';
+  const delta = position.refreshDelta;
+  if (delta.baseline) {
+    return `<section class="refresh-delta baseline" aria-label="Since last refresh tracking">
+      <span class="refresh-delta-title">Since last refresh</span>
+      <span class="refresh-delta-empty">Tracking started. Refresh again to compare.</span>
+    </section>`;
+  }
+  const metric = (label, value) => Number.isFinite(value)
+    ? `<span class="refresh-delta-metric"><small>${esc(label)}</small><b class="${deltaTone(value)}">${esc(signedMoney(value))}</b></span>`
+    : '';
+  let fees = metric('fees', delta.feesGainedUsd);
+  if (!fees && !delta.feesRevised) {
+    const tokenBits = [];
+    if (Number.isFinite(delta.fees0Delta) && Math.abs(delta.fees0Delta) > 1e-12) {
+      tokenBits.push(`${delta.fees0Delta > 0 ? '+' : ''}${fmt(delta.fees0Delta)} ${esc(s0)}`);
+    }
+    if (Number.isFinite(delta.fees1Delta) && Math.abs(delta.fees1Delta) > 1e-12) {
+      tokenBits.push(`${delta.fees1Delta > 0 ? '+' : ''}${fmt(delta.fees1Delta)} ${esc(s1)}`);
+    }
+    if (tokenBits.length) {
+      fees = `<span class="refresh-delta-metric"><small>fees</small><b class="up">${tokenBits.join(' + ')}</b></span>`;
+    }
+  }
+  const transition = delta.statusChanged
+    ? priceViews(
+      `${esc(readableRangeStatus(delta.fromStatus))} → ${esc(readableRangeStatus(delta.toStatus))}`,
+      `${esc(readableRangeStatus(inverseRangeStatus(delta.fromStatus)))} → ${esc(readableRangeStatus(inverseRangeStatus(delta.toStatus)))}`,
+    ) : '';
+  const notes = [
+    transition ? `<span>range ${transition}</span>` : '',
+    delta.cashFlowChanged ? '<span>cash flow changed</span>' : '',
+    delta.feesRevised ? '<span>fee history was revised</span>' : '',
+  ].filter(Boolean).join(' · ');
+  const metrics = [
+    metric('LP return', delta.lpReturnUsd),
+    metric('vs hold', delta.vsHoldingUsd),
+    fees,
+    metric('value', delta.positionValueUsd),
+  ].filter(Boolean).join('');
+  return `<section class="refresh-delta" aria-label="Changes since the previous accepted refresh">
+    <span class="refresh-delta-title">Since <span data-refresh-baseline-at="${delta.fromAt}">${esc(snapshotAge(delta.fromAt))}</span></span>
+    ${metrics ? `<span class="refresh-delta-grid">${metrics}</span>`
+      : '<span class="refresh-delta-empty">No comparable metrics this refresh.</span>'}
+    ${notes ? `<span class="refresh-delta-notes">${notes}</span>` : ''}
+  </section>`;
+}
+
+function lineageBlock(position) {
+  const lineage = position.lineage;
+  if (!SIDE_PANEL || !lineage || !lineage.isHead) return '';
+  const count = lineage.memberCount;
+  const combined = Number.isFinite(lineage.combinedPnl)
+    ? `<span class="lineage-return"><small>combined LP return</small><b class="${deltaTone(lineage.combinedPnl)}">${esc(signedMoney(lineage.combinedPnl))}</b></span>`
+    : '<span class="lineage-missing">Full rescan with closed positions to update the combined return.</span>';
+  return `<section class="position-lineage" aria-label="Verified position replacement history">
+    <span class="lineage-title">Strategy history · ${count} NFTs</span>
+    <span class="lineage-proof" title="Receipt proof shows one close, payout, successor NFT mint, and open in the same transaction. It does not prove the same fungible assets funded the new NFT.">verified same transaction</span>
+    ${combined}
+  </section>`;
+}
+
 /**
  * One position card.
  *
@@ -1439,6 +1626,8 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
       </div>
       ${rangeBar(p, h, flippable)}
       ${hero(p, h, s1)}
+      ${refreshDeltaBlock(p, priceViews, s0, s1)}
+      ${lineageBlock(p)}
       <div class="stats">
         <div class="stat">
           <span class="stat-l">collectable</span>
@@ -1496,7 +1685,7 @@ document.addEventListener('click', async (e) => {
         const previous = await readDashboardSnapshot();
         await writeDashboardSnapshot({
           at: previous && previous.at,
-          html: resultsEl.innerHTML,
+          html: dashboardHtmlWithoutLiveProofs(),
           summaryHtml: totalsCard(shown.visible),
           status: summary,
           details: latestSweepDetails,
@@ -1541,7 +1730,7 @@ document.addEventListener('click', async (e) => {
         paintNetworkSelectionNotice();
         await writeDashboardSnapshot({
           at: previous && previous.at,
-          html: resultsEl.innerHTML,
+          html: dashboardHtmlWithoutLiveProofs(),
           summaryHtml: '',
           status: statusEl.textContent,
           details: previousDetails,
