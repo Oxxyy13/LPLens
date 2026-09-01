@@ -26,12 +26,12 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.33.0 development candidate
+## Status: 0.33.0 Store submission candidate
 
-The public Store release remains 0.30.0 while the fast-refresh, v4
-ownership-checkpoint, refresh-delta, verified replacement, and UP33 changes below are
-tested locally. Do not upload 0.33.0 until the deterministic suite, rendered
-harness, machine-local dev mirror, and real-wallet smoke tests all pass.
+The public Store release remains 0.30.0 until Google reviews 0.33.0. The
+deterministic suite, rendered UI harnesses, machine-local dev mirror,
+provider-backed fresh-install check, and real-wallet UP33 position smoke all
+pass. The submitted source and ZIP are published together for exact comparison.
 
 Version 0.33 adds UP33 concentrated-liquidity positions on Robinhood Chain as a
 separate protocol deployment, so equal NFT numbers from different managers can
