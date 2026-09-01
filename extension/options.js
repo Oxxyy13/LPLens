@@ -142,7 +142,7 @@ async function paintPermissions() {
   if (up33Granted) pageRows.push(`<li class="yes"><b>up33.xyz/liquidity</b>: can add the
     UP33 panel on that route and its subpages. It uses the active overlay wallet selected
     in LPLens. On the exact liquidity list it reads only each concentrated-position
-    row's public data-flow="cl-&lt;NFT ID&gt;" attribute, matching visible #ID, and row geometry to align local PnL cards. Those page-derived
+    row's public data-flow="cl-&lt;NFT ID&gt;" attribute, matching visible #ID, and row geometry to align local PnL cards. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so the cards move left instead of covering it; it does not read dialog contents. Those page-derived
     IDs are matched only against the active-wallet scan and are not sent to a network or
     stored. It does not read connected-wallet state, balances, forms, transaction controls,
     signing prompts, the wallet provider, or other UP33 page content. Only a shortened wallet

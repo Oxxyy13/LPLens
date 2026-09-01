@@ -467,7 +467,9 @@ function placePanel(panel) {
   let left = 0, right = innerWidth;
   // UP33's floating fallback uses the active wallet selected in LPLens. Keep
   // that panel browser-edge anchored; the separate row mode reads only public
-  // NFT row identifiers and measures only those matched row buttons.
+  // NFT row identifiers, measures only those matched row buttons, and checks
+  // only the visible boundary of a semantic dialog that reaches the right edge
+  // so cards stay clear of an open Manage drawer. Its content is never read.
   if (!ON_UP33) {
     const main = document.querySelector('main');
     if (main) {
@@ -731,7 +733,47 @@ function up33RightGutterPlacement(rect, viewportWidth, gap = GUTTER_GAP,
     width: Math.floor(width),
   };
 }
+
+function up33BoundarySafePlacement(rect, viewportWidth, dialogLeft,
+  gap = GUTTER_GAP, minWidth = GUTTER_MIN, maxWidth = 190) {
+  if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+  const direct = up33RightGutterPlacement(rect, viewportWidth, gap, minWidth, maxWidth);
+  if (!Number.isFinite(dialogLeft) || !(dialogLeft < viewportWidth)) return direct;
+  if (direct && direct.left + direct.width + gap <= dialogLeft) return direct;
+
+  const width = Math.min(maxWidth, Math.floor(dialogLeft - gap * 2));
+  const left = Math.floor(dialogLeft - gap - width);
+  if (!Number.isFinite(width) || width < minWidth || left < gap) return null;
+  return { left, width };
+}
 // END PURE UP33 ROW ANCHORING
+
+function up33DockedDialogLeft(viewportWidth) {
+  const viewportRight = Number(viewportWidth);
+  let boundary = viewportRight;
+  if (!Number.isFinite(viewportRight) || viewportRight <= 0) return 0;
+  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+    const rect = dialog.getBoundingClientRect();
+    const rightDocked = Number.isFinite(rect.left) && Number.isFinite(rect.right)
+      && rect.right >= viewportRight - 2 && rect.left >= 0;
+    const drawerSized = Number.isFinite(rect.width) && Number.isFinite(rect.height)
+      && rect.width >= GUTTER_MIN
+      && rect.height >= Math.min(innerHeight * 0.5, 360);
+    const visible = rect.bottom > 0 && rect.top < innerHeight;
+    if (rightDocked && drawerSized && visible) boundary = Math.min(boundary, rect.left);
+  }
+  return boundary;
+}
+
+function up33RowPlacement(rect, viewportWidth, gap = GUTTER_GAP,
+  minWidth = GUTTER_MIN, maxWidth = 190) {
+  // A right-edge semantic dialog can cover the normal row gutter without moving
+  // the row itself. Keep the pointer-inert card immediately left of the drawer
+  // instead of letting it cover the position controls inside the drawer.
+  return up33BoundarySafePlacement(
+    rect, viewportWidth, up33DockedDialogLeft(viewportWidth), gap, minWidth, maxWidth,
+  );
+}
 
 function placeGutterCards() {
   gutterRaf = false;
@@ -752,7 +794,7 @@ function placeGutterCards() {
     const onScreen = r.bottom > 0 && r.top < innerHeight && r.width > 0;
     if (row.placement === 'up33-right') {
       hasUp33Rows = true;
-      const placement = up33RightGutterPlacement(r, innerWidth);
+      const placement = up33RowPlacement(r, innerWidth);
       if (!placement) {
         up33PlacementComplete = false;
         row.el.style.display = 'none';
@@ -784,7 +826,10 @@ function placeGutterCards() {
     row.el.style.left = Math.round(r.left - leftWidth - GUTTER_GAP) + 'px';
     row.el.style.top = Math.round(r.top) + 'px';
   }
-  if (hasUp33Rows) setUp33FloatingVisible(!up33PlacementComplete);
+  if (hasUp33Rows) {
+    const dialogOpen = up33DockedDialogLeft(innerWidth) < innerWidth;
+    setUp33FloatingVisible(!up33PlacementComplete && !dialogOpen);
+  }
 }
 
 const placeSoon = () => {
@@ -1065,6 +1110,7 @@ function syncUp33Rows() {
   }
 
   const candidatesById = new Map();
+  const dialogOpen = up33DockedDialogLeft(innerWidth) < innerWidth;
   let selectorMismatch = false;
   for (const anchor of document.querySelectorAll('button[data-flow^="cl-"]')) {
     const rect = anchor.getBoundingClientRect();
@@ -1087,7 +1133,7 @@ function syncUp33Rows() {
   for (const [positionId, candidates] of candidatesById) {
     const chosen = chooseUp33RowAnchor(candidates);
     const data = up33PositionMap.get(positionId);
-    if (!chosen || !data || !up33RightGutterPlacement(chosen.rect, innerWidth)) {
+    if (!chosen || !data || !up33RowPlacement(chosen.rect, innerWidth)) {
       complete = false;
       break;
     }
@@ -1101,7 +1147,9 @@ function syncUp33Rows() {
 
   if (!complete || matched.length !== candidatesById.size) {
     clearUp33Rows(false, false);
-    setUp33FloatingVisible(true);
+    // If a right-docked dialog leaves no safe card space, hide LPLens until the
+    // dialog closes instead of replacing the small cards with a larger panel.
+    setUp33FloatingVisible(!dialogOpen);
     return false;
   }
 
@@ -1197,7 +1245,7 @@ async function syncUp33Liquidity() {
       content = '<div class="note">No open UP33 concentrated positions found for the active wallet. UP33 v2 LP and liquidity-locker positions are not read yet.</div>';
     }
     render(head(`<span class="pill">UP33 · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. On this list, LPLens reads only public position NFT IDs and row geometry to align PnL with the matching row. Connected wallet data and transaction controls are not read.</div>
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. On this list, LPLens reads only public position NFT IDs and row geometry to align PnL with the matching row. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so cards do not cover it. Dialog content, connected wallet data, and transaction controls are not read.</div>
       ${content}
     </div>`, true);
     syncUp33Rows();
@@ -1974,6 +2022,23 @@ addEventListener('resize', () => {
   const host = document.getElementById(HOST_ID);
   if (host) placePanel(host.__shadow.querySelector('.panel'));
 }, { passive: true });
+
+for (const eventName of ['transitionend', 'transitioncancel', 'animationend', 'animationcancel']) {
+  addEventListener(eventName, (event) => {
+    if (torndown || !ON_UP33 || !UP33_LIST_ROUTE.test(location.pathname)) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const dialog = target.closest('[role="dialog"]');
+    if (!dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    if (!(rect.width > 0) || rect.right < innerWidth - 2) return;
+    // CSS motion does not necessarily mutate attributes or resize the matched
+    // row. Recheck once the semantic dialog settles so a sliding Manage drawer
+    // cannot finish on top of an already-positioned card.
+    placeSoon();
+    scheduleList();
+  }, { passive: true, capture: true });
+}
 
 // Debounced, and it never reacts to our own writes: everything except the
 // one-time host append happens inside the shadow root, which this cannot see.

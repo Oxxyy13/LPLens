@@ -52,7 +52,9 @@ The optional UP33 overlay runs only on `up33.xyz/liquidity` and descendants.
 The UP33 panel uses the active overlay wallet selected in LPLens, reads positions
 from public chain data, and, on the exact liquidity list, reads only each
 concentrated-position row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row geometry so local PnL
-cards can align with the matching rows. Those page-derived IDs are matched only
+cards can align with the matching rows. If a semantic dialog reaches the right
+edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary
+so the cards move left instead of covering it; it does not read dialog contents. Those page-derived IDs are matched only
 against the active-wallet scan; they are not sent to a network or stored. LPLens
 does not read UP33 connected-wallet state, balances, forms, transaction controls,
 signing prompts, its wallet provider, or other UP33 page content. The page
@@ -405,7 +407,9 @@ understanding rather than skimming:
   the panel uses only the active overlay wallet explicitly selected in LPLens.
   On the exact UP33 `/liquidity` list it reads only each concentrated-position
   row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row geometry so local PnL cards can align with
-  matching rows. Those page-derived IDs are matched only against the active-wallet
+  matching rows. If a semantic dialog reaches the right edge, such as UP33's
+  Manage drawer, it reads only the dialog's visible boundary so the cards move
+  left instead of covering it; it does not read dialog contents. Those page-derived IDs are matched only against the active-wallet
   scan and are not sent to a network or stored. It does not read UP33
   connected-wallet state, balances, forms, transaction controls, signing prompts,
   wallet-provider objects, or other UP33 page content. The route also triggers a

@@ -60,6 +60,9 @@ addresses used to orient the independent LPLens range display.
 The optional UP33 overlay runs only on `up33.xyz/liquidity` and descendants. It
 reads only each concentrated-position row's public `data-flow="cl-<NFT ID>"`
 attribute, matching visible `#ID`, and row geometry on the exact liquidity list so local PnL cards can align with matching rows.
+If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it
+reads only the dialog's visible boundary so the cards move left instead of
+covering it; it does not read dialog contents.
 Those page-derived IDs are matched only against the active-wallet scan and are
 not sent to a network or stored. It does not read connected-wallet state,
 balances, forms, transaction controls, signing prompts, the wallet provider, or

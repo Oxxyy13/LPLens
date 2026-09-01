@@ -16,9 +16,13 @@ vm.runInContext(`
   const GUTTER_GAP = 12;
   const GUTTER_MIN = 132;
   ${pureBlock[1]}
-  globalThis.helpers = { parseUp33FlowKey, up33RightGutterPlacement };
+  globalThis.helpers = {
+    parseUp33FlowKey, up33RightGutterPlacement, up33BoundarySafePlacement,
+  };
 `, context);
-const { parseUp33FlowKey, up33RightGutterPlacement } = context.helpers;
+const {
+  parseUp33FlowKey, up33RightGutterPlacement, up33BoundarySafePlacement,
+} = context.helpers;
 
 assert.equal(parseUp33FlowKey('cl-0'), '0');
 assert.equal(parseUp33FlowKey('cl-77'), '77');
@@ -53,6 +57,23 @@ assert.equal(up33RightGutterPlacement(
 assert.equal(up33RightGutterPlacement(
   { right: 1000, width: 900, height: 0 }, 1600,
 ), null, 'zero-height React remnants must not anchor a card');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(up33BoundarySafePlacement(
+    { right: 1000, width: 900, height: 76 }, 1600, 1160,
+  ))),
+  { left: 958, width: 190 },
+  'a right-side drawer must shift the card entirely to its left',
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(up33BoundarySafePlacement(
+    { right: 700, width: 500, height: 76 }, 1600, 1000,
+  ))),
+  { left: 712, width: 190 },
+  'a non-overlapping drawer must not disturb ordinary row alignment',
+);
+assert.equal(up33BoundarySafePlacement(
+  { right: 100, width: 90, height: 76 }, 320, 150,
+), null, 'a drawer with no safe left space must retain the floating fallback');
 
 const rowBlock = overlay.match(
   /function syncUp33Rows\(\) \{([\s\S]*?)\n\}\n\nasync function syncUp33Liquidity/,
@@ -67,7 +88,10 @@ assert.match(rowBlock[1], /if \(!measurable\) continue/,
   'fully hidden retained rows must not disable visible row cards');
 assert.match(rowBlock[1], /up33PositionMap\.get\(positionId\)/,
   'page ids may only intersect the active-wallet result map');
-assert.match(rowBlock[1], /up33RightGutterPlacement/);
+assert.match(rowBlock[1], /up33RowPlacement/);
+assert.match(rowBlock[1], /const dialogOpen = up33DockedDialogLeft\(innerWidth\) < innerWidth/);
+assert.match(rowBlock[1], /setUp33FloatingVisible\(!dialogOpen\)/,
+  'an open dialog with no safe card space must hide the larger fallback');
 assert.match(rowBlock[1], /setUp33FloatingVisible\(true\)/,
   'selector, wallet, or layout mismatch must retain the floating fallback');
 assert.match(rowBlock[1], /className = 'gc dense up33-row'/);
@@ -78,6 +102,18 @@ assert.match(overlay, /if \(ON_UP33 && UP33_LIST_ROUTE\.test\(location\.pathname
   'UP33 React mutations must rematch locally without navigation');
 assert.match(overlay, /function watchUp33RowGeometry\(rows\)/,
   'UP33 row and container size changes must reposition cards');
+assert.match(overlay, /function up33DockedDialogLeft\(viewportWidth\)/);
+assert.match(overlay, /querySelectorAll\('\[role="dialog"\]'\)/,
+  'UP33 placement may inspect only the semantic dialog boundary');
+assert.match(overlay, /const viewportRight = Number\(viewportWidth\)/);
+assert.match(overlay, /rect\.right >= viewportRight - 2/,
+  'every dialog candidate must be tested against the immutable viewport edge');
+assert.match(overlay, /\['transitionend', 'transitioncancel', 'animationend', 'animationcancel'\]/,
+  'animated drawers must trigger a final geometry check');
+assert.match(overlay, /target\.closest\('\[role="dialog"\]'\)/,
+  'motion rechecks must be limited to the semantic dialog subtree');
+assert.match(overlay, /rect\.right < innerWidth - 2/,
+  'motion rechecks must ignore dialogs that do not reach the right edge');
 assert.match(overlay, /attributes: true[\s\S]*attributeFilter: \['class', 'style', 'hidden', 'aria-hidden'\]/,
   'UP33 class and style layout changes must trigger local realignment');
 assert.match(overlay, /addEventListener\('scroll', \(\) => \{[\s\S]*?UP33_LIST_ROUTE[\s\S]*?scheduleList\(\)/,

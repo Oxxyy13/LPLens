@@ -16,8 +16,8 @@ const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url)
 const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.url), 'utf8');
 const optionsJs = readFileSync(new URL('../extension/options.js', import.meta.url), 'utf8');
 
-assert.match(worker, /Effective 31 August 2026/,
-  'privacy policy effective date must match the local refresh-comparison boundary change');
+assert.match(worker, /Effective 1 September 2026/,
+  'privacy policy effective date must match the UP33 dialog-boundary disclosure change');
 assert.match(worker, /saved addresses and labels/i,
   'privacy policy must describe the current all-chain wallet selection model');
 assert.match(worker, /separately selected active overlay wallet address/i,
@@ -46,6 +46,10 @@ for (const [name, body] of [
     `${name} omits the matching visible UP33 #ID check`);
   assert.match(body, /row geometry/i,
     `${name} omits the UP33 row-geometry read`);
+  assert.match(body, /semantic dialog[^.]{0,180}right edge[^.]{0,180}Manage drawer[^.]{0,180}visible\s+boundary/i,
+    `${name} omits the UP33 right-edge dialog boundary read`);
+  assert.match(body, /does not read dialog contents/i,
+    `${name} omits the UP33 dialog-content exclusion`);
   assert.match(body, /page-derived IDs[^.]{0,180}active-wallet scan/i,
     `${name} omits the active-wallet-only UP33 ID match`);
   assert.match(body, /page-derived IDs[^.]{0,220}not sent to a network or stored/i,
