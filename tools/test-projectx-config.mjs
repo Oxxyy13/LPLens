@@ -24,9 +24,11 @@ assert.deepEqual(Object.keys(CHAINS), [
 ]);
 
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
-assert.equal(manifest.version, '0.30.0');
+assert.equal(manifest.version, '0.33.0');
 assert.match(manifest.name, /Concentrated LP Position Reader/);
-assert.match(manifest.description, /ProjectX/);
+assert.match(manifest.description, /Read-only concentrated LP position inspector/);
+assert.doesNotMatch(manifest.description, /Uniswap|ProjectX|UP33/,
+  'the short Store description must stay generic after the keyword-spam rejection');
 assert.ok(manifest.host_permissions.includes('https://rpc.hyperliquid.xyz/*'));
 
 const allowed = relayQuery({

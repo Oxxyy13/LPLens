@@ -232,6 +232,16 @@ function testSinglePositionAggregateAvailability() {
   assert.equal(aggregateReasonText(mixed.totalReturn),
     'lifetime history is unavailable for 1 position; entry deposits could not be priced; another position could not be priced',
     'mixed exclusions must name every cause without double-counting exact reasons');
+
+  const principalOnly = summarizeAggregate([{
+    history: { unavailable: 'UP33 lifetime accounting unavailable' },
+    usd: { value: 500, currentValue: null, currentValueIncomplete: true },
+  }]);
+  assert.equal(principalOnly.value.display.state, 'unavailable');
+  assert.equal(principalOnly.value.included, 0,
+    'a staked active-liquidity mark must not masquerade as complete position value');
+  assert.equal(aggregateReasonText(principalOnly.value),
+    'current value is incomplete for 1 position');
 }
 
 function testTokenPriceChangesAreExactAndClearlyAnchored() {

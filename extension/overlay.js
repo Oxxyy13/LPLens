@@ -1,6 +1,6 @@
 /**
  * On-page overlay for app.uniswap.org position pages, the ProjectX portfolio
- * at www.prjx.com, and Dexscreener pair pages.
+ * at www.prjx.com, UP33 liquidity pages, and Dexscreener pair pages.
  *
  * SECURITY POSTURE: read this before changing anything here.
  *
@@ -31,7 +31,7 @@
 // in one place is what stops the popup and the overlay drifting apart again.
 const {
   CSS, esc, fmt, humanSpan, ageText, priceText, hero, rangeBar, details,
-  rebalanceLine, dexscreenerOrientation, dexscreenerRangeRuler,
+  rebalanceLine, pendingRewards, dexscreenerOrientation, dexscreenerRangeRuler,
 } = globalThis.LPLens;
 
 const DEXSCREENER_CHART_CONSENT_KEY = 'dexscreenerChartConsentV1';
@@ -58,7 +58,10 @@ const DEXSCREENER_CHART_HOST_ID = 'lplens-dexscreener-chart-host';
 // The list route is /positions with no position id after it.
 const LIST_ROUTE = /^\/positions\/?$/;
 const PROJECTX_ROUTE = /^\/portfolio\/?$/;
+const UP33_ROUTE = /^\/liquidity(?:\/.*)?$/;
+const UP33_LIST_ROUTE = /^\/liquidity\/?$/;
 const ON_DEXSCREENER = location.hostname === 'dexscreener.com';
+const ON_UP33 = location.hostname === 'up33.xyz';
 const DEXSCREENER_CHAIN_SLUGS = Object.freeze({
   ethereum: 'ethereum',
   base: 'base',
@@ -461,11 +464,18 @@ function applyPanelCollapsedUI(panel, isCollapsed) {
  * overlap, and it opens collapsed instead of covering the page uninvited.
  */
 function placePanel(panel) {
-  const main = document.querySelector('main');
   let left = 0, right = innerWidth;
-  if (main) {
-    const r = main.getBoundingClientRect();
-    if (r.width > 200) { left = r.left; right = r.right; }
+  // UP33's floating fallback uses the active wallet selected in LPLens. Keep
+  // that panel browser-edge anchored; the separate row mode reads only public
+  // NFT row identifiers, measures only those matched row buttons, and checks
+  // only the visible boundary of a semantic dialog that reaches the right edge
+  // so cards stay clear of an open Manage drawer. Its content is never read.
+  if (!ON_UP33) {
+    const main = document.querySelector('main');
+    if (main) {
+      const r = main.getBoundingClientRect();
+      if (r.width > 200) { left = r.left; right = r.right; }
+    }
   }
   const GAP = 16, MIN = 264, MAX = 384;
   const roomLeft = Math.floor(left - GAP * 2);
@@ -475,7 +485,7 @@ function placePanel(panel) {
   // layout can leave more apparent room on that side, but docking there puts
   // our collapse/expand button underneath the site's control. Keep ProjectX
   // on the browser's left edge; Uniswap retains adaptive gutter placement.
-  const forceLeft = PROJECTX_ROUTE.test(location.pathname);
+  const forceLeft = PROJECTX_ROUTE.test(location.pathname) || ON_UP33;
   const useRight = !forceLeft && roomRight > roomLeft;
   const room = useRight ? roomRight : roomLeft;
   const width = Math.min(MAX, room);
@@ -579,6 +589,8 @@ function body(d) {
   const s0 = d.token0Meta.symbol, s1 = d.token1Meta.symbol;
   const h = d.history || {};
   const u = d.usd;
+  const feeLabel = Number.isFinite(Number(d.fee))
+    ? `${(Number(d.fee) / 10000).toFixed(2)}%` : 'dynamic';
 
   // Deliberately short. The default view answers: did I make money, was LPing
   // the reason, am I still earning, and what is it worth. Everything else is
@@ -593,13 +605,16 @@ function body(d) {
       : `${fmt(d.collectable0)} ${esc(s0)} + ${fmt(d.collectable1)} ${esc(s1)}`;
     quick.push(`<div class="kv"><span>claimable</span><span class="num">${feeUsd}</span></div>`);
   }
+  for (const reward of pendingRewards(d)) {
+    quick.push(`<div class="kv"><span>pending ${esc(reward.symbol)}</span><span class="num">${fmt(reward.amount)} ${esc(reward.symbol)}</span></div>`);
+  }
 
   const statusClass = ({ 'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed' }[d.status]) || '';
   return head(`<span class="pill ${statusClass}">${esc(d.status)}</span>`) + `
     <div class="bd">
       <div class="card-top">
         <span class="pair">${esc(s0)} / ${esc(s1)}</span>
-        <span class="fee">${(d.fee / 10000).toFixed(2)}%</span>
+        <span class="fee">${feeLabel}</span>
       </div>
       ${rangeBar(d, h)}
       ${hero(d, h, s1)}
@@ -695,14 +710,109 @@ function gutterWidth() {
   return Math.floor(first.getBoundingClientRect().left - GUTTER_GAP * 2);
 }
 
+// BEGIN PURE UP33 ROW ANCHORING
+function parseUp33FlowKey(value) {
+  const match = String(value ?? '').match(/^cl-(0|[1-9]\d{0,77})$/);
+  if (!match) return null;
+  try {
+    const number = BigInt(match[1]);
+    return number <= ((1n << 256n) - 1n) ? number.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function up33RightGutterPlacement(rect, viewportWidth, gap = GUTTER_GAP,
+  minWidth = GUTTER_MIN, maxWidth = 190) {
+  if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+  const room = Math.floor(Number(viewportWidth) - Number(rect.right) - gap * 2);
+  const width = Math.min(maxWidth, room);
+  if (!Number.isFinite(width) || width < minWidth) return null;
+  return {
+    left: Math.round(Number(rect.right) + gap),
+    width: Math.floor(width),
+  };
+}
+
+function up33BoundarySafePlacement(rect, viewportWidth, dialogLeft,
+  gap = GUTTER_GAP, minWidth = GUTTER_MIN, maxWidth = 190) {
+  if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+  const direct = up33RightGutterPlacement(rect, viewportWidth, gap, minWidth, maxWidth);
+  if (!Number.isFinite(dialogLeft) || !(dialogLeft < viewportWidth)) return direct;
+  if (direct && direct.left + direct.width + gap <= dialogLeft) return direct;
+
+  const width = Math.min(maxWidth, Math.floor(dialogLeft - gap * 2));
+  const left = Math.floor(dialogLeft - gap - width);
+  if (!Number.isFinite(width) || width < minWidth || left < gap) return null;
+  return { left, width };
+}
+// END PURE UP33 ROW ANCHORING
+
+function up33DockedDialogLeft(viewportWidth) {
+  const viewportRight = Number(viewportWidth);
+  let boundary = viewportRight;
+  if (!Number.isFinite(viewportRight) || viewportRight <= 0) return 0;
+  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+    const rect = dialog.getBoundingClientRect();
+    const rightDocked = Number.isFinite(rect.left) && Number.isFinite(rect.right)
+      && rect.right >= viewportRight - 2 && rect.left >= 0;
+    const drawerSized = Number.isFinite(rect.width) && Number.isFinite(rect.height)
+      && rect.width >= GUTTER_MIN
+      && rect.height >= Math.min(innerHeight * 0.5, 360);
+    const visible = rect.bottom > 0 && rect.top < innerHeight;
+    if (rightDocked && drawerSized && visible) boundary = Math.min(boundary, rect.left);
+  }
+  return boundary;
+}
+
+function up33RowPlacement(rect, viewportWidth, gap = GUTTER_GAP,
+  minWidth = GUTTER_MIN, maxWidth = 190) {
+  // A right-edge semantic dialog can cover the normal row gutter without moving
+  // the row itself. Keep the pointer-inert card immediately left of the drawer
+  // instead of letting it cover the position controls inside the drawer.
+  return up33BoundarySafePlacement(
+    rect, viewportWidth, up33DockedDialogLeft(viewportWidth), gap, minWidth, maxWidth,
+  );
+}
+
 function placeGutterCards() {
   gutterRaf = false;
-  const w = Math.min(190, gutterWidth());
-  if (w < GUTTER_MIN) return;
+  const leftWidth = Math.min(190, gutterWidth());
+  let hasUp33Rows = false;
+  let up33PlacementComplete = true;
   for (const row of gutterRows) {
-    if (!row.el || !row.anchor.isConnected) continue;
+    if (!row.el) continue;
+    if (!row.anchor.isConnected) {
+      row.el.style.display = 'none';
+      if (row.placement === 'up33-right') {
+        hasUp33Rows = true;
+        up33PlacementComplete = false;
+      }
+      continue;
+    }
     const r = row.anchor.getBoundingClientRect();
     const onScreen = r.bottom > 0 && r.top < innerHeight && r.width > 0;
+    if (row.placement === 'up33-right') {
+      hasUp33Rows = true;
+      const placement = up33RowPlacement(r, innerWidth);
+      if (!placement) {
+        up33PlacementComplete = false;
+        row.el.style.display = 'none';
+        continue;
+      }
+      row.el.style.display = onScreen ? 'block' : 'none';
+      if (!onScreen) continue;
+      row.el.classList.add('dense', 'up33-row');
+      row.el.style.height = Math.floor(r.height) + 'px';
+      row.el.style.width = placement.width + 'px';
+      row.el.style.left = placement.left + 'px';
+      row.el.style.top = Math.round(r.top) + 'px';
+      continue;
+    }
+    if (leftWidth < GUTTER_MIN) {
+      row.el.style.display = 'none';
+      continue;
+    }
     row.el.style.display = onScreen ? 'block' : 'none';
     if (!onScreen) continue;
     // Uniswap changed /positions from ~166px cards to 64px table rows in
@@ -712,9 +822,13 @@ function placeGutterCards() {
     const dense = r.height < 92;
     row.el.classList.toggle('dense', dense);
     row.el.style.height = dense ? Math.floor(r.height) + 'px' : '';
-    row.el.style.width = w + 'px';
-    row.el.style.left = Math.round(r.left - w - GUTTER_GAP) + 'px';
+    row.el.style.width = leftWidth + 'px';
+    row.el.style.left = Math.round(r.left - leftWidth - GUTTER_GAP) + 'px';
     row.el.style.top = Math.round(r.top) + 'px';
+  }
+  if (hasUp33Rows) {
+    const dialogOpen = up33DockedDialogLeft(innerWidth) < innerWidth;
+    setUp33FloatingVisible(!up33PlacementComplete && !dialogOpen);
   }
 }
 
@@ -736,6 +850,8 @@ function gutterCard(row, includeRange = true) {
   const d = row.data, h = d.history || {};
   const v = h.vsHodl;
   const u = d.usd;
+  const feeLabel = Number.isFinite(Number(d.fee))
+    ? `${(Number(d.fee) / 10000).toFixed(2)}%` : 'dynamic';
   const closed = d.status === 'closed' && h.exit;
   const a = ageText(h.firstTime, closed ? h.lastTime : null);
   const dotClass = ({ 'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed' }[d.status]) || 'closed';
@@ -788,13 +904,26 @@ function gutterCard(row, includeRange = true) {
   if (v && v.apr !== null && v.apr !== undefined) {
     lines.push(`<span class="muted">${v.apr.toFixed(0)}% APR${v.aprDays !== null && v.aprDays < 7 ? '*' : ''}</span>`);
   }
+  const rewards = pendingRewards(d);
+  if (rewards.length) {
+    const rewardText = rewards
+      .map((reward) => `${fmt(reward.amount)} ${esc(reward.symbol)}`).join(' + ');
+    lines.push(`<span class="pos">${rewardText}</span> pending reward`);
+    denseLines.push(`<span class="pos">${rewardText}</span> reward`);
+  }
+  if (u && u.currentValueIncomplete && Number.isFinite(u.value)) {
+    const activeValue = `$${u.value.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+    lines.push(`<span class="muted">${activeValue}</span> active liquidity`);
+    denseLines.push(`<span class="muted">${activeValue}</span> active`);
+  }
 
-  return `<div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${(d.fee / 10000).toFixed(2)}%</span></div>
+  const protocol = d.protocol && d.protocol !== 'Uniswap' ? d.protocol : null;
+  return `<div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${feeLabel}</span></div>
     <div class="gc-main"><div class="gc-lbl">LP return</div><div class="gc-val ${headTone}">${headline}</div></div>
     ${lines.length ? `<div class="gc-sub gc-metrics">${lines.join('<br>')}</div>` : ''}
     ${denseLines.length ? `<div class="gc-sub gc-dense-metrics">${denseLines.join(' · ')}</div>` : ''}
     ${bar}
-    <div class="gc-sub gc-status">${esc([closed ? 'closed' : d.status, a ? a.dur : null].filter(Boolean).join(' · '))}</div>`;
+    <div class="gc-sub gc-status">${esc([protocol, d.custody === 'gauge' ? 'staked' : null, closed ? 'closed' : d.status, a ? a.dur : null].filter(Boolean).join(' · '))}</div>`;
 }
 
 function portfolioCard(position) {
@@ -885,6 +1014,251 @@ async function syncProjectXPortfolio() {
       projectxPending = false;
       lastKey = null;
       void syncProjectXPortfolio();
+    }
+  }
+}
+
+/**
+ * UP33 liquidity (/liquidity and descendants)
+ *
+ * Position data is read from Robinhood Chain for the active overlay wallet
+ * selected in LPLens. On the exact list route, the script reads only each
+ * concentrated-position row's public `data-flow="cl-<NFT id>"` attribute and
+ * matching visible NFT-id leaf. Those values are used locally to align a
+ * pointer-inert LPLens card. No connected-wallet state, balances, forms,
+ * transaction controls, signing prompts, or wallet provider are read.
+ */
+let up33Busy = false;
+let up33Pending = false;
+let up33Generation = 0;
+let up33PositionMap = new Map();
+let up33ResizeObserver = null;
+
+function setUp33FloatingVisible(visible) {
+  if (!ON_UP33) return;
+  const host = document.getElementById(HOST_ID);
+  const panel = host && host.__shadow && host.__shadow.querySelector('.panel');
+  if (panel) panel.style.display = visible ? '' : 'none';
+}
+
+function clearUp33Rows(removeHost = false, clearPositions = false) {
+  if (up33ResizeObserver) up33ResizeObserver.disconnect();
+  up33ResizeObserver = null;
+  if (clearPositions) up33PositionMap = new Map();
+  gutterRows = [];
+  if (removeHost) {
+    teardownList();
+    return;
+  }
+  const host = document.getElementById(LIST_HOST_ID);
+  if (!host || !host.__shadow) return;
+  const cards = host.__shadow.getElementById('cards');
+  const panel = host.__shadow.querySelector('.panel');
+  if (cards) cards.innerHTML = '';
+  if (panel) panel.style.display = 'none';
+}
+
+function up33RowHasExactPositionId(anchor, positionId) {
+  if (!anchor || anchor.tagName !== 'BUTTON') return false;
+  const expected = `#${positionId}`;
+  for (const leaf of anchor.querySelectorAll('span')) {
+    if (leaf.children.length === 0 && String(leaf.textContent || '').trim() === expected) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function chooseUp33RowAnchor(candidates) {
+  let best = null;
+  for (const anchor of candidates) {
+    const rect = anchor.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) continue;
+    const onScreen = rect.bottom > 0 && rect.top < innerHeight;
+    const score = (onScreen ? 1e12 : 0) + rect.width * rect.height;
+    if (!best || score > best.score) best = { anchor, rect, score };
+  }
+  return best;
+}
+
+function watchUp33RowGeometry(rows) {
+  if (up33ResizeObserver) up33ResizeObserver.disconnect();
+  up33ResizeObserver = null;
+  if (typeof ResizeObserver !== 'function') return;
+  const observer = new ResizeObserver(placeSoon);
+  const seen = new Set();
+  for (const row of rows) {
+    for (const target of [row.anchor, row.anchor && row.anchor.parentElement]) {
+      if (!target || seen.has(target)) continue;
+      seen.add(target);
+      observer.observe(target);
+    }
+  }
+  up33ResizeObserver = observer;
+}
+
+/**
+ * Aligns already-sanitized active-wallet positions to UP33's public CL rows.
+ * This is DOM-only work. It never requests position data or sends page values
+ * to the worker, so React rerenders cannot trigger another on-chain scan.
+ */
+function syncUp33Rows() {
+  if (torndown || !ON_UP33 || !UP33_LIST_ROUTE.test(location.pathname)) {
+    clearUp33Rows(true, false);
+    setUp33FloatingVisible(true);
+    return false;
+  }
+
+  const candidatesById = new Map();
+  const dialogOpen = up33DockedDialogLeft(innerWidth) < innerWidth;
+  let selectorMismatch = false;
+  for (const anchor of document.querySelectorAll('button[data-flow^="cl-"]')) {
+    const rect = anchor.getBoundingClientRect();
+    const measurable = rect.width > 0 && rect.height > 0;
+    const visible = rect.width > 0 && rect.height > 0
+      && rect.bottom > 0 && rect.top < innerHeight
+      && rect.right > 0 && rect.left < innerWidth;
+    const positionId = parseUp33FlowKey(anchor.getAttribute('data-flow'));
+    if (positionId === null || !up33RowHasExactPositionId(anchor, positionId)) {
+      if (visible) selectorMismatch = true;
+      continue;
+    }
+    if (!measurable) continue;
+    if (!candidatesById.has(positionId)) candidatesById.set(positionId, []);
+    candidatesById.get(positionId).push(anchor);
+  }
+
+  const matched = [];
+  let complete = !selectorMismatch && candidatesById.size > 0;
+  for (const [positionId, candidates] of candidatesById) {
+    const chosen = chooseUp33RowAnchor(candidates);
+    const data = up33PositionMap.get(positionId);
+    if (!chosen || !data || !up33RowPlacement(chosen.rect, innerWidth)) {
+      complete = false;
+      break;
+    }
+    matched.push({
+      positionId,
+      anchor: chosen.anchor,
+      placement: 'up33-right',
+      data,
+    });
+  }
+
+  if (!complete || matched.length !== candidatesById.size) {
+    clearUp33Rows(false, false);
+    // If a right-docked dialog leaves no safe card space, hide LPLens until the
+    // dialog closes instead of replacing the small cards with a larger panel.
+    setUp33FloatingVisible(!dialogOpen);
+    return false;
+  }
+
+  const shadow = listHost().__shadow;
+  const cards = shadow.getElementById('cards');
+  const panel = shadow.querySelector('.panel');
+  panel.style.display = 'none';
+  cards.innerHTML = '';
+  gutterRows = matched;
+  for (const row of gutterRows) {
+    const el = document.createElement('div');
+    el.className = 'gc dense up33-row';
+    el.innerHTML = gutterCard({ data: row.data }, false);
+    cards.appendChild(el);
+    row.el = el;
+  }
+  watchUp33RowGeometry(gutterRows);
+  setUp33FloatingVisible(false);
+  placeSoon();
+  return true;
+}
+
+async function syncUp33Liquidity() {
+  if (torndown) return;
+  if (!ON_UP33 || !UP33_ROUTE.test(location.pathname)) {
+    clearUp33Rows(true, true);
+    return teardown();
+  }
+  if (!UP33_LIST_ROUTE.test(location.pathname)) {
+    clearUp33Rows(true, false);
+    setUp33FloatingVisible(true);
+  }
+  const key = 'up33:liquidity';
+  if (up33Busy) {
+    up33Pending = true;
+    return;
+  }
+  if (lastKey === key) {
+    if (UP33_LIST_ROUTE.test(location.pathname)) syncUp33Rows();
+    return;
+  }
+  up33Busy = true;
+  lastKey = key;
+  const generation = up33Generation;
+  clearUp33Rows(true, true);
+  render(head('<span class="pill">UP33</span>')
+    + '<div class="bd"><div class="note">Reading UP33 positions for the active wallet selected in LPLens...</div></div>', true);
+  setUp33FloatingVisible(true);
+
+  try {
+    if (!contextAlive()) return shutdownOrphan();
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({ type: 'LPLENS_UP33_LIQUIDITY' });
+    } catch (err) {
+      if (isOrphanError(err)) return shutdownOrphan();
+      res = { ok: false, error: err.message || String(err) };
+    }
+    if (torndown || generation !== up33Generation || lastKey !== key
+        || !UP33_ROUTE.test(location.pathname)) return;
+    if (res && res.permissionRevoked) return shutdownRevoked();
+
+    if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
+      const e = res.entitlement || {};
+      render(head('<span class="pill">UP33</span>') + `<div class="bd">
+        <div class="note">${esc(e.reason || 'LPLens access is required.')} Check Settings or ask Dan.</div>
+      </div>`, true);
+      return;
+    }
+    if (!res || !res.ok) {
+      render(head('<span class="pill">UP33</span>') + `<div class="bd">
+        <div class="err note">${esc(res && res.error || 'no response')}</div>
+      </div>`, true);
+      return;
+    }
+
+    const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
+    up33PositionMap = new Map(positions.flatMap((position) => {
+      const positionId = parseUp33FlowKey(`cl-${String(position && position.positionId || '')}`);
+      return positionId === null ? [] : [[positionId, position]];
+    }));
+    const unavailable = String(res.data && res.data.unavailable || '');
+    const short = String(res.data && res.data.walletLabel || '');
+    const shown = positions.slice(0, 8);
+    const overflow = positions.length - shown.length;
+    let content;
+    if (shown.length) {
+      content = shown.map(portfolioCard).join('')
+        + (overflow > 0 ? `<div class="note">${overflow} more UP33 position${overflow === 1 ? '' : 's'} not shown here.</div>` : '');
+    } else if (unavailable) {
+      content = `<div class="err note">UP33 positions could not be read: ${esc(unavailable)}</div>`;
+    } else {
+      content = '<div class="note">No open UP33 concentrated positions found for the active wallet. UP33 v2 LP and liquidity-locker positions are not read yet.</div>';
+    }
+    render(head(`<span class="pill">UP33 · ${positions.length}</span>`) + `<div class="bd">
+      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. On this list, LPLens reads only public position NFT IDs and row geometry to align PnL with the matching row. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so cards do not cover it. Dialog content, connected wallet data, and transaction controls are not read.</div>
+      ${content}
+    </div>`, true);
+    syncUp33Rows();
+  } finally {
+    up33Busy = false;
+    if (torndown) {
+      up33Pending = false;
+      return;
+    }
+    if (up33Pending) {
+      up33Pending = false;
+      lastKey = null;
+      void syncUp33Liquidity();
     }
   }
 }
@@ -1628,23 +2002,53 @@ const scheduleList = () => {
   clearTimeout(listTimer);
   listTimer = setTimeout(() => {
     if (torndown) return;
-    if (!contextAlive()) return shutdownOrphan('list');
-    if (LIST_ROUTE.test(location.pathname)) syncList();
+    if (!contextAlive()) return shutdownOrphan(ON_UP33 ? undefined : 'list');
+    if (ON_UP33 && UP33_LIST_ROUTE.test(location.pathname)) {
+      syncUp33Rows();
+    } else if (LIST_ROUTE.test(location.pathname)) {
+      syncList();
+    }
   }, LIST_DEBOUNCE_MS);
 };
 
-addEventListener('scroll', placeSoon, { passive: true, capture: true });
+addEventListener('scroll', () => {
+  placeSoon();
+  if (ON_UP33 && UP33_LIST_ROUTE.test(location.pathname)) scheduleList();
+}, { passive: true, capture: true });
 addEventListener('resize', () => {
   placeSoon();
+  if (ON_UP33 && UP33_LIST_ROUTE.test(location.pathname)) scheduleList();
   // Zoom fires resize, and zoom is exactly what shrinks the gutter.
   const host = document.getElementById(HOST_ID);
   if (host) placePanel(host.__shadow.querySelector('.panel'));
 }, { passive: true });
 
+for (const eventName of ['transitionend', 'transitioncancel', 'animationend', 'animationcancel']) {
+  addEventListener(eventName, (event) => {
+    if (torndown || !ON_UP33 || !UP33_LIST_ROUTE.test(location.pathname)) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const dialog = target.closest('[role="dialog"]');
+    if (!dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    if (!(rect.width > 0) || rect.right < innerWidth - 2) return;
+    // CSS motion does not necessarily mutate attributes or resize the matched
+    // row. Recheck once the semantic dialog settles so a sliding Manage drawer
+    // cannot finish on top of an already-positioned card.
+    placeSoon();
+    scheduleList();
+  }, { passive: true, capture: true });
+}
+
 // Debounced, and it never reacts to our own writes: everything except the
 // one-time host append happens inside the shadow root, which this cannot see.
 const listObserver = new MutationObserver(scheduleList);
-listObserver.observe(document.documentElement, { childList: true, subtree: true });
+listObserver.observe(document.documentElement, ON_UP33 ? {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
+} : { childList: true, subtree: true });
 
 /**
  * Orphaned-content-script handling.
@@ -1672,6 +2076,7 @@ let torndown = false;
 function shutdownOrphan(target) {
   if (torndown) return;
   torndown = true;
+  if (ON_UP33) clearUp33Rows(true, true);
   stopDexscreenerChartSession();
   if (dexscreenerDataTimer !== null) clearTimeout(dexscreenerDataTimer);
   dexscreenerDataTimer = null;
@@ -1709,13 +2114,19 @@ function shutdownRevoked() {
   try { clearTimeout(listTimer); } catch {}
   try { listObserver.disconnect(); } catch {}
   try { teardown(); } catch {}
-  try { teardownList(); } catch {}
+  try {
+    if (ON_UP33) clearUp33Rows(true, true);
+    else teardownList();
+  } catch {}
 }
 
 async function sync() {
   if (torndown) return;
   if (ON_DEXSCREENER) {
     return syncDexscreener();
+  }
+  if (ON_UP33) {
+    return syncUp33Liquidity();
   }
   if (PROJECTX_ROUTE.test(location.pathname)) {
     return syncProjectXPortfolio();
@@ -1824,11 +2235,19 @@ try {
       );
       if (!addressChanged) return;
     }
-    if (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER) return;
+    if (!PROJECTX_ROUTE.test(location.pathname) && !ON_DEXSCREENER && !ON_UP33) return;
     if (ON_DEXSCREENER) {
       dexscreenerGeneration++;
       stopDexscreenerChartSession();
       if (dexscreenerBusy) dexscreenerPending = true;
+    }
+    if (ON_UP33) {
+      up33Generation++;
+      if (up33Busy) up33Pending = true;
+      // Remove the previous wallet's cards immediately. The replacement scan
+      // may still be waiting on an older in-flight request.
+      clearUp33Rows(true, true);
+      teardown();
     }
     lastKey = null;
     sync();

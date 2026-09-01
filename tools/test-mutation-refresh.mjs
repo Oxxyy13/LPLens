@@ -155,6 +155,12 @@ async function testAlchemyV4IsOnChainVerified() {
         })),
       };
     }
+    if (body.method === 'eth_getBlockByNumber') {
+      return rpcResponse({
+        number: '0x64',
+        hash: '0x' + 'ab'.repeat(32),
+      });
+    }
     const data = body.params[0].data;
     if (data.startsWith('0x70a08231')) return rpcResponse(hexResult(word(2)));
     if (data.startsWith('0x6352211e')) return rpcResponse(hexResult(addressWord(OWNER)));

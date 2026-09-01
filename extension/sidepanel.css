@@ -65,6 +65,82 @@ body.sidepanel .pop-body {
 body.sidepanel .hide-position { display: block; }
 body.sidepanel .position-card { container-type: inline-size; }
 
+.refresh-delta,
+.position-lineage {
+  display: grid;
+  gap: 7px;
+  margin: 0 11px 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel-2) 72%, transparent);
+}
+.refresh-delta-title,
+.lineage-title {
+  color: var(--ink-3);
+  font: 8.5px/1.2 var(--mono);
+  letter-spacing: .075em;
+  text-transform: uppercase;
+}
+.refresh-delta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+.refresh-delta-metric { min-width: 0; }
+.refresh-delta-metric small,
+.refresh-delta-metric b,
+.lineage-return small,
+.lineage-return b { display: block; }
+.refresh-delta-metric small,
+.lineage-return small {
+  overflow: hidden;
+  color: var(--ink-3);
+  font: 8px/1.2 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.refresh-delta-metric b,
+.lineage-return b {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font: 650 10.5px/1.25 var(--mono);
+}
+.refresh-delta-metric b.up,
+.lineage-return b.up { color: var(--good); }
+.refresh-delta-metric b.down,
+.lineage-return b.down { color: var(--warn); }
+.refresh-delta-empty,
+.refresh-delta-notes,
+.lineage-missing {
+  color: var(--ink-2);
+  font: 9.5px/1.4 var(--mono);
+}
+.refresh-delta-notes { color: var(--signal-strong); }
+.lineage-proof {
+  width: fit-content;
+  padding: 4px 6px;
+  border: 1px solid color-mix(in srgb, var(--good) 32%, var(--line));
+  border-radius: 999px;
+  background: var(--good-soft);
+  color: var(--good);
+  font: 8px/1 var(--mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.lineage-return {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 8px;
+}
+.lineage-return b { margin: 0; font-size: 12px; }
+
+@container (max-width: 330px) {
+  .refresh-delta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @container (max-width: 380px) {
   body.sidepanel .position-card .card-top {
     display: grid;

@@ -9,7 +9,7 @@ const css = readFileSync(new URL('../extension/popup.css', import.meta.url), 'ut
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
 
-assert.equal(manifest.version, '0.30.0');
+assert.equal(manifest.version, '0.33.0');
 assert.match(html, /id="activeWallet"[^>]*role="status"[^>]*>Overlay wallet: none selected</);
 assert.match(css, /\.active-wallet\.pending/);
 assert.match(css, /\.active-wallet\.empty/);
@@ -39,11 +39,11 @@ assert.match(popup, /Removed from saved wallets\. It remains the overlay wallet\
   'removing a saved row must not silently change the active wallet');
 
 assert.match(popup,
-  /async function startScan\(owners, includeClosed, \{ selectOverlayWallet = false \} = \{\}\)/);
+  /async function startScan\([\s\S]*?\{ selectOverlayWallet = false, mode = 'full' \} = \{\},[\s\S]*?\) \{/);
 assert.match(popup, /if \(selectOverlayWallet\) await setActiveAddress\(owners\[0\]\.address\)/);
-assert.match(popup, /\{ selectOverlayWallet: true \}/,
+assert.match(popup, /\{ selectOverlayWallet: true, mode: 'full' \}/,
   'loading the typed wallet must explicitly select it');
-assert.match(popup, /await startScan\(book, \$\('includeClosed'\)\.checked\)/,
+assert.match(popup, /await startScan\(book, \$\('includeClosed'\)\.checked, \{ mode: 'full' \}\)/,
   'Scan all must use the non-selecting default, including for a one-wallet book');
 assert.doesNotMatch(popup, /owners\.length === 1[^\n]*address/,
   'scan cardinality must never choose the active wallet');

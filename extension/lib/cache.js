@@ -60,15 +60,18 @@ export function fingerprint(p) {
 export function historyIdentity(p) {
   const token0 = String(p.token0 || '').toLowerCase();
   const token1 = String(p.token1 || '').toLowerCase();
-  const fee = Number(p.fee);
+  // Slipstream fees are dynamic, so they are not immutable NFT identity.
+  // Its positions tuple stores tickSpacing where Uniswap stores fee.
+  const poolKey = p.tickSpacing !== undefined && p.tickSpacing !== null
+    ? Number(p.tickSpacing) : Number(p.fee);
   const tickLower = Number(p.tickLower);
   const tickUpper = Number(p.tickUpper);
   if (!/^0x[0-9a-f]{40}$/.test(token0) || !/^0x[0-9a-f]{40}$/.test(token1)
-      || !Number.isInteger(fee) || fee < 0
+      || !Number.isInteger(poolKey) || poolKey < 0
       || !Number.isInteger(tickLower) || !Number.isInteger(tickUpper)
       || tickLower >= tickUpper) return null;
   return [
-    token0, token1, String(fee), String(tickLower), String(tickUpper),
+    token0, token1, String(poolKey), String(tickLower), String(tickUpper),
   ].join(':');
 }
 

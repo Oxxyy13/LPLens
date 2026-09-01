@@ -19,15 +19,28 @@ import { createDexscreenerPairCache } from './lib/dexscreener.js';
 
 const inFlight = new Map();  // `${chain}:${tokenId}` -> Promise
 const dexscreenerScanCache = new Map();
+const up33ScanCache = new Map();
 const dexscreenerPairs = createDexscreenerPairCache();
 const DEXSCREENER_CACHE_MS = 60_000;
 const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
+const UP33_OVERLAY_ORIGIN = 'https://up33.xyz/*';
 
 async function dexscreenerPageAccess(sender) {
   try {
     const senderUrl = new URL(String(sender && sender.tab && sender.tab.url || ''));
     if (senderUrl.origin !== 'https://dexscreener.com') return false;
     return await chrome.permissions.contains({ origins: [DEXSCREENER_OVERLAY_ORIGIN] });
+  } catch {
+    return false;
+  }
+}
+
+async function up33LiquidityPageAccess(sender) {
+  try {
+    const senderUrl = new URL(String(sender && sender.tab && sender.tab.url || ''));
+    if (senderUrl.origin !== 'https://up33.xyz'
+        || !/^\/liquidity(?:\/.*)?$/.test(senderUrl.pathname)) return false;
+    return await chrome.permissions.contains({ origins: [UP33_OVERLAY_ORIGIN] });
   } catch {
     return false;
   }
@@ -99,6 +112,106 @@ async function cachedDexscreenerPositions(chainKey, address, store) {
     dexscreenerScanCache.delete(key);
     throw err;
   }
+}
+
+async function cachedUp33Positions(address, store) {
+  const overrides = store.rpcOverrides || {};
+  const rpc = String(overrides.robinhood || CHAINS.robinhood.rpc || '').trim();
+  const key = `${address}|${rpc}`;
+  const existing = up33ScanCache.get(key);
+  if (existing && existing.promise) return existing.promise;
+
+  const promise = (async () => {
+    await slot();
+    try {
+      const historyRelay = await historyRelayCredentials();
+      return await loadPositions('robinhood', address, {
+        includeClosed: false,
+        withUsd: true,
+        v3DeploymentIds: ['up33-cl'],
+        skipV4: true,
+        rpcOverride: overrides.robinhood || undefined,
+        rpcOverrides: overrides,
+        etherscanKey: store.etherscanKey || undefined,
+        historyRelay,
+      });
+    } finally {
+      release();
+    }
+  })();
+  up33ScanCache.set(key, { promise });
+  try {
+    return await promise;
+  } finally {
+    if (up33ScanCache.get(key)?.promise === promise) up33ScanCache.delete(key);
+  }
+}
+
+function finiteOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+const MAX_UINT256 = (1n << 256n) - 1n;
+
+function canonicalUint256OrNull(value) {
+  const raw = String(value ?? '');
+  if (!/^(0|[1-9]\d{0,77})$/.test(raw)) return null;
+  try {
+    const number = BigInt(raw);
+    return number <= MAX_UINT256 ? number.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Minimal page-facing shape. Raw accounting and wallet data stay in extension context. */
+function up33OverlayPosition(position) {
+  const positionId = canonicalUint256OrNull(position && position.tokenId);
+  if (positionId === null) return null;
+  const history = position && position.history || {};
+  const usd = position && position.usd || {};
+  const lifetimeAvailable = history.directCustodyProven === true
+    && !history.unavailable && position && position.custody !== 'gauge';
+  const vs = lifetimeAvailable ? (history.vsHodl || null) : null;
+  const exit = history.exit || null;
+  return {
+    positionId,
+    protocol: 'UP33',
+    custody: position && position.custody === 'gauge' ? 'gauge' : 'wallet',
+    status: ['in-range', 'below', 'above', 'closed'].includes(position && position.status)
+      ? position.status : 'closed',
+    fee: finiteOrNull(position && position.fee),
+    price: finiteOrNull(position && position.price),
+    priceLower: finiteOrNull(position && position.priceLower),
+    priceUpper: finiteOrNull(position && position.priceUpper),
+    token0Meta: { symbol: String(position && position.token0Meta?.symbol || '?') },
+    token1Meta: { symbol: String(position && position.token1Meta?.symbol || '?') },
+    history: {
+      unavailable: lifetimeAvailable ? null : 'UP33 lifetime accounting unavailable',
+      firstTime: finiteOrNull(history.firstTime),
+      lastTime: finiteOrNull(history.lastTime),
+      exit: exit ? { price: finiteOrNull(exit.price) } : null,
+      vsHodl: vs ? {
+        pct: finiteOrNull(vs.pct),
+        apr: finiteOrNull(vs.apr),
+        aprDays: finiteOrNull(vs.aprDays),
+      } : null,
+    },
+    usd: position && position.usd ? {
+      pnl: lifetimeAvailable ? finiteOrNull(usd.pnl) : null,
+      pnlPct: lifetimeAvailable ? finiteOrNull(usd.pnlPct) : null,
+      totalNow: lifetimeAvailable ? finiteOrNull(usd.totalNow) : null,
+      value: finiteOrNull(usd.value),
+      currentValueIncomplete: usd.currentValueIncomplete === true,
+    } : null,
+    rewards: (Array.isArray(position && position.rewards) ? position.rewards : [])
+      .slice(0, 4).map((reward) => ({
+        symbol: String(reward && reward.symbol || '?'),
+        amount: finiteOrNull(reward && reward.amount),
+      })),
+  };
 }
 
 async function cachedDexscreenerPair(chainKey, poolRef) {
@@ -970,6 +1083,75 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
+// UP33 does not need to expose its connected wallet or page state to LPLens.
+// The content script asks for the active overlay wallet selected in LPLens,
+// and this worker reads that wallet's UP33 concentrated positions directly
+// from Robinhood Chain. Site permission and the exact liquidity route are
+// checked both before the scan and before any wallet data is returned.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.type !== 'LPLENS_UP33_LIQUIDITY') return false;
+
+  (async () => {
+    if (!(await up33LiquidityPageAccess(sender))) {
+      return {
+        ok: false,
+        permissionRevoked: true,
+        error: 'UP33 liquidity page access is off. Re-enable it in Settings and refresh this page.',
+      };
+    }
+    const ent = await entitlement();
+    if (!ent.allowed) return { ok: false, gated: true, entitlement: ent };
+
+    const store = await chrome.storage.local.get([
+      'address', 'rpcOverrides', 'etherscanKey',
+    ]);
+    const address = String(store.address || '').trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) {
+      return { ok: false, error: 'Open LPLens and select an overlay wallet first.' };
+    }
+
+    let result;
+    try {
+      result = await cachedUp33Positions(address, store);
+    } catch (error) {
+      if (!(await up33LiquidityPageAccess(sender))) {
+        return {
+          ok: false,
+          permissionRevoked: true,
+          error: 'UP33 liquidity page access was turned off.',
+        };
+      }
+      throw error;
+    }
+
+    if (!(await up33LiquidityPageAccess(sender))) {
+      return {
+        ok: false,
+        permissionRevoked: true,
+        error: 'UP33 liquidity page access was turned off.',
+      };
+    }
+
+    const positions = (result.positions || []).filter((position) =>
+      String(position && position.protocol || '').toLowerCase() === 'up33')
+      .map(up33OverlayPosition)
+      .filter(Boolean);
+    const issue = (result.deploymentIssues || []).find((entry) =>
+      String(entry && entry.protocol || '').toLowerCase() === 'up33');
+    const safe = JSON.parse(JSON.stringify({
+      walletLabel: `${address.slice(0, 6)}...${address.slice(-4)}`,
+      positions,
+      unavailable: issue && issue.error || null,
+    }, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+    return { ok: true, data: safe };
+  })().then(
+    (result) => sendResponse(result),
+    (err) => sendResponse({ ok: false, error: err.message || String(err) }),
+  );
+
+  return true;
+});
+
 
 /* ---------------------------------------------------------------------------
  * On-page overlay registration.
@@ -993,6 +1175,7 @@ const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
 const PROJECTX_OVERLAY_ID = 'lplens-projectx-overlay';
 const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
 const DEXSCREENER_OVERLAY_ID = 'lplens-dexscreener-overlay';
+const UP33_OVERLAY_ID = 'lplens-up33-overlay';
 // `/positions/*` does not match the bare `/positions` list route. Keep the
 // exact list URL and its detail descendants explicit so the optional content
 // script never widens beyond Uniswap's position surfaces.
@@ -1008,10 +1191,15 @@ const PROJECTX_OVERLAY_MATCHES = Object.freeze([
 const DEXSCREENER_OVERLAY_MATCHES = Object.freeze([
   'https://dexscreener.com/*',
 ]);
+const UP33_OVERLAY_MATCHES = Object.freeze([
+  'https://up33.xyz/liquidity',
+  'https://up33.xyz/liquidity/*',
+]);
 const OPTIONAL_OVERLAY_ORIGINS = new Set([
   OVERLAY_ORIGIN,
   PROJECTX_OVERLAY_ORIGIN,
   DEXSCREENER_OVERLAY_ORIGIN,
+  UP33_OVERLAY_ORIGIN,
 ]);
 
 async function stopRevokedOverlayTabs(origins) {
@@ -1107,6 +1295,11 @@ async function syncOverlayRegistration() {
     id: DEXSCREENER_OVERLAY_ID,
     origin: DEXSCREENER_OVERLAY_ORIGIN,
     matches: DEXSCREENER_OVERLAY_MATCHES,
+  });
+  await syncOneOverlay({
+    id: UP33_OVERLAY_ID,
+    origin: UP33_OVERLAY_ORIGIN,
+    matches: UP33_OVERLAY_MATCHES,
   });
 }
 

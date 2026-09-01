@@ -326,6 +326,13 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
   display: block; margin-top: 1px; font-size: 9.5px; line-height: 1.2;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.gc.up33-row { padding-top: 7px; padding-right: 9px; box-shadow: var(--shadow-sm); }
+.gc.up33-row::before {
+  content: "LPLens"; position: absolute; top: 6px; right: 8px;
+  color: var(--signal); font: 700 7.5px/1 var(--mono);
+  letter-spacing: .055em; text-transform: uppercase;
+}
+.gc.up33-row .gc-pair { padding-right: 38px; }
 .portfolio-card {
   position: relative; overflow: hidden; margin: 8px 10px; padding: 10px 11px;
   background: linear-gradient(145deg, color-mix(in srgb, var(--panel-2) 28%, var(--panel)), var(--panel));
@@ -345,6 +352,13 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
     const a = Math.abs(n);
     if (a !== 0 && a < 1e-6) return n.toExponential(2);
     return n.toLocaleString('en-US', { maximumFractionDigits: a < 1 ? 8 : dp });
+  }
+
+  /** Pending protocol rewards that are safe to display as token amounts. */
+  function pendingRewards(d) {
+    return (d && Array.isArray(d.rewards) ? d.rewards : []).filter((reward) =>
+      reward && Number.isFinite(reward.amount) && reward.amount >= 0
+        && String(reward.symbol || '').trim());
   }
 
   function humanSpan(days) {
@@ -664,6 +678,12 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
     const u = d.usd;
     const rows = [];
 
+    const rewards = pendingRewards(d);
+    for (const reward of rewards) {
+      const tone = reward.amount > 0 ? 'pos' : '';
+      rows.push(`<div class="kv"><span>pending ${esc(reward.symbol)}</span><span class="num ${tone}">${fmt(reward.amount)} ${esc(reward.symbol)}</span></div>`);
+    }
+
     if (v) {
       rows.push(`<div class="kv"><span>fees earned</span><span class="num pos">+${v.feesPct.toFixed(3)}%</span></div>`);
       rows.push(`<div class="kv"><span>impermanent loss</span><span class="num ${v.il > 0 ? 'neg' : ''}">${v.il > 0 ? '−' : '+'}${Math.abs(v.ilPct).toFixed(3)}%</span></div>`);
@@ -755,7 +775,11 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
     }
     if (u && grossAdded && !grossExact) caveats.push('*Gross added is a bound: at least one liquidity addition was single-sided and no exact archive price was available. LP return is withheld.');
     if (u && u.collectedProceeds !== null && !u.collectedProceedsExact) caveats.push('*Cash returned is bounded because an exact collection-time pool price was unavailable. LP return is withheld.');
-    if (h && h.currentUnavailable) caveats.push('Current collectable amounts could not be read, so return and fee figures are withheld.');
+    if (h && h.currentUnavailable) caveats.push(d && d.custody === 'gauge'
+      ? 'This position is staked. UP33 does not expose the user trading-fee balance through the gauge, so fee and lifetime-return figures are withheld.'
+      : 'Current collectable amounts could not be read, so return and fee figures are withheld.');
+    if (rewards.length) caveats.push('Pending gauge emissions are shown separately and are excluded from LP return, vs holding, fees, and position value.');
+    if (d && d.rewardsUnavailable) caveats.push(esc(d.rewardsUnavailable));
     if (u && u.bridged) caveats.push('USD priced via the bridge origin chain; assumes the wrapped token holds its peg.');
     if (h && h.unavailable) caveats.push(`History unavailable — ${esc(h.unavailable)}`);
 
@@ -806,6 +830,6 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
   globalThis.LPLens = {
     CSS, CSS_PANEL, CSS_COMPONENTS, details, rebalanceLine, esc, fmt,
     humanSpan, ageText, priceText, priceOrientation, dexscreenerOrientation,
-    logRangeScale, dexscreenerRangeRuler, hero, rangeBar,
+    logRangeScale, dexscreenerRangeRuler, hero, rangeBar, pendingRewards,
   };
 })();

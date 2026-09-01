@@ -44,6 +44,8 @@ function clean(raw) {
       : null,
     chains,
     includeClosed: !!raw.includeClosed,
+    refreshScope: raw.refreshScope === 'all' ? 'all' : 'wallet',
+    refreshMode: raw.refreshMode === 'current' ? 'current' : 'full',
     summaryOnly: !!raw.summaryOnly,
   };
 }
@@ -76,6 +78,8 @@ export async function writeDashboardSnapshot(snapshot) {
       : undefined,
     chains: Array.isArray(snapshot.chains) ? snapshot.chains : null,
     includeClosed: !!snapshot.includeClosed,
+    refreshScope: snapshot.refreshScope,
+    refreshMode: snapshot.refreshMode,
     summaryOnly,
   });
   if (!value) return false;

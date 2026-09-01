@@ -170,7 +170,7 @@ input[type="text"], input[type="password"], select {
 input::placeholder { color: var(--ink-3); opacity: .78; }
 input:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--line-strong); }
 input:focus-visible, select:focus-visible { border-color: var(--signal); box-shadow: var(--ring); }
-input:disabled { cursor: default; opacity: .58; background: var(--panel-2); }
+input:disabled, select:disabled { cursor: default; opacity: .58; background: var(--panel-2); }
 
 button, #go {
   min-height: 38px;
@@ -241,6 +241,11 @@ button:disabled, #go:disabled { cursor: default; opacity: .42; }
 .active-wallet.empty::before { background: var(--ink-3); box-shadow: none; }
 .scan-row { margin-top: 1px; }
 .scan-row button { flex: 1 1 0; min-width: 0; }
+.refresh-mode-hint {
+  margin: -3px 1px 0;
+  color: var(--ink-3);
+  font: 10px/1.45 var(--mono);
+}
 
 details.saved {
   min-width: 0;

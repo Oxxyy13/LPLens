@@ -9,11 +9,9 @@ const escape = (s) => String(s).replace(/[&<>"]/g, (c) =>
 const rpcsEl = document.getElementById('rpcs');
 const keys = Object.keys(CHAINS);
 
-// Placeholders are the public defaults, never CHAINS[k].rpc. In a dev
-// build the TESTING ONLY fence rewrites those to keyed Alchemy URLs, and
-// a placeholder sourced from the live value would print the key in the
-// most-screenshotted page of the product. A user's own saved override is
-// written to .value below — that is their input, not a secret we injected.
+// Keep placeholders tied to immutable public defaults rather than a runtime
+// chain override. A user's saved endpoint is written to .value below; it is
+// never copied into packaged markup or source.
 rpcsEl.innerHTML = keys.map((k) => `
   <div style="margin-bottom:6px">
     <div class="kv"><span>${escape(CHAINS[k].label)}</span></div>
@@ -101,10 +99,12 @@ document.getElementById('save').addEventListener('click', () => {
 const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
 const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
 const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
+const UP33_OVERLAY_ORIGIN = 'https://up33.xyz/*';
 const DEXSCREENER_CHART_CONSENT_KEY = 'dexscreenerChartConsentV1';
 const permBox = document.getElementById('overlayPerm');
 const projectxPermBox = document.getElementById('projectxOverlayPerm');
 const dexscreenerPermBox = document.getElementById('dexscreenerOverlayPerm');
+const up33PermBox = document.getElementById('up33OverlayPerm');
 const dexscreenerChartConsentBox = document.getElementById('dexscreenerChartConsent');
 const report = document.getElementById('permReport');
 
@@ -118,10 +118,11 @@ function rpcMethodList(methods) {
 
 async function paintPermissions() {
   const mf = chrome.runtime.getManifest();
-  const [granted, projectxGranted, dexscreenerGranted, chartConsentStore] = await Promise.all([
+  const [granted, projectxGranted, dexscreenerGranted, up33Granted, chartConsentStore] = await Promise.all([
     chrome.permissions.contains({ origins: [OVERLAY_ORIGIN] }),
     chrome.permissions.contains({ origins: [PROJECTX_OVERLAY_ORIGIN] }),
     chrome.permissions.contains({ origins: [DEXSCREENER_OVERLAY_ORIGIN] }),
+    chrome.permissions.contains({ origins: [UP33_OVERLAY_ORIGIN] }),
     chrome.storage.local.get(DEXSCREENER_CHART_CONSENT_KEY),
   ]);
   const chartConsented = chartConsentStore
@@ -129,6 +130,7 @@ async function paintPermissions() {
   permBox.checked = granted;
   projectxPermBox.checked = projectxGranted;
   dexscreenerPermBox.checked = dexscreenerGranted;
+  up33PermBox.checked = up33Granted;
   dexscreenerChartConsentBox.checked = chartConsented;
 
   const pageRows = [];
@@ -137,6 +139,15 @@ async function paintPermissions() {
   if (projectxGranted) pageRows.push(`<li class="yes"><b>www.prjx.com/portfolio</b> — can add the
     ProjectX panel. It uses the active overlay wallet selected in LPLens and does not read
     the connected wallet or ProjectX page content.</li>`);
+  if (up33Granted) pageRows.push(`<li class="yes"><b>up33.xyz/liquidity</b>: can add the
+    UP33 panel on that route and its subpages. It uses the active overlay wallet selected
+    in LPLens. On the exact liquidity list it reads only each concentrated-position
+    row's public data-flow="cl-&lt;NFT ID&gt;" attribute, matching visible #ID, and row geometry to align local PnL cards. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so the cards move left instead of covering it; it does not read dialog contents. Those page-derived
+    IDs are matched only against the active-wallet scan and are not sent to a network or
+    stored. It does not read connected-wallet state, balances, forms, transaction controls,
+    signing prompts, the wallet provider, or other UP33 page content. Only a shortened wallet
+    label and minimized display fields enter the page script. V2 LP and liquidity-locker
+    positions are not read.</li>`);
   if (dexscreenerGranted) pageRows.push(`<li class="yes"><b>dexscreener.com pair pages</b> - can read
     the chain and pool identifier in the URL and append a matching-position panel.
     It sends those two route values, without the wallet address, to api.dexscreener.com to match
@@ -220,6 +231,16 @@ dexscreenerPermBox.addEventListener('change', async () => {
     if (!ok) dexscreenerPermBox.checked = false;
   } else {
     await removeOverlayPermission(DEXSCREENER_OVERLAY_ORIGIN);
+  }
+  paintPermissions();
+});
+
+up33PermBox.addEventListener('change', async () => {
+  if (up33PermBox.checked) {
+    const ok = await chrome.permissions.request({ origins: [UP33_OVERLAY_ORIGIN] });
+    if (!ok) up33PermBox.checked = false;
+  } else {
+    await removeOverlayPermission(UP33_OVERLAY_ORIGIN);
   }
   paintPermissions();
 });

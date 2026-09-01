@@ -12,7 +12,7 @@ const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
 const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
 
-assert.equal(manifest.version, '0.30.0');
+assert.equal(manifest.version, '0.33.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -29,6 +29,12 @@ assert.match(panel, /id="scanDetailsBody"/);
 assert.match(panel, /id="scanNetworks"/);
 assert.match(panel, /id="scanNetworkAll"/);
 assert.match(panel, /id="scanNetworkList"/);
+assert.match(panel, /id="refreshScope"/);
+assert.match(panel, /<option value="wallet">Selected wallet<\/option>/);
+assert.match(panel, /<option value="all">All saved wallets<\/option>/);
+assert.match(panel, /id="go"[^>]*>Refresh current<\/button>/);
+assert.match(panel, /id="scanAll"[^>]*>Full rescan<\/button>/);
+assert.match(panel, /Current re-checks known open positions\. Full finds new, transferred, or reopened positions\./);
 assert.match(popup, /id="scanNetworks"/);
 assert.match(panel, /id="scanHint"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(panel, /id="status"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
@@ -46,7 +52,8 @@ assert.ok(panel.indexOf('id="copyDiagnostics"') > panel.indexOf('id="scanDetails
   'support actions must stay inside the collapsed panel details');
 assert.match(controller, /chrome\.sidePanel\.open\(\{ windowId: currentWindowId \}\)/);
 assert.doesNotMatch(controller, /function legacyScanPresentation/);
-assert.match(controller, /Last refreshed \$\{snapshotAge\(snapshot\.at\)\}/);
+assert.match(controller, /Full rescan completed \$\{snapshotAge\(snapshot\.at\)\}/);
+assert.match(controller, /Current positions refreshed \$\{snapshotAge\(snapshot\.at\)\}/);
 assert.match(controller, /details:\s*issueLines\.filter\(Boolean\)\.join\('\\n'\)/);
 assert.doesNotMatch(controller, /network scans|Saved view ·|Current view ·|\$\{inflight\} reading/);
 assert.doesNotMatch(controller, /closed v3 hidden|closed v4 hidden|Skipped locally/);
@@ -63,6 +70,9 @@ assert.match(controller, /latestPortfolioShowsWallet,\s*\n\s*\);/,
   'single-wallet views must not repeat the wallet on every position card');
 assert.match(controller, /cleanRestoredDashboard\(snapshot\.showWalletLabels\)/,
   'old saved dashboards must receive the compact presentation immediately');
+assert.match(controller,
+  /for \(const lineage of resultsEl\.querySelectorAll\('\.position-lineage'\)\) lineage\.remove\(\)/,
+  'restored or preserved HTML must not retain a stale receipt-proof claim');
 assert.match(controller, /if \(!hiddenCount && showHidden\) showHidden\.checked = false/,
   'restoring the last hidden card must reset the now-hidden Show hidden toggle');
 assert.match(controller, /const hiddenCount = hiddenCards\.length/,
@@ -72,7 +82,7 @@ assert.match(controller, /display\.state === 'unavailable' \? 'Not enough data'/
 assert.match(controller, /async function setActiveAddress/);
 assert.match(controller, /if \(selectOverlayWallet\) await setActiveAddress\(owners\[0\]\.address\)/,
   'only an explicit one-wallet load may select the overlay wallet');
-assert.match(controller, /\{ selectOverlayWallet: true \}/,
+assert.match(controller, /\{ selectOverlayWallet: true, mode: 'full' \}/,
   'the one-wallet form must explicitly request overlay selection');
 assert.doesNotMatch(controller, /owners\.length === 1.*setActiveAddress/,
   'Scan all with one saved wallet must not change the overlay wallet');
@@ -88,6 +98,27 @@ assert.doesNotMatch(controller, /runSweep\(owners, Object\.keys\(CHAINS\)/,
   'a portfolio sweep must not silently restore all networks');
 assert.match(controller, /Chains changed\. Refresh to update\./,
   'a saved view must disclose when the local network scope changed');
+assert.match(controller, /Scope changed\. Refresh to update\./,
+  'a saved view must disclose when the wallet scope changed');
+assert.match(controller, /readCurrentPositionJobs\(owners, chainKeys\)/,
+  'fast refresh readiness must come from the operational ID index');
+assert.match(controller, /mode === 'full' && state\.ok === false[\s\S]*markCurrentPositionScopeIncomplete/,
+  'a failed Full rescan must disable fast refresh for that wallet and chain');
+assert.match(controller, /await loadKnownSweep\(owners, chainKeys, currentScopes, progressOptions\)/,
+  'Refresh current must use the known-position loader');
+assert.match(controller, /await loadSweep\(owners, chainKeys, progressOptions\)/,
+  'Full rescan must retain authoritative ownership discovery');
+assert.match(controller, /preserveExistingView: canPreserveCurrentView/,
+  'a failed fast refresh must preserve the saved dashboard');
+assert.match(controller,
+  /const preserveView = mode === 'current' && preserveExistingView\s*&& \(!snap\.complete \|\| snap\.issueCount > 0\)/,
+  'an incomplete fast refresh must not replace the last good cards');
+assert.match(controller,
+  /refreshScope: renderedRefreshScope \|\| \(previous && previous\.refreshScope\)/,
+  'hide and restore must preserve the saved wallet scope');
+assert.match(controller,
+  /refreshMode: renderedRefreshMode \|\| \(previous && previous\.refreshMode\) \|\| 'full'/,
+  'hide and restore must preserve the saved refresh mode');
 assert.match(controller, /\$\('scanNetworks'\)\.open = false/,
   'starting a refresh must collapse the network selector');
 const startScanSource = controller.slice(
@@ -96,11 +127,54 @@ const startScanSource = controller.slice(
 );
 assert.ok(startScanSource.indexOf('if (scanBusy || dashboardMutationBusy) return;') >= 0);
 assert.ok(startScanSource.indexOf('if (scanBusy || dashboardMutationBusy) return;')
-    < startScanSource.indexOf('await scanPreferencesReady;'),
+    < startScanSource.indexOf('await Promise.all([scanPreferencesReady, refreshScopeReady]);'),
   'the scan lock must be acquired before the first await');
 assert.ok(startScanSource.indexOf('scanBusy = true;')
-    < startScanSource.indexOf('await scanPreferencesReady;'),
+    < startScanSource.indexOf('await Promise.all([scanPreferencesReady, refreshScopeReady]);'),
   'rapid clicks must not launch overlapping sweeps');
+assert.match(startScanSource,
+  /const acceptedAt = !final\.allFailed && !preservedCurrentView \? Date\.now\(\) : null/,
+  'only an accepted dashboard may advance refresh context');
+assert.match(startScanSource,
+  /const deltaAcceptedAt = shouldAdvanceRefreshSamples\(\{[\s\S]*sidePanel: SIDE_PANEL,[\s\S]*allFailed: final\.allFailed,[\s\S]*preservedCurrentView,[\s\S]*\}\) \? acceptedAt : null/,
+  'only an accepted side-panel view may advance the visible comparison baseline');
+assert.ok(startScanSource.indexOf('const acceptedAt =')
+    > startScanSource.indexOf('const preservedCurrentView ='),
+  'the preservation decision must precede refresh-delta work');
+assert.ok(startScanSource.indexOf('deltaAcceptedAt ? readRefreshSamples(final.allPositions)')
+    > startScanSource.indexOf('if (contextAcceptedAt) {'),
+  'popup and progressive paints must never read or advance comparison samples');
+assert.ok(startScanSource.indexOf('writeRefreshSamples(final.allPositions, acceptedAt)')
+    === -1,
+  'the general accepted timestamp must not silently advance the side-panel baseline');
+assert.ok(startScanSource.indexOf('writeRefreshSamples(final.allPositions, deltaAcceptedAt)')
+    > startScanSource.indexOf('writeDashboardSnapshot({'),
+  'the accepted side-panel view must render and save before its next baseline is committed');
+assert.match(startScanSource,
+  /mode === 'full' && includeClosed[\s\S]*discoverLineageCandidates\(final\.allPositions, contextAcceptedAt\)/,
+  'automatic replacement discovery requires an explicit closed-position Full rescan');
+assert.match(startScanSource,
+  /const contextAcceptedAt = SIDE_PANEL \? acceptedAt : null/,
+  'popup scans must not spend receipt calls on side-panel-only lineage');
+assert.match(startScanSource,
+  /const relevantPrevious = relevantLineageEdges\(final\.allPositions, previousLineage\)/,
+  'stored replacement proofs must be revalidated before rendering');
+assert.match(startScanSource,
+  /knownProofKeys[\s\S]*filter\(\(candidate\) => !knownProofKeys\.has\(lineageProofKey\(candidate\)\)\)/,
+  'known replacement proofs must not be fetched again through fresh discovery');
+assert.match(startScanSource,
+  /const expectedLineage = \[\.\.\.relevantPrevious, \.\.\.newCandidates\][\s\S]*lineageWithinBudget = lineageReceiptGroupCount\(expectedLineage\)[\s\S]*<= MAX_LINEAGE_VALIDATIONS/,
+  'stored validation and discovery must be gated against one combined receipt budget');
+assert.match(startScanSource,
+  /acceptedLineage = lineageWithinBudget[\s\S]*completeLineageProofSet\([\s\S]*expectedLineage/,
+  'partial stored-plus-new proof sets must not render a manufactured graph head');
+assert.ok(startScanSource.indexOf('latestPositions = positionsWithoutLineage(latestPositions)')
+    < startScanSource.indexOf('const previousView ='),
+  'a failed refresh must preserve cards without preserving a stale lineage proof');
+assert.match(startScanSource, /html: dashboardHtmlWithoutLiveProofs\(\)/,
+  'dashboard snapshots must never persist a live verified-lineage badge');
+assert.match(startScanSource, /if \(storedLineage\) contextWrites\.push\(writeLineageEdges\(storedLineage\)\)/,
+  'a failed lineage-store read must not be overwritten');
 const gateSource = controller.slice(
   controller.indexOf('(async function gateOnOpen()'),
   controller.indexOf('async function startScan('),
@@ -145,6 +219,14 @@ assert.match(controller, /It remains the overlay wallet/,
 assert.match(panelCss, /body\.sidepanel \.hide-position\s*\{\s*display:\s*block/);
 assert.match(panelCss, /body\.sidepanel \.position-card\s*\{\s*container-type:\s*inline-size/);
 assert.match(panelCss, /@container \(max-width: 380px\)/);
+assert.match(panelCss, /\.refresh-delta-grid/);
+assert.match(panelCss, /\.position-lineage/);
+assert.match(controller, /Tracking started\. Refresh again to compare\./);
+assert.match(controller, /verified same transaction/);
+assert.match(controller, /data-refresh-baseline-at/,
+  'saved delta HTML must carry a display-only timestamp for age refresh');
+assert.match(controller, /age\.textContent = snapshotAge\(at\)/,
+  'restored comparison ages must not remain frozen in cached HTML');
 
 assert.equal(snapshotAge(1_000_000, 1_030_000), 'just now');
 assert.equal(snapshotAge(1_000_000, 1_420_000), '7m ago');
@@ -160,6 +242,8 @@ assert.equal(await writeDashboardSnapshot({
   wallets: 1,
   chains: ['ethereum', 'robinhood'],
   includeClosed: false,
+  refreshScope: 'all',
+  refreshMode: 'current',
 }), true);
 let snapshot = await readDashboardSnapshot();
 assert.equal(snapshot.html, '<div class="position-card">one</div>');
@@ -170,6 +254,8 @@ assert.equal(snapshot.issues, 0);
 assert.equal(snapshot.showWalletLabels, null,
   'legacy snapshots must preserve their already-rendered wallet labels');
 assert.deepEqual(snapshot.chains, ['ethereum', 'robinhood']);
+assert.equal(snapshot.refreshScope, 'all');
+assert.equal(snapshot.refreshMode, 'current');
 
 assert.equal(await writeDashboardSnapshot({
   html: 'x'.repeat(MAX_SNAPSHOT_HTML + 1),

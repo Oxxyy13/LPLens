@@ -29,7 +29,7 @@ The extension has no wallet-provider or signing integration. It does not call
 - `eth_getBlockByNumber`
 - `eth_getTransactionReceipt`
 
-The persistent optional Uniswap, ProjectX, and Dexscreener page scripts run in
+The persistent optional Uniswap, ProjectX, UP33, and Dexscreener page scripts run in
 Chrome's isolated world. Their site permissions are separately granted, off at
 install, and revocable. None can access another extension's storage or wallet
 keys. Dexscreener chart alignment has a separate, versioned consent control and
@@ -56,6 +56,31 @@ When the optional Dexscreener overlay is enabled, its service-worker request to
 Dexscreener contains only the pair page's URL-derived chain and pool identifier.
 It does not include the active wallet. The response supplies base/quote token
 addresses used to orient the independent LPLens range display.
+
+The optional UP33 overlay runs only on `up33.xyz/liquidity` and descendants. It
+reads only each concentrated-position row's public `data-flow="cl-<NFT ID>"`
+attribute, matching visible `#ID`, and row geometry on the exact liquidity list so local PnL cards can align with matching rows.
+If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it
+reads only the dialog's visible boundary so the cards move left instead of
+covering it; it does not read dialog contents.
+Those page-derived IDs are matched only against the active-wallet scan and are
+not sent to a network or stored. It does not read connected-wallet state,
+balances, forms, transaction controls, signing prompts, the wallet provider, or
+other UP33 page content. The service worker uses the active wallet explicitly
+selected in LPLens, reads public chain state, rechecks site permission before
+returning, and sends the isolated page script only a shortened wallet label plus
+a minimized display model. Concurrent same-wallet scans are coalesced, but a
+completed UP33 custody proof is not cached or reused. UP33 v2 LP and
+liquidity-locker positions are not read.
+
+For a direct UP33 NFT, lifetime return is enabled only after Robinhood Chain's
+public RPC returns complete exact-token Transfer history through a captured
+head, the NFT still belongs to the selected wallet at that head, the history is
+exactly one mint directly to that wallet, and the mint transaction matches the
+first liquidity addition. The public manager and NFT ID go to the RPC; Transfer
+rows stay in extension context and are not relayed to or stored by LPLens. Any
+later transfer, staking history, incomplete response, mismatch, or rate limit
+withholds LP return and vs holding.
 
 Chart alignment remains off unless `dexscreenerChartConsentV1` is strictly
 `true` in `chrome.storage.local`, and it also requires the independently granted

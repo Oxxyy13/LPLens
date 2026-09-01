@@ -135,6 +135,7 @@ export function buildScanDiagnostic({
         uniswap: !!optionalPageAccess.uniswap,
         projectx: !!optionalPageAccess.projectx,
         dexscreener: !!optionalPageAccess.dexscreener,
+        up33: !!optionalPageAccess.up33,
       },
     },
     scan: {
@@ -181,4 +182,3 @@ export async function copyDiagnosticReport(report) {
   area.remove();
   if (!copied) throw new Error('Clipboard access was unavailable.');
 }
-

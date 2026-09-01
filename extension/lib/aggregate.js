@@ -31,6 +31,7 @@ function money(n, signed) {
 function reasonsText(reasons) {
   const bits = [];
   if (reasons.unpriced) bits.push(`${reasons.unpriced} unpriced`);
+  if (reasons.incomplete) bits.push(`${reasons.incomplete} incomplete`);
   if (reasons.history) bits.push(`${reasons.history} history unavailable`);
   if (reasons.bound) bits.push(`${reasons.bound} bound`);
   return bits.join(', ');
@@ -114,6 +115,11 @@ export function aggregateReasonText(bucket) {
 
   const otherBound = Math.max(0, (Number(reasons.bound) || 0) - exactBound);
   const otherUnpriced = Math.max(0, (Number(reasons.unpriced) || 0) - exactUnpriced);
+  if (reasons.incomplete) {
+    bits.push(reasons.incomplete === 1
+      ? 'current value is incomplete for 1 position'
+      : `current value is incomplete for ${reasons.incomplete} positions`);
+  }
   if (otherBound) {
     const hasPrior = bits.length > 0;
     bits.push(otherBound === 1
@@ -137,9 +143,12 @@ export function classifyPosition(p) {
   const u = p && p.usd;
   const histGone = !!(h && h.unavailable);
 
-  const value = u && (u.currentValue !== null && u.currentValue !== undefined
-    ? u.currentValue
-    : u.totalNow !== null && u.totalNow !== undefined ? u.totalNow : u.value);
+  const valueIncomplete = !!(u && u.currentValueIncomplete);
+  const value = valueIncomplete || !u
+    ? null
+    : (u.currentValue !== null && u.currentValue !== undefined
+      ? u.currentValue
+      : u.totalNow !== null && u.totalNow !== undefined ? u.totalNow : u.value);
   const hasValue = value !== null && value !== undefined && isFinite(value);
   const hasVs = !!(u && u.vsHodl !== null && u.vsHodl !== undefined && isFinite(u.vsHodl));
   const hasPnl = !!(u && u.pnl !== null && u.pnl !== undefined && isFinite(u.pnl));
@@ -150,6 +159,7 @@ export function classifyPosition(p) {
 
   return {
     histGone,
+    valueIncomplete,
     hasValue,
     value: hasValue ? value : null,
     hasVs: hasVs && !histGone,
@@ -176,6 +186,7 @@ export function summarizeAggregate(positions) {
   const n = list.length;
   const emptyReasons = () => ({
     unpriced: 0,
+    incomplete: 0,
     history: 0,
     bound: 0,
     returnUnavailable: [],
@@ -188,7 +199,11 @@ export function summarizeAggregate(positions) {
     const c = classifyPosition(p);
 
     if (c.hasValue) { value.sum += c.value; value.included++; }
-    else { value.excluded++; value.reasons.unpriced++; }
+    else {
+      value.excluded++;
+      if (c.valueIncomplete) value.reasons.incomplete++;
+      else value.reasons.unpriced++;
+    }
 
     if (c.histGone) { vsHold.excluded++; vsHold.reasons.history++; }
     else if (c.hasVs) { vsHold.sum += c.vsHodl; vsHold.included++; }
