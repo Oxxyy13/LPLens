@@ -12,7 +12,7 @@ const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
 const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
 
-assert.equal(manifest.version, '0.32.0');
+assert.equal(manifest.version, '0.33.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');

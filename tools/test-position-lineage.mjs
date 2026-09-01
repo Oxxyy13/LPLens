@@ -17,7 +17,7 @@ globalThis.chrome = {
 };
 
 const lineage = await import(`../extension/lib/position-lineage.js?t=${Date.now()}`);
-const { CHAINS } = await import('../extension/lib/chains.js');
+const { CHAINS, v3Deployment } = await import('../extension/lib/chains.js');
 const { TOPIC } = await import('../extension/lib/history.js');
 
 const OWNER = `0x${'11'.repeat(20)}`;
@@ -27,6 +27,8 @@ const TOKEN1 = `0x${'44'.repeat(20)}`;
 const TX = `0x${'55'.repeat(32)}`;
 const BLOCK_HASH = `0x${'66'.repeat(32)}`;
 const MANAGER = CHAINS.ethereum.nfpm.toLowerCase();
+const ROBINHOOD_MANAGER = CHAINS.robinhood.nfpm.toLowerCase();
+const UP33_MANAGER = v3Deployment('robinhood', 'up33-cl').nfpm.toLowerCase();
 const TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const word = (value) => BigInt(value).toString(16).padStart(64, '0');
 const topicAddress = (address) => `0x${address.slice(2).padStart(64, '0')}`;
@@ -90,6 +92,21 @@ const oldPosition = position(1, {
   },
 });
 const newPosition = position(2);
+assert.equal(lineage.lineagePositionKey({ ...newPosition, manager: MANAGER }),
+  lineage.lineagePositionKey(newPosition),
+  'an explicit default manager remains compatible with legacy position objects');
+assert.equal(lineage.lineagePositionKey({ ...newPosition, manager: 'bad' }), null,
+  'an explicit malformed manager must fail closed');
+const robinhoodPosition = {
+  ...newPosition, chainKey: 'robinhood', manager: ROBINHOOD_MANAGER,
+};
+const up33Position = { ...newPosition, chainKey: 'robinhood', manager: UP33_MANAGER };
+assert.notEqual(lineage.lineagePositionKey(up33Position),
+  lineage.lineagePositionKey(robinhoodPosition),
+  'equal token IDs in different managers must not share lineage identity');
+assert.equal(lineage.discoverLineageCandidates([
+  { ...oldPosition, chainKey: 'robinhood', manager: ROBINHOOD_MANAGER }, up33Position,
+], 1000).length, 0, 'a replacement cannot cross position managers');
 const candidates = lineage.discoverLineageCandidates([oldPosition, newPosition], 1000);
 assert.equal(candidates.length, 1);
 const candidate = candidates[0];
@@ -158,6 +175,15 @@ assert.equal(lineage.discoverLineageCandidates([
 
 const edge = lineage.normalizeLineageEdges([proven]);
 assert.equal(edge.length, 1);
+const up33Edge = {
+  ...proven,
+  chainKey: 'robinhood',
+  manager: UP33_MANAGER,
+  from: `${OWNER}:robinhood:${UP33_MANAGER}:v3:1`,
+  to: `${OWNER}:robinhood:${UP33_MANAGER}:v3:2`,
+};
+assert.equal(lineage.normalizeLineageEdges([up33Edge]).length, 1,
+  'stored proofs may use any configured deployment manager');
 assert.equal(lineage.relevantLineageEdges([newPosition], edge).length, 1);
 assert.equal(lineage.relevantLineageEdges([position(99)], edge).length, 0,
   'unrelated wallets and positions must not trigger receipt revalidation');

@@ -46,6 +46,10 @@ export function portfolioJobIssue(state) {
   if (result.positionUnreadable) {
     messages.push('Some v3 positions could not be read.');
   }
+  for (const issue of Array.isArray(result.deploymentIssues) ? result.deploymentIssues : []) {
+    const protocol = String(issue && issue.protocol || 'A protocol');
+    messages.push(`${protocol} data: ${friendlyFailure(issue && issue.error)}`);
+  }
 
   const v4 = result.v4 || {};
   if (v4.unavailable) messages.push(`V4 data: ${friendlyFailure(v4.unavailable)}`);

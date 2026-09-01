@@ -33,6 +33,12 @@ jobs:
           node tools/test-projectx-overlay.mjs
           node tools/test-active-projectx-wallet.mjs
           node tools/test-projectx-config.mjs
+          node tools/test-up33-config.mjs
+          node tools/test-up33-direct-pnl.mjs
+          node tools/test-up33-transfer-source.mjs
+          node tools/test-up33-overlay.mjs
+          node tools/test-up33-row-overlay.mjs
+          node tools/test-up33-current-refresh.mjs
           node tools/test-dexscreener-overlay.mjs
           node tools/test-dexscreener-range.mjs
           node tools/test-dexscreener-pair-cache.mjs

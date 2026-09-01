@@ -244,10 +244,11 @@ assert.deepEqual(
 // previous cache ends at block 200 with a trusted block-100 anchor. A refresh
 // at block 300 must prove block 100, replace 101..300, then persist a new
 // block-172 anchor (300 minus the 128-block reorg overlap).
-const { CHAINS } = await import('../extension/lib/chains.js');
+const { CHAINS, v3Deployment } = await import('../extension/lib/chains.js');
 const { loadPosition } = await import('../extension/lib/positions.js');
-const chainKey = 'cache_v2_wiring_fixture';
-const factory = '0x' + '41'.repeat(20);
+const chainKey = 'ethereum';
+const deployment = v3Deployment(chainKey);
+const factory = deployment.factory;
 const pool = '0x' + '42'.repeat(20);
 const owner = '0x' + '43'.repeat(20);
 const integrationTokenId = 9001n;
@@ -275,13 +276,12 @@ const oldAnchorHash = '0x' + '61'.repeat(32);
 const newAnchorHash = '0x' + '62'.repeat(32);
 const headHash = '0x' + '63'.repeat(32);
 
-CHAINS[chainKey] = {
-  label: 'History cache wiring fixture',
-  nfpm: NFPM,
-  factory,
-  rpc: 'https://history-wiring.fixture.invalid',
-  nativeSymbol: 'ETH',
-};
+assert.equal(deployment.nfpm.toLowerCase(), NFPM.toLowerCase());
+const originalBlockscout = CHAINS[chainKey].blockscout;
+// Force this wiring fixture through the mocked raw-RPC path. Deployment
+// identity still comes from the production registry added for multi-manager
+// support, instead of inventing a chain after that registry has been frozen.
+CHAINS[chainKey].blockscout = null;
 
 await cache.writeHistory({
   chainKey,
@@ -419,7 +419,7 @@ assert.deepEqual(
   [110, 111, 112],
 );
 assert.equal(history.reconciles(advanced.events, 100n), true);
-delete CHAINS[chainKey];
+CHAINS[chainKey].blockscout = originalBlockscout;
 
 globalThis.fetch = originalFetch;
 delete globalThis.chrome;

@@ -58,7 +58,9 @@ function managerFor(position) {
   const chainKey = String(position?.chainKey || '').trim().toLowerCase();
   const version = String(position?.version || position?.protocol || 'v3').trim().toLowerCase();
   const chain = CHAINS[chainKey];
-  const manager = version === 'v4' ? chain?.v4PositionManager : chain?.nfpm;
+  if (!chain) return null;
+  const manager = position?.manager !== undefined && position?.manager !== null
+    ? position.manager : (version === 'v4' ? chain.v4PositionManager : chain.nfpm);
   return cleanAddress(manager);
 }
 
@@ -82,13 +84,16 @@ export function positionRefreshIdentity(position) {
     : cleanAddress(position?.pool);
   const token0 = cleanAddress(position?.token0);
   const token1 = cleanAddress(position?.token1);
-  const fee = cleanInteger(position?.fee);
+  // UP33 Slipstream fees are dynamic. Tick spacing is the immutable pool-key
+  // field stored in its NFT, so a fee update must not reset the baseline.
+  const poolKey = position?.tickSpacing !== undefined && position?.tickSpacing !== null
+    ? cleanInteger(position.tickSpacing) : cleanInteger(position?.fee);
   const tickLower = cleanInteger(position?.tickLower);
   const tickUpper = cleanInteger(position?.tickUpper);
   const validPool = version === 'v4' ? HASH_RE.test(pool) : !!pool;
-  if (!validPool || !token0 || !token1 || fee === null || fee < 0
+  if (!validPool || !token0 || !token1 || poolKey === null || poolKey < 0
       || tickLower === null || tickUpper === null || tickLower >= tickUpper) return null;
-  return [version, pool, token0, token1, fee, tickLower, tickUpper].join(':');
+  return [version, pool, token0, token1, poolKey, tickLower, tickUpper].join(':');
 }
 
 function exactReturn(position) {

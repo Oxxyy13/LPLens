@@ -359,15 +359,96 @@ async function viaHistoryRelay(relay, chainId, fields) {
   return (await viaHistoryRelayRaw(relay, chainId, fields)).map(normalise);
 }
 
-const TRANSFER_TOPIC =
+export const TRANSFER_TOPIC =
   '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
 function transferFilter(topics) {
   const fields = { topic0: topics[0] };
   if (topics[1]) { fields.topic1 = topics[1]; fields.topic0_1_opr = 'and'; }
   if (topics[2]) { fields.topic2 = topics[2]; fields.topic0_2_opr = 'and'; }
+  if (topics[3]) { fields.topic3 = topics[3]; fields.topic0_3_opr = 'and'; }
   if (topics[1] && topics[2]) fields.topic1_2_opr = 'and';
+  if (topics[1] && topics[3]) fields.topic1_3_opr = 'and';
+  if (topics[2] && topics[3]) fields.topic2_3_opr = 'and';
   return fields;
+}
+
+/**
+ * Complete ERC-721 Transfer history for one exact NFT, read directly from RPC.
+ *
+ * UP33 runs only on Robinhood Chain, whose public RPC serves an unbounded,
+ * token-id-filtered log query. Using RPC rather than an explorer index avoids
+ * treating index lag as proof that an NFT never entered gauge custody. Any
+ * refusal or malformed row fails closed and leaves lifetime accounting off.
+ */
+export async function fetchTokenTransfersRpc({
+  contract, tokenId, rpc, fromBlock = 0, toBlock = 'latest', requireNonEmpty = true,
+}) {
+  let id;
+  try { id = BigInt(tokenId); } catch { return { unavailable: 'invalid NFT token id' }; }
+  const from = Number(fromBlock);
+  const to = toBlock === 'latest' ? 'latest' : Number(toBlock);
+  if (!/^0x[0-9a-f]{40}$/i.test(String(contract || ''))
+      || !rpc || id < 0n || !Number.isSafeInteger(from) || from < 0
+      || (to !== 'latest' && (!Number.isSafeInteger(to) || to < from))) {
+    return { unavailable: 'invalid NFT Transfer-log request' };
+  }
+
+  const tokenTopic = '0x' + id.toString(16).padStart(64, '0');
+  const topics = [TRANSFER_TOPIC, null, null, tokenTopic];
+  const addressFromTopic = (topic) => {
+    const value = String(topic || '').toLowerCase();
+    if (!/^0x[0-9a-f]{64}$/.test(value)) throw new Error('malformed Transfer address topic');
+    return '0x' + value.slice(-40);
+  };
+
+  const decode = (logs) => {
+    if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
+    if (requireNonEmpty && !logs.length) throw new Error('zero Transfer logs for a minted NFT');
+
+    const events = logs.map((raw) => {
+      const log = raw.block === undefined ? normalise(raw) : raw;
+      const rowTopics = raw.topics || [];
+      if (String(rowTopics[0] || '').toLowerCase() !== TRANSFER_TOPIC
+          || String(rowTopics[3] || '').toLowerCase() !== tokenTopic) {
+        throw new Error('mismatched NFT Transfer log');
+      }
+      if (!Number.isSafeInteger(log.block) || log.block < from
+          || (to !== 'latest' && log.block > to)
+          || !Number.isSafeInteger(log.logIndex) || log.logIndex < 0
+          || !/^0x[0-9a-f]{64}$/i.test(String(log.transactionHash || ''))) {
+        throw new Error('NFT Transfer log is outside the requested range');
+      }
+      return {
+        block: log.block,
+        index: log.logIndex,
+        transactionHash: String(log.transactionHash).toLowerCase(),
+        tokenId: id,
+        from: addressFromTopic(rowTopics[1]),
+        to: addressFromTopic(rowTopics[2]),
+      };
+    }).sort((a, b) => (a.block - b.block) || (a.index - b.index));
+
+    for (let i = 1; i < events.length; i++) {
+      const before = events[i - 1], after = events[i];
+      if (before.block === after.block && before.index === after.index) {
+        throw new Error('duplicate NFT Transfer log identity');
+      }
+    }
+    return events;
+  };
+
+  try {
+    const logs = await rpcCall(rpc, 'eth_getLogs', [{
+      address: contract,
+      fromBlock: '0x' + BigInt(from).toString(16),
+      toBlock: to === 'latest' ? 'latest' : '0x' + BigInt(to).toString(16),
+      topics,
+    }]);
+    return { events: decode(logs), source: 'rpc', fromBlock: from, toBlock: to };
+  } catch (err) {
+    return { unavailable: err.message || String(err) };
+  }
 }
 
 /**
@@ -525,14 +606,21 @@ export async function fetchTransfers({
 export async function fetchFilteredLogs({
   contract, topics, rpc, etherscanKey, etherscanChainId, blockscout,
   historyRelay, historyRelayChainId, blockscoutRelay, blockscoutChainId,
+  fromBlock = 0, toBlock = 'latest',
 }) {
   const hostedRelay = historyRelay || blockscoutRelay;
   const hostedChainId = historyRelayChainId || blockscoutChainId;
   const filter = transferFilter(topics || []);
   const errors = [];
+  const from = Number(fromBlock);
+  const to = toBlock === 'latest' ? 'latest' : Number(toBlock);
 
   if (!contract || !topics || !topics[0]) {
     return { unavailable: 'an exact event signature is required' };
+  }
+  if (!Number.isSafeInteger(from) || from < 0
+      || (to !== 'latest' && (!Number.isSafeInteger(to) || to < from))) {
+    return { unavailable: 'invalid filtered-log range' };
   }
 
   const trySource = async (label, fn) => {
@@ -554,8 +642,8 @@ export async function fetchFilteredLogs({
       await explorerGetLogs(ETHERSCAN_V2, {
         chainid: String(etherscanChainId),
         address: contract,
-        fromBlock: '0',
-        toBlock: 'latest',
+        fromBlock: String(from),
+        toBlock: String(to),
         apikey: etherscanKey,
         ...filter,
       }, etherscanSlot, 'etherscan')
@@ -568,8 +656,8 @@ export async function fetchFilteredLogs({
     const hit = await trySource(label,
       () => viaHistoryRelay(hostedRelay, hostedChainId, {
         address: contract,
-        fromBlock: '0',
-        toBlock: 'latest',
+        fromBlock: String(from),
+        toBlock: String(to),
         ...filter,
       }));
     if (hit) return hit;
@@ -577,15 +665,20 @@ export async function fetchFilteredLogs({
 
   if (blockscout) {
     const hit = await trySource('blockscout',
-      () => viaBlockscout(blockscout, { address: contract, ...filter }));
+      () => viaBlockscout(blockscout, {
+        address: contract,
+        fromBlock: String(from),
+        toBlock: String(to),
+        ...filter,
+      }));
     if (hit) return hit;
   }
 
   const hit = await trySource('rpc', async () => {
     const logs = await rpcCall(rpc, 'eth_getLogs', [{
       address: contract,
-      fromBlock: '0x0',
-      toBlock: 'latest',
+      fromBlock: '0x' + BigInt(from).toString(16),
+      toBlock: to === 'latest' ? 'latest' : '0x' + BigInt(to).toString(16),
       topics,
     }]);
     if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
@@ -593,6 +686,31 @@ export async function fetchFilteredLogs({
   });
   if (hit) return hit;
   return { unavailable: errors.join('; ') };
+}
+
+/**
+ * Complete exact-token ERC-721 history from the chain RPC.
+ *
+ * Direct UP33 PnL is a custody proof, so an explorer index is not authoritative
+ * enough here: an old omitted stake-and-return pair would leave current
+ * ownership unchanged. Robinhood Chain's public RPC accepts this exact-token
+ * lifetime filter. Any refusal or malformed response fails closed.
+ */
+export async function fetchExactTokenTransfers({
+  contract, tokenId, rpc, fromBlock = 0, toBlock,
+}) {
+  const to = Number(toBlock);
+  if (!Number.isSafeInteger(to) || to < 0) {
+    return { unavailable: 'an exact Transfer-history head is required' };
+  }
+  const result = await fetchTokenTransfersRpc({
+    contract, tokenId, rpc, fromBlock, toBlock: to, requireNonEmpty: true,
+  });
+  if (result.unavailable) return result;
+  return {
+    ...result,
+    complete: true,
+  };
 }
 
 /** Recent counterpart for explorer-index lag; never substitutes for lifetime. */

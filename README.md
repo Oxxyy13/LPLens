@@ -1,6 +1,6 @@
 # LPLens
 
-Read-only Uniswap v3/v4 and ProjectX concentrated-liquidity position inspector,
+Read-only concentrated-liquidity position inspector for Uniswap, ProjectX, and UP33,
 built as a Manifest V3 Chrome extension. Paste any address; it reads positions
 straight off-chain.
 
@@ -26,12 +26,40 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.32.0 development candidate
+## Status: 0.33.0 development candidate
 
 The public Store release remains 0.30.0 while the fast-refresh, v4
-ownership-checkpoint, refresh-delta, and verified replacement changes below are
-tested locally. Do not upload 0.32.0 until the deterministic suite, rendered
+ownership-checkpoint, refresh-delta, verified replacement, and UP33 changes below are
+tested locally. Do not upload 0.33.0 until the deterministic suite, rendered
 harness, machine-local dev mirror, and real-wallet smoke tests all pass.
+
+Version 0.33 adds UP33 concentrated-liquidity positions on Robinhood Chain as a
+separate protocol deployment, so equal NFT numbers from different managers can
+never collide. It reads direct wallet custody and gauge custody, dynamic pool
+fees, current range and token amounts, and pending UP emissions. A pending
+reward is the sum of the gauge's stored checkpoint and newly earned amount.
+For a direct UP33 NFT, lifetime LP return and vs holding appear only when the
+complete lifecycle and exact-token Transfer histories prove one mint directly
+to the same wallet, with the first liquidity addition in that mint transaction.
+If the NFT is currently staked, was ever staked or transferred, or either
+history is incomplete or inconsistent, those metrics are withheld. Pending UP
+emissions remain separate from LP return. A staked position's active-liquidity
+mark is also labeled incomplete and excluded from portfolio-value totals
+because the gauge does not expose the user's trading-fee balance. UP33 v2 LP
+and liquidity-locker positions are not read.
+
+The optional UP33 overlay runs only on `up33.xyz/liquidity` and descendants.
+The UP33 panel uses the active overlay wallet selected in LPLens, reads positions
+from public chain data, and, on the exact liquidity list, reads only each
+concentrated-position row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row geometry so local PnL
+cards can align with the matching rows. Those page-derived IDs are matched only
+against the active-wallet scan; they are not sent to a network or stored. LPLens
+does not read UP33 connected-wallet state, balances, forms, transaction controls,
+signing prompts, its wallet provider, or other UP33 page content. The page
+receives only a shortened wallet label and the narrow display fields needed for
+the panel. The worker coalesces only concurrently in-flight same-wallet scans.
+It does not reuse a completed UP33 custody proof, so a reload checks current
+ownership again.
 
 Dexscreener chart alignment has a separate, versioned consent control and is
 off until the user enables it. Site permission alone shows the existing exact
@@ -59,7 +87,7 @@ viewport. Its position is stored only in `chrome.storage.local` and is clamped
 back on-screen after zoom or window-size changes. The minus control collapses
 the panel to a small LPLens pill; double-clicking the header restores the default
 dock. These layout preferences apply only to Dexscreener and do not change the
-Uniswap or ProjectX overlays.
+Uniswap, ProjectX, or UP33 overlays.
 
 Version 0.30.0 includes the browser-managed portfolio side panel that can stay
 open while the user changes
@@ -152,7 +180,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.32.0
+diff -r extension build/lplens-0.33.0
 ```
 
 That diff is empty on a release commit. `tools/package.mjs` also refuses to
@@ -173,7 +201,7 @@ Two claims worth checking directly, because they are the ones that matter:
   and LPLens service hosts. `sidePanel` provides the persistent portfolio
   surface and does not grant access to browsing data or page content. No
   `tabs`, no `cookies`, no `webRequest`, no `<all_urls>`. Note that
-  `app.uniswap.org`, `www.prjx.com`, and `dexscreener.com` appear under
+  `app.uniswap.org`, `www.prjx.com`, `up33.xyz`, and `dexscreener.com` appear under
   `optional_host_permissions`, not `host_permissions` — LPLens ships with
   **no** access to any of those sites and cannot run there unless you explicitly grant
   each one.
@@ -217,6 +245,11 @@ Two claims worth checking directly, because they are the ones that matter:
 - Scans Ethereum, Base, Arbitrum, Polygon, HyperEVM and Robinhood Chain (4663)
   together; HyperEVM positions are read through ProjectX;
   every card names its chain, and its wallet when several are saved
+- Reads UP33 concentrated-liquidity NFTs on Robinhood Chain in direct or gauge
+  custody and shows pending UP emissions separately. A never-transferred direct
+  NFT can show lifetime return after its mint and liquidity histories match;
+  current or historical gauge custody remains fail-closed. LPLens does not
+  treat emissions as fees, LP return, vs holding, or current position value
 - Saves multiple addresses locally with optional labels, and can total them.
   Saved addresses live in `chrome.storage.local` and never leave the machine
 - Opens a persistent browser side panel from the popup. It can show the last
@@ -350,12 +383,13 @@ no `webRequest`, no `<all_urls>`. The only page permissions are the optional,
 user-granted scopes described below.
 
 **All on-page overlays are independently opt-in and off by default.**
-`app.uniswap.org`, `www.prjx.com`, and `dexscreener.com` are in
+`app.uniswap.org`, `www.prjx.com`, `up33.xyz`, and `dexscreener.com` are in
 `optional_host_permissions`, not `host_permissions`, so a freshly installed
 LPLens has no access to those sites.
 The Uniswap toggle registers only the exact
 `https://app.uniswap.org/positions` list and its `/positions/*` descendants.
 The ProjectX toggle registers only `https://www.prjx.com/portfolio` and its
+descendants. The UP33 toggle registers only `https://up33.xyz/liquidity` and its
 descendants. The Dexscreener toggle registers only `https://dexscreener.com/*`;
 the script acts only on a route containing a supported chain slug and a 20-byte
 pool address or 32-byte v4 pool id. Turning any toggle off unregisters only that
@@ -369,6 +403,14 @@ understanding rather than skimming:
   and the first line of visible row text to discover and label positions. On
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
   the panel uses only the active overlay wallet explicitly selected in LPLens.
+  On the exact UP33 `/liquidity` list it reads only each concentrated-position
+  row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row geometry so local PnL cards can align with
+  matching rows. Those page-derived IDs are matched only against the active-wallet
+  scan and are not sent to a network or stored. It does not read UP33
+  connected-wallet state, balances, forms, transaction controls, signing prompts,
+  wallet-provider objects, or other UP33 page content. The route also triggers a
+  public Robinhood Chain read for the same active overlay wallet. Only a shortened
+  wallet label and a minimized display model cross into the isolated page script.
   On Dexscreener it reads only the chain and pool identifier in the pair-page
   URL, then checks that same active wallet for a matching position. The service
   worker sends those two route values, without the wallet address, to
@@ -452,7 +494,8 @@ missing current data. Replacement proofs are rechecked against the transaction
 receipt and canonical block before display. The
 saved view is local display output, not accounting input, and is replaced after
 a successful refresh. The current-position index and ownership checkpoint hold
-only public wallet, chain, position ID, ownership, and block-checkpoint data.
+only public wallet, chain, protocol deployment, manager, position ID, direct or
+gauge custody, custodian contract, ownership, and block-checkpoint data.
 They are verified against live chain state before reuse and are not price or
 accounting inputs. The Copy
 diagnostics control saves only version, UI
@@ -522,6 +565,11 @@ applies to any unpacked extension, not just this one.
     100,000 credits/day and 5 requests/second; clients serialize and retry
     transient capacity responses.
   - **Robinhood Chain's public RPC serves it keylessly.** Nothing to configure.
+    For a direct UP33 NFT, the RPC receives an exact lifetime Transfer filter
+    for the public manager and token ID. PnL unlocks only when that complete
+    result is one mint directly to the selected wallet and its transaction
+    matches the first liquidity addition. The Transfer rows stay inside the
+    extension and are not sent to LPLens.
   - **No public Ethereum RPC does.** Verified refusals from `eth.drpc.org`
     (10k blocks), `ethereum-rpc.publicnode.com` (archive needs a token),
     `rpc.ankr.com` (key), `rpc.mevblocker.io` (10k), `eth-pokt.nodies.app`,
@@ -623,7 +671,7 @@ extension/
   lib/wallets.js     saved addresses; chrome.storage.local only, never sync
   lib/aggregate.js   all-wallets totals, with explicit exclusion reporting
   lib/license.js     beta access gate
-  overlay.js         optional Uniswap, ProjectX, and Dexscreener overlays
+  overlay.js         optional Uniswap, ProjectX, UP33, and Dexscreener overlays
   sw.js              service worker; holds all network access for the overlay
 tools/
   package.mjs        builds the distributable zip; refuses to ship a credential

@@ -3,18 +3,23 @@
  *
  * This is deliberately separate from dashboardSnapshotV1. The dashboard is
  * escaped display HTML and must never become position truth. This index stores
- * only wallet, chain, protocol and decimal token IDs proven by a full rescan.
- * A fast refresh still verifies ownership and re-reads all current position
- * state. It cannot discover a new or reopened NFT; that remains Full rescan's
- * job.
+ * only wallet, chain, deployment and decimal token IDs proven by a full
+ * rescan. A fast refresh still verifies custody and re-reads all current
+ * position state. It cannot discover a new or reopened NFT; that remains Full
+ * rescan's job.
  */
 
+import { v3Deployment, v3DeploymentsFor } from './chains.js';
+
 export const CURRENT_POSITION_INDEX_PREFIX = 'current:v1:';
-const VERSION = 1;
+export const CURRENT_POSITION_INDEX_VERSION = 2;
+const LEGACY_VERSION = 1;
+const VERSION = CURRENT_POSITION_INDEX_VERSION;
 const MAX_IDS_PER_PROTOCOL = 5_000;
 const MAX_SCOPES = 240;
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
 const CHAIN_RE = /^[a-z0-9-]{1,32}$/;
+const DEPLOYMENT_RE = /^[a-z0-9-]{1,64}$/;
 
 const memory = new Map();
 const store = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
@@ -40,6 +45,16 @@ function cleanTokenId(value) {
   }
 }
 
+function cleanAddress(value) {
+  const address = String(value || '').trim().toLowerCase();
+  return ADDRESS_RE.test(address) ? address : null;
+}
+
+function cleanDeploymentId(value) {
+  const deploymentId = String(value || '').trim().toLowerCase();
+  return DEPLOYMENT_RE.test(deploymentId) ? deploymentId : null;
+}
+
 export function normalizeCurrentPositionIds(values) {
   const ids = [];
   const seen = new Set();
@@ -56,6 +71,132 @@ export function normalizeCurrentPositionIds(values) {
   });
 }
 
+function configuredDeployment(chainKey, deploymentId, manager) {
+  const cleanManager = cleanAddress(manager);
+  const cleanId = cleanDeploymentId(deploymentId);
+  if (cleanId) {
+    const deployment = v3Deployment(chainKey, cleanId);
+    if (!deployment || (cleanManager && cleanAddress(deployment.nfpm) !== cleanManager)) return null;
+    return deployment;
+  }
+  if (cleanManager) {
+    return v3DeploymentsFor(chainKey).find((deployment) => (
+      cleanAddress(deployment.nfpm) === cleanManager
+    )) || null;
+  }
+  return v3Deployment(chainKey);
+}
+
+function cleanV3Record(raw, chainKey) {
+  const source = raw && typeof raw === 'object' ? raw : { tokenId: raw };
+  const tokenId = cleanTokenId(source.tokenId ?? source.id);
+  if (source.deploymentId !== undefined && !cleanDeploymentId(source.deploymentId)) return null;
+  if (source.manager !== undefined && !cleanAddress(source.manager)) return null;
+  if (source.custodian !== undefined && source.custodian !== null
+      && !cleanAddress(source.custodian)) return null;
+  const deployment = configuredDeployment(chainKey, source.deploymentId, source.manager);
+  const manager = cleanAddress(deployment?.nfpm);
+  const deploymentId = cleanDeploymentId(deployment?.id);
+  const custody = source.custody === undefined
+    ? 'wallet' : String(source.custody || '').trim().toLowerCase();
+  const custodian = source.custodian === undefined || source.custodian === null
+    ? null : cleanAddress(source.custodian);
+  if (tokenId === null || !deploymentId || !manager || !['wallet', 'gauge'].includes(custody)) {
+    return null;
+  }
+  // A gauge-held NFT cannot be proven from a wallet ownerOf check. Preserve it
+  // only when the exact custody contract was discovered too.
+  if (custody === 'gauge' && !custodian) return null;
+  return {
+    tokenId,
+    deploymentId,
+    manager,
+    custody,
+    ...(custodian ? { custodian } : {}),
+  };
+}
+
+function v3RecordKey(record) {
+  return [
+    record.deploymentId,
+    record.manager,
+    record.custody,
+    record.custodian || '',
+    record.tokenId,
+  ].join(':');
+}
+
+function v3NftKey(record) {
+  return `${record.manager}:${record.tokenId}`;
+}
+
+function normalizeCurrentV3RecordSet(values, chainValue) {
+  const chainKey = cleanChainKey(chainValue);
+  if (!chainKey) return { records: [], rejected: true };
+  const byNft = new Map();
+  const conflicted = new Set();
+  let rejected = false;
+  for (const raw of Array.isArray(values) ? values : []) {
+    const record = cleanV3Record(raw, chainKey);
+    if (!record) { rejected = true; continue; }
+    const nftKey = v3NftKey(record);
+    if (conflicted.has(nftKey)) continue;
+    const previous = byNft.get(nftKey);
+    if (previous && v3RecordKey(previous) !== v3RecordKey(record)) {
+      byNft.delete(nftKey);
+      conflicted.add(nftKey);
+      rejected = true;
+      continue;
+    }
+    if (!previous) byNft.set(nftKey, record);
+  }
+  const records = [...byNft.values()].sort((a, b) => (
+    a.deploymentId.localeCompare(b.deploymentId)
+      || a.manager.localeCompare(b.manager)
+      || (BigInt(a.tokenId) < BigInt(b.tokenId) ? -1 : BigInt(a.tokenId) > BigInt(b.tokenId) ? 1 : 0)
+      || a.custody.localeCompare(b.custody)
+      || String(a.custodian || '').localeCompare(String(b.custodian || ''))
+  ));
+  if (records.length > MAX_IDS_PER_PROTOCOL) rejected = true;
+  return { records: records.slice(0, MAX_IDS_PER_PROTOCOL), rejected };
+}
+
+export function normalizeCurrentV3Records(values, chainValue) {
+  return normalizeCurrentV3RecordSet(values, chainValue).records;
+}
+
+function legacyV3Ids(records, chainKey) {
+  const deployment = v3Deployment(chainKey);
+  const manager = cleanAddress(deployment?.nfpm);
+  const deploymentId = cleanDeploymentId(deployment?.id);
+  return normalizeCurrentPositionIds((records || []).filter((record) => (
+    record.deploymentId === deploymentId && record.manager === manager
+      && record.custody === 'wallet'
+  )).map((record) => record.tokenId));
+}
+
+function isLegacyDefaultRecord(record, chainKey) {
+  const deployment = v3Deployment(chainKey);
+  return record.deploymentId === cleanDeploymentId(deployment?.id)
+    && record.manager === cleanAddress(deployment?.nfpm) && record.custody === 'wallet';
+}
+
+function cleanV3Protocol(raw, chainKey) {
+  if (!raw || typeof raw !== 'object') {
+    return { complete: false, records: [], ids: [] };
+  }
+  const values = Array.isArray(raw.records) ? raw.records : raw.ids;
+  const { records, rejected } = normalizeCurrentV3RecordSet(values, chainKey);
+  return {
+    complete: raw.complete === true && !rejected,
+    records,
+    // Compatibility for the shipped popup/current scanner. It receives only
+    // default-manager, wallet-custodied IDs and therefore cannot accidentally
+    // query an UP33 token ID against the Uniswap manager.
+    ids: legacyV3Ids(records, chainKey),
+  };
+}
+
 function cleanProtocol(raw) {
   if (!raw || typeof raw !== 'object') return { complete: false, ids: [] };
   return {
@@ -65,7 +206,8 @@ function cleanProtocol(raw) {
 }
 
 function cleanScope(raw, owner, chainKey) {
-  if (!raw || typeof raw !== 'object' || raw.version !== VERSION) return null;
+  if (!raw || typeof raw !== 'object'
+      || ![LEGACY_VERSION, VERSION].includes(raw.version)) return null;
   const storedOwner = cleanOwner(raw.owner);
   const storedChain = cleanChainKey(raw.chainKey);
   if (storedOwner !== owner || storedChain !== chainKey) return null;
@@ -77,7 +219,10 @@ function cleanScope(raw, owner, chainKey) {
       ? raw.fullScanAt : null,
     refreshedAt: Number.isFinite(raw.refreshedAt) && raw.refreshedAt > 0
       ? raw.refreshedAt : null,
-    v3: cleanProtocol(raw.v3),
+    // v1 stored only IDs. They can safely mean only the chain's historical
+    // default manager and direct wallet custody. No alternate deployment or
+    // gauge ownership is inferred during migration.
+    v3: cleanV3Protocol(raw.v3, chainKey),
     v4: cleanProtocol(raw.v4),
   };
 }
@@ -121,6 +266,19 @@ function mergeProtocol(previous, incoming) {
   };
 }
 
+function mergeV3Protocol(previous, incoming, chainKey) {
+  const next = cleanV3Protocol(incoming, chainKey);
+  if (next.complete) return next;
+  const byNft = new Map((previous.records || []).map((record) => [v3NftKey(record), record]));
+  for (const record of next.records) byNft.set(v3NftKey(record), record);
+  const records = normalizeCurrentV3Records([...byNft.values()], chainKey);
+  return {
+    complete: false,
+    records,
+    ids: legacyV3Ids(records, chainKey),
+  };
+}
+
 /**
  * Apply one full-discovery job. Complete protocol discovery replaces that
  * protocol's IDs, including a proven empty set. Partial discovery only merges
@@ -139,13 +297,13 @@ export async function writeFullDiscoveryScope({
     chainKey,
     fullScanAt: null,
     refreshedAt: null,
-    v3: { complete: false, ids: [] },
+    v3: { complete: false, records: [], ids: [] },
     v4: { complete: false, ids: [] },
   };
   const value = {
     ...previous,
     fullScanAt: Number.isFinite(at) && at > 0 ? at : Date.now(),
-    v3: mergeProtocol(previous.v3, discovery.v3),
+    v3: mergeV3Protocol(previous.v3, discovery.v3, chainKey),
     v4: mergeProtocol(previous.v4, discovery.v4),
   };
   try {
@@ -169,10 +327,34 @@ export async function writeCurrentRefreshScope({
   if (!owner || !chainKey || !ids || typeof ids !== 'object') return false;
   const previous = await readCurrentPositionScope(owner, chainKey);
   if (!previous) return false;
+  const hasExplicitRecords = Object.hasOwn(ids, 'v3Records')
+    || (ids.v3 && typeof ids.v3 === 'object' && !Array.isArray(ids.v3));
+  const incomingV3 = Object.hasOwn(ids, 'v3Records') ? ids.v3Records : ids.v3;
+  let nextV3 = previous.v3;
+  if (incomingV3 !== undefined && hasExplicitRecords) {
+    nextV3 = cleanV3Protocol({
+      complete: previous.v3.complete,
+      ...(Array.isArray(incomingV3) ? { records: incomingV3 } : incomingV3),
+    }, chainKey);
+  } else if (Array.isArray(incomingV3)) {
+    // The shipped v1 current scanner knows only the historical default
+    // manager. Replace that subset but retain alternate-manager and gauge
+    // records it cannot verify or disprove.
+    const legacy = cleanV3Protocol({ complete: previous.v3.complete, ids: incomingV3 }, chainKey);
+    const records = normalizeCurrentV3Records([
+      ...previous.v3.records.filter((record) => !isLegacyDefaultRecord(record, chainKey)),
+      ...legacy.records,
+    ], chainKey);
+    nextV3 = {
+      complete: legacy.complete,
+      records,
+      ids: legacyV3Ids(records, chainKey),
+    };
+  }
   const value = {
     ...previous,
     refreshedAt: Number.isFinite(at) && at > 0 ? at : Date.now(),
-    v3: { ...previous.v3, ids: normalizeCurrentPositionIds(ids.v3 ?? previous.v3.ids) },
+    v3: nextV3,
     v4: { ...previous.v4, ids: normalizeCurrentPositionIds(ids.v4 ?? previous.v4.ids) },
   };
   try {

@@ -28,6 +28,7 @@ const OTHER = `0x${'22'.repeat(20)}`;
 const TOKEN0 = `0x${'33'.repeat(20)}`;
 const TOKEN1 = `0x${'44'.repeat(20)}`;
 const POOL = `0x${'55'.repeat(20)}`;
+const OTHER_MANAGER = `0x${'66'.repeat(20)}`;
 
 function position(overrides = {}) {
   return {
@@ -70,6 +71,13 @@ const key = delta.positionRefreshKey(first);
 assert.match(key, /^delta:v1:ethereum:0x[0-9a-f]{40}:0x[0-9a-f]{40}:v3:7$/);
 assert.notEqual(delta.positionRefreshKey(position({ ownerAddress: OTHER })), key);
 assert.notEqual(delta.positionRefreshKey(position({ tokenId: 8n })), key);
+assert.notEqual(delta.positionRefreshKey(position({ manager: OTHER_MANAGER })), key,
+  'equal token IDs in different managers must not share a refresh baseline');
+assert.equal(delta.positionRefreshKey(position({ manager: 'bad' })), null,
+  'an explicit malformed manager must not inherit the default baseline');
+assert.equal(delta.positionRefreshKey(position({
+  manager: key.match(/delta:v1:ethereum:(0x[0-9a-f]{40}):/)[1],
+})), key, 'an explicit default manager remains compatible with legacy positions');
 assert.equal(delta.positionRefreshKey(position({ chainKey: 'unknown' })), null);
 
 const acceptedSidePanel = {

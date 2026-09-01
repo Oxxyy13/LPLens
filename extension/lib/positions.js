@@ -1,8 +1,13 @@
-import { CHAINS, MAX_POSITIONS } from './chains.js';
+import {
+  CHAINS, MAX_POSITIONS, v3Deployment, v3DeploymentsFor,
+} from './chains.js';
 import {
   dataBalanceOf, dataTokenOfOwnerByIndex, dataPositions, dataSlot0,
   dataGetPool, dataCollect, dataOwnerOf, decodePositions, decodeSlot0, decodeCollect,
-  decodeSymbol, SELECTOR, toUint, toAddress, words, encUint,
+  dataSlipstreamGetPool, dataVoterPool, dataVoterGauge, dataIsPool, dataStakedValues,
+  dataStakedContains, dataEarnedCl, dataStoredClReward, decodeUintArrayBounded,
+  decodeSymbol, SELECTOR, toUint, toAddress,
+  words, encUint,
 } from './abi.js';
 import { ethCall, ethCallBatch, mapLimit } from './rpc.js';
 import {
@@ -10,6 +15,7 @@ import {
   historyChanged, mergeHistoryEvents, replaceHistoryTail,
   solveSqrtPrice, accounting, reconciles, lifetimeFees,
 } from './history.js';
+import { fetchExactTokenTransfers } from './logs.js';
 import {
   fingerprint, historyIdentity, readHistoryAny, writeHistory,
 } from './cache.js';
@@ -20,7 +26,64 @@ import {
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
+const gaugeCache = new Map(); // voter -> {at, gauges}; discovery acceleration only
 const HISTORY_REORG_OVERLAP = 128;
+const GAUGE_CACHE_MS = 5 * 60_000;
+const MAX_GAUGES = 2_000;
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** Total pending CL gauge emissions. Both components are required. */
+export function clGaugeRewardTotal(storedHex, earnedHex) {
+  const storedWord = storedHex ? words(storedHex)[0] : null;
+  const earnedWord = earnedHex ? words(earnedHex)[0] : null;
+  if (!storedWord || !earnedWord) return null;
+  try { return toUint(storedWord) + toUint(earnedWord); }
+  catch { return null; }
+}
+
+/**
+ * Prove that an NFT has remained in one wallet continuously since mint.
+ *
+ * Eligibility is intentionally stricter than reconstructing current ownership:
+ * exactly one mint directly to the current owner is required. Any later
+ * Transfer means the position may have accrued gauge emissions or other
+ * custody-only value that LPLens cannot reconstruct yet. Ambiguity therefore
+ * withholds lifetime figures.
+ */
+export function uninterruptedDirectCustody(events, expectedOwner, tokenId) {
+  const owner = String(expectedOwner || '').toLowerCase();
+  let id;
+  try { id = BigInt(tokenId); } catch {
+    return { ok: false, reason: 'invalid NFT identity' };
+  }
+  if (!/^0x[0-9a-f]{40}$/.test(owner) || !Array.isArray(events) || !events.length) {
+    return { ok: false, reason: 'direct-from-mint custody is unproven' };
+  }
+  const rows = [...events].sort((a, b) => (Number(a.block) - Number(b.block))
+    || (Number(a.index) - Number(b.index)));
+  const validRow = (row) => {
+    try {
+      return BigInt(row.tokenId) === id
+        && /^0x[0-9a-f]{40}$/.test(String(row.from || '').toLowerCase())
+        && /^0x[0-9a-f]{40}$/.test(String(row.to || '').toLowerCase())
+        && Number.isSafeInteger(Number(row.block))
+        && Number.isSafeInteger(Number(row.index));
+    } catch { return false; }
+  };
+  if (rows.some((row) => !validRow(row))) {
+    return { ok: false, reason: 'NFT Transfer history is malformed' };
+  }
+
+  const first = rows[0];
+  if (String(first.from).toLowerCase() !== ZERO_ADDRESS
+      || String(first.to).toLowerCase() !== owner) {
+    return { ok: false, reason: 'NFT was not minted directly to this wallet' };
+  }
+  if (rows.length !== 1) {
+    return { ok: false, reason: 'NFT left direct wallet custody' };
+  }
+  return { ok: true };
+}
 
 /**
  * Exact USD token-price moves from the first liquidity addition to now.
@@ -174,9 +237,16 @@ const PRICE_MEMO = new Map();
 const PRICE_MEMO_TTL_MS = 60_000;
 const PRICE_MEMO_MAX = 500;
 
-function tagPosition(p, chainKey) {
-  const protocol = CHAINS[chainKey] && CHAINS[chainKey].protocol;
-  return { ...p, chainKey, version: p.version || 'v3', protocol: p.protocol || protocol || null };
+function tagPosition(p, chainKey, deployment = null) {
+  const chainProtocol = CHAINS[chainKey] && CHAINS[chainKey].protocol;
+  return {
+    ...p,
+    chainKey,
+    version: p.version || 'v3',
+    deploymentId: p.deploymentId || deployment?.id || null,
+    manager: p.manager || deployment?.nfpm || null,
+    protocol: p.protocol || deployment?.protocol || chainProtocol || null,
+  };
 }
 
 /**
@@ -187,116 +257,145 @@ export async function loadPositions(chainKey, owner, opts = {}) {
   const chain = CHAINS[chainKey];
   if (!chain) throw new Error(`unknown chain ${chainKey}`);
   const rpc = opts.rpcOverride || chain.rpc;
-  const includeClosed = !!opts.includeClosed;
-
-  const balHex = await ethCall(rpc, chain.nfpm, dataBalanceOf(owner));
-  const count = Number(toUint(words(balHex)[0] || '0'));
-
-  if (count === 0) {
-    // Zero v3 NFTs does NOT mean zero positions. v4 holdings live in a
-    // different contract and are found through Transfer logs, not through this
-    // balanceOf, so v4 must still be scanned. This used to return here with a
-    // hardcoded empty v4, which rendered a v4-only wallet as "no positions" —
-    // and with `unavailable: null` it asserted zero rather than admitting it
-    // had not looked. Silently claiming an empty result is the one failure
-    // this project does not accept.
-    const v4 = await scanV4(chainKey, owner, opts);
-    let positions = v4.positions.map((p) => tagPosition(p, chainKey));
-    if (opts.withUsd) {
-      positions = (await mapLimit(positions, 2, async (p) => {
-        try { return await attachUsd(chainKey, p, opts); }
-        catch { return p; }
-      })).filter((p) => p && !p.__error);
+  const configuredDeployments = v3DeploymentsFor(chainKey);
+  const requestedDeploymentIds = Array.isArray(opts.v3DeploymentIds)
+    ? new Set(opts.v3DeploymentIds.map((value) => String(value || '').trim().toLowerCase()))
+    : null;
+  const deployments = requestedDeploymentIds
+    ? configuredDeployments.filter((deployment) => requestedDeploymentIds.has(deployment.id))
+    : configuredDeployments;
+  if (!deployments.length) throw new Error(`no requested v3 deployment on ${chainKey}`);
+  const deploymentRows = await mapLimit(deployments, 1, async (deployment) => {
+    try {
+      return await loadV3Deployment(
+        rpc, chain, chainKey, deployment, owner, !!opts.includeClosed, opts,
+      );
+    } catch (error) {
+      return {
+        deployment,
+        unavailable: error.message || String(error),
+        count: 0,
+        attempted: 0,
+        scanned: 0,
+        enumUnreadable: 0,
+        positionUnreadable: 0,
+        closedHidden: 0,
+        truncated: false,
+        positions: [],
+        discovery: { complete: false, ids: [], records: [] },
+      };
     }
-    return {
-      chain: chainKey, count: 0, scanned: 0, truncated: false, stoppedEarly: false,
-      attempted: 0, enumUnreadable: 0, positionUnreadable: 0, closedHidden: 0,
-      positions, v4,
-      enumSource: 'empty',
-      discovery: {
-        v3: { complete: true, ids: [] },
-        v4: v4.discovery,
-      },
-    };
-  }
+  });
 
-  // NFPM is ERC721Enumerable, so this avoids eth_getLogs range limits entirely.
-  //
-  // Scan DOWN from the newest index. `tokenOfOwnerByIndex` returns tokens in
-  // acquisition order, so index 0 is the oldest position ever held and
-  // `count - 1` the newest. Closed positions accumulate at the bottom of that
-  // list while open ones cluster at the top, so scanning up from 0 spends the
-  // entire cap on dead positions: verified 2026-08-18 against a Robinhood
-  // Chain wallet holding 67 positions whose single open position sat at index
-  // 66, which rendered as an empty list.
-  //
-  // Do NOT skip tokenIds whose previous positions() read looked closed. A
-  // position with zero liquidity and zero owed is not permanently dead —
-  // increaseLiquidity can be called on any tokenId whose NFT has not been
-  // burned, so a "closed" position can come back to life and would then be
-  // invisible until the cache happened to be rebuilt.
-  // Re-enumerate ownership on every load. ERC721Enumerable uses swap-and-pop:
-  // mint D then transfer B can change [A,B,C] to [A,D,C] while both balanceOf
-  // and the newest token stay unchanged. No constant-size cache sentinel can
-  // prove the set did not change.
-  const v3 = await scanV3Holdings(rpc, chain, owner, count, includeClosed);
-  const { live, scanned } = v3;
-
-  const enriched = await mapLimit(live, 3, (p) =>
-    retryRead(() => enrichPosition(rpc, chain, chainKey, owner, p), 2));
-
-  const rendered = enriched.filter((p) => p && !p.__error);
-  const enrichUnreadable = enriched.length - rendered.length;
-
-  // Lifetime history is fetched only for positions that will actually render,
-  // so its cost scales with what you see rather than with what was scanned —
-  // one eth_getLogs per visible card. An endpoint that refuses wide ranges
-  // degrades to `history.unavailable`; it never fails the whole load.
-  // Wide eth_getLogs needs a better endpoint than present-state reads do, so
-  // history gets its own source descriptor. Etherscan wins when a user key
-  // exists; a refusal (including the HTTP-200 Base paywall) falls through to
-  // the licensed Blockscout Pro relay, then public Blockscout, then RPC.
-  const source = historySource(chain, rpc, opts);
-  const withHistory = await mapLimit(
-    rendered, 3, (p) => attachHistory(source, chainKey, chain, p),
-  );
-
-  const v3Positions = withHistory.filter((p) => p && !p.__error);
-  const historyUnreadable = withHistory.length - v3Positions.length;
-  const v4 = await scanV4(chainKey, owner, opts);
-
+  const v4 = opts.skipV4 === true ? {
+    positions: [], held: 0, shown: 0, closedHidden: 0, unreadable: 0,
+    unavailable: null, source: 'skipped', discovery: { complete: true, ids: [] },
+  } : await scanV4(chainKey, owner, opts);
   let positions = [
-    ...v3Positions.map((p) => tagPosition(p, chainKey)),
-    ...v4.positions.map((p) => tagPosition(p, chainKey)),
+    ...deploymentRows.flatMap((row) => row.positions || []),
+    ...v4.positions.map((position) => tagPosition(position, chainKey)),
   ];
-  // Popup aggregate totals need the same USD object the overlay already
-  // attaches. Off by default so a caller that only wants enumeration is
-  // not charged extra archive reads.
   if (opts.withUsd) {
-    const priced = await mapLimit(positions, 2, async (p) => {
-      try { return await attachUsd(chainKey, p, opts); }
-      catch { return p; }
-    });
-    positions = priced.filter((p) => p && !p.__error);
+    positions = (await mapLimit(positions, 2, async (position) => {
+      try { return await attachUsd(chainKey, position, opts); }
+      catch { return position; }
+    })).filter((position) => position && !position.__error);
   }
 
+  const sum = (name) => deploymentRows.reduce((total, row) => total + Number(row[name] || 0), 0);
+  const defaultDeployment = configuredDeployments[0];
+  const defaultRow = deploymentRows.find((row) => row.deployment.id === defaultDeployment?.id);
+  const records = deploymentRows.flatMap((row) => row.discovery?.records || []);
   return {
     chain: chainKey,
-    count,
-    scanned,
-    attempted: v3.attempted,
-    enumUnreadable: v3.enumUnreadable,
-    positionUnreadable: v3.positionUnreadable + enrichUnreadable + historyUnreadable,
-    closedHidden: v3.closedHidden,
-    truncated: count > v3.attempted,
+    count: sum('count'),
+    scanned: sum('scanned'),
+    attempted: sum('attempted'),
+    enumUnreadable: sum('enumUnreadable'),
+    positionUnreadable: sum('positionUnreadable'),
+    closedHidden: sum('closedHidden'),
+    truncated: deploymentRows.some((row) => row.truncated),
     stoppedEarly: false,
-    enumSource: 'rpc-verified',
+    enumSource: deployments.length > 1 ? 'rpc-verified-deployments' : 'rpc-verified',
+    deploymentIssues: deploymentRows.filter((row) => row.unavailable).map((row) => ({
+      deploymentId: row.deployment.id,
+      protocol: row.deployment.protocol,
+      error: row.unavailable,
+    })),
     positions,
     v4,
     discovery: {
-      v3: v3.discovery,
+      v3: {
+        complete: deployments.length === configuredDeployments.length
+          && deploymentRows.every((row) => row.discovery?.complete === true),
+        // Legacy readers attribute bare IDs only to the default deployment.
+        ids: defaultRow?.discovery?.ids || [],
+        records,
+      },
       v4: v4.discovery,
     },
+  };
+}
+
+async function loadV3Deployment(
+  rpc, chain, chainKey, deployment, owner, includeClosed, opts,
+) {
+  const balanceHex = await ethCall(rpc, deployment.nfpm, dataBalanceOf(owner));
+  const directCount = Number(toUint(words(balanceHex)[0] || '0'));
+  const direct = await scanV3Holdings(
+    rpc, chain, deployment, owner, directCount, includeClosed,
+  );
+  const staked = deployment.kind === 'slipstream'
+    ? await scanSlipstreamStakes(rpc, chain, deployment, owner, includeClosed)
+    : emptyV3Discovery();
+  // A deposit can land between wallet enumeration and gauge enumeration. In
+  // that case the same manager/tokenId is visible through both paths during
+  // one unpinned `latest` scan. The gauge row has the later beneficial-owner
+  // proof, so insert it last and let it replace the stale wallet row.
+  const byNft = new Map();
+  for (const position of [...direct.live, ...staked.live]) {
+    const key = `${String(position.manager || deployment.nfpm).toLowerCase()}:${position.tokenId}`;
+    byNft.set(key, position);
+  }
+  const live = [...byNft.values()];
+  const enriched = await mapLimit(live, 3, (position) => retryRead(() =>
+    enrichPosition(rpc, chain, chainKey, deployment, owner, position), 2));
+  const rendered = enriched.filter((position) => position && !position.__error && !position.error);
+  const enrichUnreadable = enriched.length - rendered.length;
+  const source = historySource(chain, rpc, opts);
+  const withHistory = await mapLimit(rendered, 3, (position) =>
+    attachDeploymentHistory(source, chainKey, deployment, position, owner));
+  const positions = withHistory.filter((position) => position && !position.__error)
+    .map((position) => tagPosition(position, chainKey, deployment));
+  const recordsByNft = new Map();
+  for (const record of [...direct.discovery.records, ...staked.discovery.records]) {
+    recordsByNft.set(`${String(record.manager).toLowerCase()}:${record.tokenId}`, record);
+  }
+  const records = [...recordsByNft.values()];
+  return {
+    deployment,
+    count: directCount + staked.count,
+    attempted: direct.attempted + staked.attempted,
+    scanned: direct.scanned + staked.scanned,
+    enumUnreadable: direct.enumUnreadable + staked.enumUnreadable,
+    positionUnreadable: direct.positionUnreadable + staked.positionUnreadable
+      + enrichUnreadable,
+    closedHidden: direct.closedHidden + staked.closedHidden,
+    truncated: directCount > direct.attempted || staked.truncated,
+    positions,
+    discovery: {
+      complete: direct.discovery.complete && staked.discovery.complete,
+      ids: direct.discovery.ids,
+      records,
+    },
+  };
+}
+
+function emptyV3Discovery() {
+  return {
+    live: [], count: 0, attempted: 0, scanned: 0, enumUnreadable: 0,
+    positionUnreadable: 0, closedHidden: 0, truncated: false,
+    discovery: { complete: true, ids: [], records: [] },
   };
 }
 
@@ -410,8 +509,24 @@ function rememberedIds(scope, version) {
   return out;
 }
 
+function rememberedV3Records(scope, chainKey) {
+  const rows = Array.isArray(scope?.v3?.records) ? scope.v3.records : [];
+  if (rows.length) return rows.map((record) => ({ ...record, tokenId: BigInt(record.tokenId) }));
+  const deployment = v3Deployment(chainKey);
+  if (!deployment) return [];
+  return rememberedIds(scope, 'v3').map((tokenId) => ({
+    tokenId,
+    deploymentId: deployment.id,
+    manager: deployment.nfpm.toLowerCase(),
+    custody: 'wallet',
+  }));
+}
+
 function positionIsClosed(version, position) {
   if (version === 'v4') return position.liquidity === 0n;
+  // Gauge membership remains economically live after liquidity is removed:
+  // stored and newly accrued UP rewards can still be claimable until withdraw.
+  if (position.custody === 'gauge') return false;
   return position.liquidity === 0n
     && position.tokensOwed0 === 0n
     && position.tokensOwed1 === 0n;
@@ -426,40 +541,137 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
   }
   const rpc = opts.rpcOverride || chain.rpc;
   const wanted = [
-    ...rememberedIds(scope, 'v3').map((tokenId) => ({ version: 'v3', tokenId })),
+    ...rememberedV3Records(scope, chainKey).map((record) => ({
+      version: 'v3',
+      ...record,
+    })),
     ...rememberedIds(scope, 'v4').map((tokenId) => ({ version: 'v4', tokenId })),
   ];
   const ownerHexes = await readMany(rpc, wanted.map((item) => ({
-    to: item.version === 'v4' ? chain.v4PositionManager : chain.nfpm,
+    to: item.version === 'v4' ? chain.v4PositionManager : item.manager,
     data: dataOwnerOf(item.tokenId),
   })), chain.rpcBatchSize);
 
   const expectedOwner = String(owner).toLowerCase();
   const verified = [];
-  const keep = { v3: [], v4: [] };
+  const defaultV3 = v3Deployment(chainKey);
+  const keep = { v3: [], v3Records: [], v4: [] };
+  const keepItem = (item) => {
+    if (item.version === 'v4') keep.v4.push(item.tokenId.toString());
+    else {
+      keep.v3Records.push({
+        tokenId: item.tokenId.toString(),
+        deploymentId: item.deploymentId,
+        manager: item.manager,
+        custody: item.custody,
+        ...(item.custodian ? { custodian: item.custodian } : {}),
+      });
+      if (item.deploymentId === defaultV3?.id && item.custody === 'wallet') {
+        keep.v3.push(item.tokenId.toString());
+      }
+    }
+  };
   let enumUnreadable = 0;
+  const ownership = [];
   for (let i = 0; i < wanted.length; i++) {
     const item = wanted[i], hex = ownerHexes[i];
     if (!hex || hex.__error) {
       enumUnreadable++;
-      keep[item.version].push(item.tokenId.toString());
+      keepItem(item);
       continue;
     }
     let actual;
     try { actual = toAddress(words(hex)[0]).toLowerCase(); }
     catch {
       enumUnreadable++;
-      keep[item.version].push(item.tokenId.toString());
+      keepItem(item);
       continue;
     }
-    // A different owner is positive proof that this remembered ID no longer
-    // belongs in the fast index. No Transfer replay is required.
-    if (actual === expectedOwner) verified.push(item);
+    ownership.push({ item, actual });
+  }
+
+  const gaugeProofItems = [];
+  const gaugeDiscovery = new Map();
+  for (const row of ownership) {
+    const { item, actual } = row;
+    if (item.version === 'v4') {
+      if (actual === expectedOwner) verified.push(item);
+      continue;
+    }
+    const deployment = v3Deployment(chainKey, item.deploymentId);
+    if (!deployment || String(deployment.nfpm).toLowerCase() !== item.manager) {
+      enumUnreadable++;
+      keepItem(item);
+      continue;
+    }
+    if (deployment.kind !== 'slipstream') {
+      if (actual === expectedOwner) verified.push(item);
+      continue;
+    }
+    if (actual === expectedOwner) {
+      const walletItem = { ...item, custody: 'wallet' };
+      delete walletItem.custodian;
+      verified.push(walletItem);
+      continue;
+    }
+
+    let isConfiguredGauge = item.custody === 'gauge' && actual === item.custodian;
+    if (!isConfiguredGauge) {
+      let discovered = gaugeDiscovery.get(deployment.id);
+      if (!discovered) {
+        try {
+          discovered = await slipstreamGauges(rpc, chain, deployment);
+          gaugeDiscovery.set(deployment.id, discovered);
+        } catch {
+          enumUnreadable++;
+          keepItem(item);
+          continue;
+        }
+      }
+      isConfiguredGauge = discovered.gauges.includes(actual);
+      if (!isConfiguredGauge && !discovered.complete) {
+        enumUnreadable++;
+        keepItem(item);
+        continue;
+      }
+    }
+    // A different non-gauge owner is positive proof of transfer. A configured
+    // gauge still needs the protocol's beneficial-ownership proof.
+    if (isConfiguredGauge) gaugeProofItems.push({ item, actual });
+  }
+
+  const gaugeProofHexes = await readMany(rpc, gaugeProofItems.map(({ item, actual }) => ({
+    to: actual,
+    data: dataStakedContains(owner, item.tokenId),
+  })), chain.rpcBatchSize);
+  for (let index = 0; index < gaugeProofItems.length; index++) {
+    const { item, actual } = gaugeProofItems[index];
+    const proof = gaugeProofHexes[index];
+    if (!proof || proof.__error) {
+      enumUnreadable++;
+      keepItem(item);
+      continue;
+    }
+    let contained;
+    try { contained = toUint(words(proof)[0] || '0') !== 0n; }
+    catch {
+      enumUnreadable++;
+      keepItem(item);
+      continue;
+    }
+    if (contained) verified.push({ ...item, custody: 'gauge', custodian: actual });
   }
 
   const loaded = await mapLimit(verified, 3, async (item) => ({
     item,
-    position: await loadPositionByVersion(chainKey, item.version, item.tokenId, opts),
+    position: item.version === 'v4'
+      ? await loadPositionByVersion(chainKey, item.version, item.tokenId, opts)
+      : await loadV3Position(chainKey, item.deploymentId, item.tokenId, {
+        ...opts,
+        ownerOverride: owner,
+        custody: item.custody,
+        custodian: item.custodian,
+      }),
   }));
   const positions = [];
   let positionUnreadable = 0;
@@ -471,7 +683,7 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
     if (!row || row.__error || !row.position) {
       if (item.version === 'v4') v4Unreadable++;
       else positionUnreadable++;
-      keep[item.version].push(item.tokenId.toString());
+      keepItem(item);
       continue;
     }
     const position = row.position;
@@ -482,7 +694,7 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
         continue;
       }
     } else {
-      keep[item.version].push(item.tokenId.toString());
+      keepItem(item);
     }
     positions.push(tagPosition(position, chainKey));
   }
@@ -520,6 +732,174 @@ export async function loadAllChains(owner, opts = {}) {
   return loadSweep([owner], Object.keys(CHAINS), opts);
 }
 
+async function slipstreamGauges(rpc, chain, deployment) {
+  const key = [
+    deployment.chainKey,
+    deployment.id,
+    String(deployment.voter || '').toLowerCase(),
+    String(rpc || '').trim().toLowerCase(),
+  ].join('|');
+  const cached = gaugeCache.get(key);
+  if (cached && Date.now() - cached.at < GAUGE_CACHE_MS) {
+    return { gauges: cached.gauges, complete: true, source: 'memory' };
+  }
+  // The voter contains only active/incentivized pools, while the CL factory's
+  // historical allPools list is much larger. Classify each voter pool through
+  // the factory's on-chain isPool proof so v2 gauges never receive a CL call.
+  const lengthHex = await ethCall(rpc, deployment.voter, SELECTOR.voterLength);
+  const count = Number(toUint(words(lengthHex)[0] || '0'));
+  if (!Number.isSafeInteger(count) || count < 0 || count > MAX_GAUGES) {
+    throw new Error('UP33 gauge count is outside the safety limit');
+  }
+  const poolHexes = await readMany(rpc, Array.from({ length: count }, (_, index) => ({
+    to: deployment.voter,
+    data: dataVoterPool(index),
+  })), chain.rpcBatchSize);
+  const pools = [];
+  let unreadable = 0;
+  for (const raw of poolHexes) {
+    try {
+      if (!raw || raw.__error) throw new Error('pool unreadable');
+      const pool = toAddress(words(raw)[0]);
+      if (!/^0x0{40}$/.test(pool)) pools.push(pool);
+    } catch { unreadable++; }
+  }
+  const classificationHexes = await readMany(rpc, pools.map((pool) => ({
+    to: deployment.factory,
+    data: dataIsPool(pool),
+  })), chain.rpcBatchSize);
+  const clPools = [];
+  for (let index = 0; index < pools.length; index++) {
+    const raw = classificationHexes[index];
+    try {
+      if (!raw || raw.__error) throw new Error('pool classification unreadable');
+      if (toUint(words(raw)[0] || '0') !== 0n) clPools.push(pools[index]);
+    } catch { unreadable++; }
+  }
+  const gaugeHexes = await readMany(rpc, clPools.map((pool) => ({
+    to: deployment.voter,
+    data: dataVoterGauge(pool),
+  })), chain.rpcBatchSize);
+  const gauges = [];
+  for (const raw of gaugeHexes) {
+    try {
+      if (!raw || raw.__error) throw new Error('gauge unreadable');
+      const gauge = toAddress(words(raw)[0]).toLowerCase();
+      if (!/^0x0{40}$/.test(gauge) && !gauges.includes(gauge)) gauges.push(gauge);
+    } catch { unreadable++; }
+  }
+  const complete = unreadable === 0 && pools.length === count;
+  if (complete) gaugeCache.set(key, { at: Date.now(), gauges });
+  return { gauges, complete, source: 'voter', unreadable };
+}
+
+/** Discover Slipstream NFTs held in gauge custody for a beneficial owner. */
+async function scanSlipstreamStakes(rpc, chain, deployment, owner, includeClosed) {
+  const discovered = await slipstreamGauges(rpc, chain, deployment);
+  const stakeHexes = await readMany(rpc, discovered.gauges.map((gauge) => ({
+    to: gauge,
+    data: dataStakedValues(owner),
+  })), chain.rpcBatchSize);
+  const candidates = [];
+  let enumUnreadable = Number(discovered.unreadable || 0);
+  let truncated = false;
+  for (let index = 0; index < discovered.gauges.length; index++) {
+    const raw = stakeHexes[index];
+    if (!raw || raw.__error) { enumUnreadable++; continue; }
+    const remaining = Math.max(0, MAX_POSITIONS + 1 - candidates.length);
+    if (!remaining) { truncated = true; break; }
+    const decoded = decodeUintArrayBounded(raw, remaining);
+    if (!decoded) { enumUnreadable++; continue; }
+    if (decoded.truncated) truncated = true;
+    for (const tokenId of decoded.values) {
+      candidates.push({ tokenId, custodian: discovered.gauges[index] });
+    }
+    if (candidates.length > MAX_POSITIONS) { truncated = true; break; }
+  }
+  const wanted = candidates.slice(0, MAX_POSITIONS);
+  const positionHexes = await readMany(rpc, wanted.map((item) => ({
+    to: deployment.nfpm,
+    data: dataPositions(item.tokenId),
+  })), chain.rpcBatchSize);
+  const ownerHexes = await readMany(rpc, wanted.map((item) => ({
+    to: deployment.nfpm,
+    data: dataOwnerOf(item.tokenId),
+  })), chain.rpcBatchSize);
+  // This is deliberately the last ownership read. `stakedValues(owner)` can
+  // become stale while the unpinned scan is in flight, and ownerOf alone only
+  // proves that the gauge has custody, not which depositor is the beneficiary.
+  const custodyProofHexes = await readMany(rpc, wanted.map((item) => ({
+    to: item.custodian,
+    data: dataStakedContains(owner, item.tokenId),
+  })), chain.rpcBatchSize);
+  const live = [], records = [];
+  let scanned = 0, positionUnreadable = 0, closedHidden = 0;
+  for (let index = 0; index < wanted.length; index++) {
+    const item = wanted[index];
+    const custodyProof = custodyProofHexes[index];
+    if (!custodyProof || custodyProof.__error) {
+      enumUnreadable++;
+      continue;
+    }
+    let stillBeneficialOwner;
+    try { stillBeneficialOwner = toUint(words(custodyProof)[0] || '0') !== 0n; }
+    catch {
+      enumUnreadable++;
+      continue;
+    }
+    // A clean false is a resolved mid-scan withdrawal or ownership change,
+    // not an unreadable position and not this wallet's current holding.
+    if (!stillBeneficialOwner) continue;
+    try {
+      const actualCustodian = toAddress(words(ownerHexes[index])[0]).toLowerCase();
+      if (actualCustodian !== item.custodian) throw new Error('gauge custody changed');
+      const position = decodePositions(positionHexes[index], deployment.kind);
+      if (!position) throw new Error('position unreadable');
+      const row = {
+        tokenId: item.tokenId,
+        ...position,
+        deploymentId: deployment.id,
+        manager: deployment.nfpm,
+        protocol: deployment.protocol,
+        custody: 'gauge',
+        custodian: item.custodian,
+      };
+      scanned++;
+      // Proven gauge membership stays in the portfolio even after liquidity
+      // reaches zero because pending emissions can remain claimable.
+      const dead = row.custody !== 'gauge'
+        && row.liquidity === 0n && row.tokensOwed0 === 0n && row.tokensOwed1 === 0n;
+      if (!dead) records.push({
+        tokenId: row.tokenId.toString(),
+        deploymentId: deployment.id,
+        manager: deployment.nfpm,
+        custody: 'gauge',
+        custodian: item.custodian,
+      });
+      if (dead && !includeClosed) closedHidden++;
+      else live.push(row);
+    } catch {
+      positionUnreadable++;
+    }
+  }
+  return {
+    live,
+    count: candidates.length,
+    attempted: wanted.length,
+    scanned,
+    enumUnreadable,
+    positionUnreadable,
+    closedHidden,
+    truncated,
+    discovery: {
+      complete: discovered.complete && !truncated && enumUnreadable === 0
+        && positionUnreadable === 0,
+      ids: [],
+      records,
+    },
+  };
+}
+
 /**
  * Current v3 holdings, newest first.
  *
@@ -527,11 +907,26 @@ export async function loadAllChains(owner, opts = {}) {
  * every id. Closed NFTs are read too because increaseLiquidity can revive any
  * unburned token. Failures are counted instead of being filtered away.
  */
-export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = false) {
+export async function scanV3Holdings(
+  rpc, chain, deploymentOrOwner, ownerOrCount, countOrIncludeClosed, maybeIncludeClosed = false,
+) {
+  // Preserve the exported legacy test/helper signature while the application
+  // passes an explicit deployment descriptor.
+  const explicitDeployment = deploymentOrOwner && typeof deploymentOrOwner === 'object';
+  const deployment = explicitDeployment ? deploymentOrOwner : {
+    id: 'default',
+    protocol: chain.protocol || 'Uniswap',
+    kind: 'uniswap-v3',
+    nfpm: chain.nfpm,
+    factory: chain.factory,
+  };
+  const owner = explicitDeployment ? ownerOrCount : deploymentOrOwner;
+  const count = explicitDeployment ? countOrIncludeClosed : ownerOrCount;
+  const includeClosed = explicitDeployment ? maybeIncludeClosed : !!countOrIncludeClosed;
   const attempted = Math.min(count, MAX_POSITIONS);
   const indexes = Array.from({ length: attempted }, (_, i) => count - 1 - i);
   const idHexes = await readMany(rpc, indexes.map((index) => ({
-    to: chain.nfpm, data: dataTokenOfOwnerByIndex(owner, index),
+    to: deployment.nfpm, data: dataTokenOfOwnerByIndex(owner, index),
   })), chain.rpcBatchSize);
 
   const tokenIds = [];
@@ -548,7 +943,7 @@ export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = f
   let closedHidden = 0;
   const currentIds = [];
   const posHexes = await readMany(rpc, tokenIds.map((tokenId) => ({
-    to: chain.nfpm, data: dataPositions(tokenId),
+    to: deployment.nfpm, data: dataPositions(tokenId),
   })), chain.rpcBatchSize);
   for (let i = 0; i < tokenIds.length; i++) {
     const hex = posHexes[i];
@@ -557,13 +952,21 @@ export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = f
       currentIds.push(tokenIds[i]);
       continue;
     }
-    const pos = decodePositions(hex);
+    const pos = decodePositions(hex, deployment.kind);
     if (!pos) {
       positionUnreadable++;
       currentIds.push(tokenIds[i]);
       continue;
     }
-    const p = { tokenId: tokenIds[i], ...pos };
+    const p = {
+      tokenId: tokenIds[i],
+      ...pos,
+      deploymentId: deployment.id,
+      manager: deployment.nfpm,
+      protocol: deployment.protocol,
+      custody: 'wallet',
+      custodian: null,
+    };
     scanned++;
     const dead = p.liquidity === 0n && p.tokensOwed0 === 0n && p.tokensOwed1 === 0n;
     if (!dead) currentIds.push(p.tokenId);
@@ -575,6 +978,13 @@ export async function scanV3Holdings(rpc, chain, owner, count, includeClosed = f
     discovery: {
       complete: attempted === count && enumUnreadable === 0,
       ids: currentIds.map(String),
+      records: currentIds.map((tokenId) => ({
+        tokenId: String(tokenId),
+        deploymentId: deployment.id,
+        manager: deployment.nfpm,
+        custody: 'wallet',
+        custodian: null,
+      })),
     },
   };
 }
@@ -883,6 +1293,7 @@ export async function attachUsd(chainKey, p, opts = {}) {
       pnl: ret.pnl,
       pnlPct: ret.pnlPct,
       currentValue: currentNow,
+      currentValueIncomplete: p.custody === 'gauge' && currentNow === null,
       // Compatibility aliases for existing local harnesses and old consumers.
       // UI copy no longer calls gross additions a cost basis.
       costBasis: basis ? basis.basis : null,
@@ -917,28 +1328,61 @@ function historySource(chain, rpc, opts) {
  * composition, collectable. Shared by the address scan and the single-token
  * lookup so the two paths cannot drift apart.
  */
-async function enrichPosition(rpc, chain, chainKey, owner, p) {
-  const poolHex = await retryRead(() =>
-    ethCall(rpc, chain.factory, dataGetPool(p.token0, p.token1, p.fee)));
+async function enrichPosition(rpc, chain, chainKey, deployment, owner, p) {
+  const poolData = deployment.kind === 'slipstream'
+    ? dataSlipstreamGetPool(p.token0, p.token1, p.tickSpacing)
+    : dataGetPool(p.token0, p.token1, p.fee);
+  const poolHex = await retryRead(() => ethCall(rpc, deployment.factory, poolData));
   const pool = toAddress(words(poolHex)[0]);
   if (/^0x0{40}$/.test(pool)) return { ...p, error: 'pool not found' };
 
-  const [slotHex, t0, t1, collectHex] = await Promise.all([
+  const [
+    slotHex, t0, t1, collectHex, dynamicFeeHex, earnedRewardHex, storedRewardHex,
+  ] = await Promise.all([
     retryRead(() => ethCall(rpc, pool, dataSlot0())),
     tokenMeta(rpc, chainKey, p.token0),
     tokenMeta(rpc, chainKey, p.token1),
     // from == owner is required; collect() checks the caller is approved.
-    retryRead(() => ethCall(rpc, chain.nfpm, dataCollect(p.tokenId, owner), owner))
-      .catch(() => null),
+    p.custody === 'gauge' ? Promise.resolve(null)
+      : retryRead(() => ethCall(rpc, deployment.nfpm, dataCollect(p.tokenId, owner), owner))
+        .catch(() => null),
+    deployment.kind === 'slipstream'
+      ? retryRead(() => ethCall(rpc, pool, SELECTOR.poolFee)).catch(() => null)
+      : Promise.resolve(null),
+    p.custody === 'gauge'
+      ? retryRead(() => ethCall(rpc, p.custodian, dataEarnedCl(owner, p.tokenId))).catch(() => null)
+      : Promise.resolve(null),
+    p.custody === 'gauge'
+      ? retryRead(() => ethCall(rpc, p.custodian, dataStoredClReward(p.tokenId))).catch(() => null)
+      : Promise.resolve(null),
   ]);
 
   const slot = decodeSlot0(slotHex);
   const amounts = positionAmounts({ ...p, sqrtPriceX96: slot.sqrtPriceX96 });
   const collectable = collectHex ? decodeCollect(collectHex) : null;
+  const dynamicFeeWord = dynamicFeeHex ? words(dynamicFeeHex)[0] : null;
+  const fee = deployment.kind === 'slipstream'
+    ? (dynamicFeeWord ? Number(toUint(dynamicFeeWord)) : null)
+    : p.fee;
+  // CLGauge checkpoints the previously accrued portion into rewards[tokenId].
+  // earned(owner, tokenId) returns only growth since that checkpoint, so both
+  // reads must succeed before displaying their sum.
+  const rewardRaw = clGaugeRewardTotal(storedRewardHex, earnedRewardHex);
+  const rewardMetadataComplete = deployment.rewardToken
+    && deployment.rewardSymbol
+    && Number.isInteger(deployment.rewardDecimals);
+  const rewards = rewardRaw !== null && rewardMetadataComplete ? [{
+    token: deployment.rewardToken,
+    symbol: deployment.rewardSymbol,
+    amount: scale(Number(rewardRaw), deployment.rewardDecimals),
+    raw: rewardRaw,
+    kind: 'gauge-emission',
+  }] : [];
 
   return {
     ...p,
     pool,
+    fee,
     token0Meta: t0,
     token1Meta: t1,
     currentTick: slot.tick,
@@ -954,6 +1398,133 @@ async function enrichPosition(rpc, chain, chainKey, owner, p) {
     collectable1: collectable ? scale(Number(collectable.amount1), t1.decimals) : null,
     collectableRaw0: collectable ? collectable.amount0 : null,
     collectableRaw1: collectable ? collectable.amount1 : null,
+    rewards,
+    rewardsUnavailable: p.custody === 'gauge' && !rewards.length
+      ? 'pending UP reward could not be read' : null,
+  };
+}
+
+function unavailableSlipstreamHistory(p, unavailable, currentUnavailable = false) {
+  return {
+    ...p,
+    history: { unavailable, currentUnavailable },
+  };
+}
+
+/**
+ * Direct UP33 positions can use ordinary v3 cash-flow accounting only when
+ * their complete NFT history proves uninterrupted wallet custody since mint.
+ * Any gauge custody, external transfer, partial log read, or ownership race
+ * keeps lifetime return unavailable.
+ */
+async function attachDeploymentHistory(source, chainKey, deployment, p, owner) {
+  if (deployment.kind !== 'slipstream') {
+    return attachHistory(source, chainKey, deployment, p);
+  }
+  if (p.custody === 'gauge') {
+    return unavailableSlipstreamHistory(
+      p,
+      'UP33 lifetime accounting is unavailable for staked positions until historical gauge emissions and trading fees are included',
+      true,
+    );
+  }
+
+  // First prove the ordinary v3-family lifecycle and arithmetic. The custody
+  // proof runs afterwards against a newer captured head, so a stake or transfer
+  // that occurs while lifecycle history is loading cannot unlock a stale PnL.
+  const attached = await attachHistory(source, chainKey, deployment, p);
+  if (!attached.history || attached.history.unavailable) return attached;
+
+  const expectedOwner = String(owner || '').toLowerCase();
+  const head = await fetchHistoryCheckpoint(source, 'latest');
+  if (head.unavailable) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 direct-custody history could not be proven',
+    );
+  }
+
+  const lifecycleHead = Number(attached.history.checkedThrough);
+  if (!Number.isSafeInteger(lifecycleHead) || lifecycleHead < 0
+      || lifecycleHead > head.block) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 lifecycle and custody history could not be aligned',
+    );
+  }
+  if (lifecycleHead < head.block) {
+    const lifecycleTail = await fetchHistoryRange(
+      source, deployment.nfpm, p.tokenId, lifecycleHead + 1, head.block,
+    );
+    if (lifecycleTail.unavailable || lifecycleTail.events.length) {
+      return unavailableSlipstreamHistory(
+        p, 'UP33 position history changed during refresh; retry in a moment',
+      );
+    }
+  }
+
+  let ownerAtHead;
+  try {
+    const ownerHex = await retryRead(() => ethCall(
+      source.rpc,
+      deployment.nfpm,
+      dataOwnerOf(p.tokenId),
+      null,
+      '0x' + BigInt(head.block).toString(16),
+    ), 2);
+    ownerAtHead = toAddress(words(ownerHex)[0]).toLowerCase();
+  } catch {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 direct-custody history could not be proven',
+    );
+  }
+  if (ownerAtHead !== expectedOwner) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 direct custody changed during refresh; retry in a moment',
+    );
+  }
+
+  const transfers = await fetchExactTokenTransfers({
+    ...source,
+    contract: deployment.nfpm,
+    tokenId: p.tokenId,
+    fromBlock: 0,
+    toBlock: head.block,
+  });
+  if (transfers.unavailable) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 direct-custody history could not be proven',
+    );
+  }
+  const custody = uninterruptedDirectCustody(
+    transfers.events, expectedOwner, p.tokenId,
+  );
+  if (!custody.ok) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 lifetime accounting is unavailable after staking or another custody transfer',
+    );
+  }
+  const firstDepositTx = attached.history.deposits?.[0]?.transactionHash;
+  const mintTx = transfers.events[0]?.transactionHash;
+  if (!firstDepositTx || !mintTx
+      || String(firstDepositTx).toLowerCase() !== String(mintTx).toLowerCase()) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 mint and first liquidity addition could not be matched',
+    );
+  }
+  const canonicalHead = await fetchHistoryCheckpoint(source, head.block);
+  if (canonicalHead.unavailable
+      || String(canonicalHead.hash).toLowerCase() !== String(head.hash).toLowerCase()) {
+    return unavailableSlipstreamHistory(
+      p, 'UP33 custody checkpoint changed during refresh; retry in a moment',
+    );
+  }
+  return {
+    ...attached,
+    history: {
+      ...attached.history,
+      directCustodyProven: true,
+      custodyCheckedThrough: head.block,
+      custodySource: transfers.source,
+    },
   };
 }
 
@@ -962,7 +1533,7 @@ async function enrichPosition(rpc, chain, chainKey, owner, p) {
  * that refuses wide ranges degrades to `history.unavailable` rather than
  * failing the position.
  */
-async function attachHistory(source, chainKey, chain, p) {
+async function attachHistory(source, chainKey, deployment, p) {
   const fp = fingerprint(p);
   const identity = historyIdentity(p);
   if (!identity) {
@@ -970,7 +1541,7 @@ async function attachHistory(source, chainKey, chain, p) {
   }
 
   const previous = await readHistoryAny(
-    chainKey, chain.nfpm, p.tokenId, identity,
+    chainKey, deployment.nfpm, p.tokenId, identity,
   );
   const head = await fetchHistoryCheckpoint(source, 'latest');
   if (head.unavailable) {
@@ -993,7 +1564,7 @@ async function attachHistory(source, chainKey, chain, p) {
       const fromBlock = previous.anchorBlock + 1;
       const tail = fromBlock <= head.block
         ? await fetchHistoryRange(
-          source, chain.nfpm, p.tokenId, fromBlock, head.block,
+          source, deployment.nfpm, p.tokenId, fromBlock, head.block,
         )
         : { events: [], source: 'empty-tail' };
       if (!tail.unavailable) {
@@ -1001,7 +1572,7 @@ async function attachHistory(source, chainKey, chain, p) {
         // Indexed tails can lag at the head. Supplement the fixed last 128
         // blocks directly from RPC so a just-mined net-zero sequence is seen.
         if (tail.source !== 'rpc-tail' && tail.source !== 'empty-tail') {
-          recent = await fetchRecentHistory(source, chain.nfpm, p.tokenId, {
+          recent = await fetchRecentHistory(source, deployment.nfpm, p.tokenId, {
             fromBlock: Math.max(0, head.block - HISTORY_REORG_OVERLAP + 1),
             toBlock: head.block,
           });
@@ -1032,7 +1603,7 @@ async function attachHistory(source, chainKey, chain, p) {
   // RPC supplement at that same head.
   if (!h) {
     const full = await fetchHistoryRange(
-      source, chain.nfpm, p.tokenId, 0, head.block, true,
+      source, deployment.nfpm, p.tokenId, 0, head.block, true,
     );
     if (full.unavailable) {
       h = {
@@ -1042,7 +1613,7 @@ async function attachHistory(source, chainKey, chain, p) {
     } else {
       let recent = { events: [], source: null };
       if (full.source !== 'rpc-tail') {
-        recent = await fetchRecentHistory(source, chain.nfpm, p.tokenId, {
+        recent = await fetchRecentHistory(source, deployment.nfpm, p.tokenId, {
           fromBlock: Math.max(0, head.block - HISTORY_REORG_OVERLAP + 1),
           toBlock: head.block,
         });
@@ -1091,7 +1662,7 @@ async function attachHistory(source, chainKey, chain, p) {
     if (!anchor.unavailable) {
       await writeHistory({
         chainKey,
-        nfpm: chain.nfpm,
+        nfpm: deployment.nfpm,
         tokenId: p.tokenId,
         identity,
         fp,
@@ -1202,6 +1773,7 @@ async function attachHistory(source, chainKey, chain, p) {
       firstTime: acct.firstTime,
       lastTime: acct.lastTime,
       currentUnavailable,
+      checkedThrough: head.block,
       source: h.source + (h.cached ? ' (cached)' : ''),
       vsHodl: currentUnavailable ? null : vsHodl(p, historyForComparison),
     },
@@ -1307,24 +1879,43 @@ export async function loadPositionByVersion(chainKey, version, tokenId, opts = {
 }
 
 export async function loadPosition(chainKey, tokenId, opts = {}) {
+  const deployment = v3Deployment(chainKey, opts.deploymentId || null);
+  if (!deployment) throw new Error(`unknown v3 deployment for ${chainKey}`);
+  return loadV3Position(chainKey, deployment.id, tokenId, opts);
+}
+
+export async function loadV3Position(chainKey, deploymentId, tokenId, opts = {}) {
   const chain = CHAINS[chainKey];
   if (!chain) throw new Error(`unknown chain ${chainKey}`);
+  const deployment = v3Deployment(chainKey, deploymentId);
+  if (!deployment) throw new Error(`unknown v3 deployment ${deploymentId} on ${chainKey}`);
   const rpc = opts.rpcOverride || chain.rpc;
 
   const [posHex, ownerHex] = await Promise.all([
-    ethCall(rpc, chain.nfpm, dataPositions(tokenId)),
-    ethCall(rpc, chain.nfpm, dataOwnerOf(tokenId)).catch(() => null),
+    ethCall(rpc, deployment.nfpm, dataPositions(tokenId)),
+    ethCall(rpc, deployment.nfpm, dataOwnerOf(tokenId)).catch(() => null),
   ]);
 
-  const pos = decodePositions(posHex);
+  const pos = decodePositions(posHex, deployment.kind);
   if (!pos) throw new Error(`position ${tokenId} not readable on ${chainKey}`);
-  const owner = ownerHex ? toAddress(words(ownerHex)[0]) : null;
+  const nftOwner = ownerHex ? toAddress(words(ownerHex)[0]) : null;
+  const owner = opts.ownerOverride || nftOwner;
+  const custody = opts.custody === 'gauge' ? 'gauge' : 'wallet';
+  const base = {
+    tokenId,
+    ...pos,
+    deploymentId: deployment.id,
+    manager: deployment.nfpm,
+    protocol: deployment.protocol,
+    custody,
+    custodian: custody === 'gauge' ? (opts.custodian || nftOwner) : null,
+  };
 
-  const enriched = await enrichPosition(rpc, chain, chainKey, owner, { tokenId, ...pos });
+  const enriched = await enrichPosition(rpc, chain, chainKey, deployment, owner, base);
   if (enriched.error) return { ...enriched, owner };
-  const full = await attachHistory(
-    historySource(chain, rpc, opts), chainKey, chain, enriched,
+  const full = await attachDeploymentHistory(
+    historySource(chain, rpc, opts), chainKey, deployment, enriched, owner,
   );
   const priced = opts.withUsd === false ? full : await attachUsd(chainKey, full, opts);
-  return { ...priced, owner, version: 'v3', protocol: chain.protocol || null };
+  return tagPosition({ ...priced, owner, nftOwner, version: 'v3' }, chainKey, deployment);
 }

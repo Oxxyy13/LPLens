@@ -169,6 +169,60 @@ export const CHAINS = {
   },
 };
 
+/**
+ * Concentrated-liquidity deployments are separate from physical networks.
+ *
+ * Most networks currently have one Uniswap-v3-family manager, but Robinhood
+ * also hosts UP33 Slipstream. Keeping deployments explicit prevents equal
+ * numeric NFT ids in different managers from sharing ownership, cache, hide,
+ * lineage, or refresh identity.
+ */
+const legacyDeployment = (chainKey, chain) => Object.freeze({
+  id: chain.protocol === 'ProjectX' ? 'projectx-v3' : 'uniswap-v3',
+  label: chain.protocol || 'Uniswap',
+  protocol: chain.protocol || 'Uniswap',
+  kind: 'uniswap-v3',
+  chainKey,
+  nfpm: chain.nfpm,
+  factory: chain.factory,
+});
+
+export const V3_DEPLOYMENTS = Object.freeze(Object.fromEntries(
+  Object.entries(CHAINS).map(([chainKey, chain]) => {
+    const deployments = [legacyDeployment(chainKey, chain)];
+    if (chainKey === 'robinhood') {
+      deployments.push(Object.freeze({
+        id: 'up33-cl',
+        label: 'UP33',
+        protocol: 'UP33',
+        kind: 'slipstream',
+        chainKey,
+        // Verified against the live UP33 app and Robinhood RPC on 2026-08-31.
+        nfpm: '0x07F44c47743A2f36414A82b9F558ECFCf0EEdCEf',
+        factory: '0x1ac9dB4a2608ba45D6127B1737949b51Bb54B7F3',
+        voter: '0x7F749fDD351C1Ceed82d76d7699CB631Eb8332a7',
+        rewardToken: '0x57C0E45cB534413D1C20A4240955d6bB250BB4F1',
+        // Verified through the token contract on Robinhood RPC on 2026-08-31.
+        // Pinning these values prevents a transient metadata failure from
+        // silently scaling a pending gauge reward with guessed decimals.
+        rewardSymbol: 'UP',
+        rewardDecimals: 18,
+      }));
+    }
+    return [chainKey, Object.freeze(deployments)];
+  }),
+));
+
+export function v3DeploymentsFor(chainKey) {
+  return V3_DEPLOYMENTS[chainKey] || Object.freeze([]);
+}
+
+export function v3Deployment(chainKey, deploymentId = null) {
+  const deployments = v3DeploymentsFor(chainKey);
+  if (!deploymentId) return deployments[0] || null;
+  return deployments.find((deployment) => deployment.id === deploymentId) || null;
+}
+
 
 // Hard cap on positions enumerated per address. Surfaced in the UI when hit —
 // a silent truncation would read as "you have no other positions".

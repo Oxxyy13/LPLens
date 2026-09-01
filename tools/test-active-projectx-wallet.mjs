@@ -9,7 +9,7 @@ const css = readFileSync(new URL('../extension/popup.css', import.meta.url), 'ut
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
 
-assert.equal(manifest.version, '0.32.0');
+assert.equal(manifest.version, '0.33.0');
 assert.match(html, /id="activeWallet"[^>]*role="status"[^>]*>Overlay wallet: none selected</);
 assert.match(css, /\.active-wallet\.pending/);
 assert.match(css, /\.active-wallet\.empty/);

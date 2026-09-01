@@ -66,7 +66,7 @@ let activePositionFilter = 'all';
 // to 0.8 landed only in the overlay — so both now render through one copy.
 const {
   esc, fmt, ageText, priceText, priceOrientation, hero, rangeBar, details,
-  rebalanceLine, CSS_COMPONENTS,
+  rebalanceLine, pendingRewards, CSS_COMPONENTS,
 } = globalThis.LPLens;
 
 // The overlay renders inside a shadow root; the popup has none, so the shared
@@ -132,6 +132,7 @@ const OPTIONAL_PAGE_ORIGINS = Object.freeze({
   uniswap: 'https://app.uniswap.org/*',
   projectx: 'https://www.prjx.com/*',
   dexscreener: 'https://dexscreener.com/*',
+  up33: 'https://up33.xyz/*',
 });
 
 async function optionalPageAccess() {
@@ -1271,6 +1272,13 @@ function chainLabel(key) {
   return (CHAINS[key] && CHAINS[key].label) || key || '';
 }
 
+function positionVenue(position) {
+  const network = chainLabel(position && position.chainKey);
+  const protocol = String(position && position.protocol || '');
+  const venue = protocol && protocol !== 'Uniswap' ? `${protocol} · ${network}` : network;
+  return position && position.custody === 'gauge' ? `${venue} · staked` : venue;
+}
+
 function jobKey(ev) {
   return `${ev.owner || ''}@${ev.chainKey}`;
 }
@@ -1295,7 +1303,8 @@ function jobHasIssue(s) {
   if (r.count > (r.attempted ?? r.scanned)) return true;
   if (r.enumUnreadable || r.positionUnreadable) return true;
   const v4 = r.v4;
-  return !!(v4 && (v4.unavailable || v4.unreadable));
+  return !!((Array.isArray(r.deploymentIssues) && r.deploymentIssues.length)
+    || (v4 && (v4.unavailable || v4.unreadable)));
 }
 
 function totalMetric(label, bucket) {
@@ -1589,10 +1598,17 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
     ? '$' + u.totalNow.toLocaleString('en-US', { maximumFractionDigits: 2 })
     : (valueUsd(p.amount0, p.amount1, p0, p1) !== null
         ? usd(valueUsd(p.amount0, p.amount1, p0, p1)) : 'unpriced');
+  const valueLabel = p.custody === 'gauge' ? 'active liquidity' : 'value';
 
   const fees = u && u.collectable !== null && u.collectable !== undefined
     ? '$' + u.collectable.toLocaleString('en-US', { maximumFractionDigits: 2 })
     : `${fmt(p.collectable0)} ${esc(s0)} + ${fmt(p.collectable1)} ${esc(s1)}`;
+  const rewards = pendingRewards(p);
+  const rewardLabel = rewards.length === 1
+    ? `pending ${esc(rewards[0].symbol)}` : 'pending rewards';
+  const rewardValue = rewards.length
+    ? rewards.map((reward) => `${fmt(reward.amount)} ${esc(reward.symbol)}`).join('<br>')
+    : '—';
 
   const entryValue = (point) => point
     ? (point.exact
@@ -1613,15 +1629,17 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
     `${fmt(standardPrice.lo, 8)} – ${fmt(standardPrice.hi, 8)}`,
     `${fmt(inversePrice.lo, 8)} – ${fmt(inversePrice.hi, 8)}`,
   );
+  const feeLabel = Number.isFinite(Number(p.fee))
+    ? `${(Number(p.fee) / 10000).toFixed(2)}%` : 'dynamic';
 
   return `
     <div class="card position-card" data-position-filters="${filterTokens(p)}"
       data-position-key="${esc(hideKey || '')}" data-hidden-position="${locallyHidden ? 'true' : 'false'}">
       <div class="card-top">
         <span class="pair">${esc(s0)} / ${esc(s1)}</span>
-        <span class="fee">${(p.fee / 10000).toFixed(2)}%</span>
+        <span class="fee">${feeLabel}</span>
         ${showWallet ? `<span class="wallet-lbl">${esc(walletName(p))}</span>` : ''}
-        <span class="chain-lbl">${esc(chainLabel(p.chainKey))}</span>
+        <span class="chain-lbl">${esc(positionVenue(p))}</span>
         <span class="pill ${statusClass}">${statusText}</span>
       </div>
       ${rangeBar(p, h, flippable)}
@@ -1630,8 +1648,9 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
       ${lineageBlock(p)}
       <div class="stats">
         <div class="stat">
-          <span class="stat-l">collectable</span>
-          <span class="stat-v muted">${fees}</span>
+          <span class="stat-l">${p.custody === 'gauge' ? rewardLabel : 'collectable'}</span>
+          <span class="stat-v muted">${p.custody === 'gauge' ? rewardValue : fees}</span>
+          ${p.custody === 'gauge' && !rewards.length ? '<span class="stat-n">unavailable</span>' : ''}
         </div>
         <div class="stat">
           <span class="stat-l">entry</span>
@@ -1648,7 +1667,7 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
           title="${scanBusy || dashboardMutationBusy ? 'Wait for the portfolio update to finish' : `${locallyHidden ? 'Restore' : 'Hide'} this position in local portfolio views`}">${locallyHidden ? 'restore' : 'hide'}</button>` : ''}
       </div>
       <div class="extra">
-        <div class="kv"><span>value</span><span class="num">${value}</span></div>
+        <div class="kv"><span>${valueLabel}</span><span class="num">${value}</span></div>
         <div class="kv"><span>current price</span><span class="num">${currentPrice}</span></div>
         <div class="kv"><span>range</span><span class="num">${rangePrice}</span></div>
         <div class="kv"><span>holds</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>

@@ -10,7 +10,7 @@
  * standard.
  */
 
-import { CHAINS } from './chains.js';
+import { CHAINS, v3DeploymentsFor } from './chains.js';
 import { TOPIC } from './history.js';
 import { rpcCall } from './rpc.js';
 
@@ -64,7 +64,13 @@ const dataUint = (data, index) => cleanUint(dataWord(data, index));
 
 function managerFor(position) {
   const chainKey = String(position?.chainKey || '').trim().toLowerCase();
-  return cleanAddress(CHAINS[chainKey]?.nfpm);
+  if (!CHAINS[chainKey]) return null;
+  const explicit = cleanAddress(position?.manager);
+  if (position?.manager !== undefined && position?.manager !== null && !explicit) return null;
+  if (!explicit) return cleanAddress(CHAINS[chainKey].nfpm);
+  return v3DeploymentsFor(chainKey).some((deployment) => (
+    cleanAddress(deployment.nfpm) === explicit
+  )) ? explicit : null;
 }
 
 /** Manager-scoped immutable NFT identity used only by the replacement graph. */
@@ -324,7 +330,8 @@ function cleanEdge(raw) {
   const owner = cleanAddress(raw.owner);
   const chainKey = String(raw.chainKey || '').trim().toLowerCase();
   const manager = cleanAddress(raw.manager);
-  const expectedManager = cleanAddress(CHAINS[chainKey]?.nfpm);
+  const expectedManagers = new Set(v3DeploymentsFor(chainKey)
+    .map((deployment) => cleanAddress(deployment.nfpm)).filter(Boolean));
   const pool = cleanAddress(raw.pool);
   const transactionHash = cleanHash(raw.transactionHash);
   const blockHash = cleanHash(raw.blockHash);
@@ -341,7 +348,7 @@ function cleanEdge(raw) {
   ];
   const fingerprints = Object.fromEntries(fingerprintFields.map((field) => [field, cleanUint(raw[field])]));
   if (!POSITION_KEY_RE.test(from) || !POSITION_KEY_RE.test(to) || from === to
-      || !owner || !CHAIN_RE.test(chainKey) || !manager || manager !== expectedManager
+      || !owner || !CHAIN_RE.test(chainKey) || !manager || !expectedManagers.has(manager)
       || !pool || !transactionHash || !blockHash || block === null
       || closeLogIndex === null || collectLogIndex === null || openLogIndex === null
       || !(closeLogIndex < collectLogIndex && collectLogIndex < openLogIndex)
