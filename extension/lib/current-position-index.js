@@ -55,6 +55,36 @@ function cleanDeploymentId(value) {
   return DEPLOYMENT_RE.test(deploymentId) ? deploymentId : null;
 }
 
+function configuredV3DeploymentCoverage(chainKey) {
+  return v3DeploymentsFor(chainKey).map((deployment) => {
+    const deploymentId = cleanDeploymentId(deployment?.id);
+    const manager = cleanAddress(deployment?.nfpm);
+    return deploymentId && manager ? `${deploymentId}@${manager}` : null;
+  }).filter(Boolean).sort();
+}
+
+function cleanV3DeploymentCoverage(values) {
+  const coverage = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(values) ? values : []) {
+    const parts = String(raw || '').trim().toLowerCase().split('@');
+    if (parts.length !== 2) continue;
+    const deploymentId = cleanDeploymentId(parts[0]);
+    const manager = cleanAddress(parts[1]);
+    if (!deploymentId || !manager) continue;
+    const key = `${deploymentId}@${manager}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    coverage.push(key);
+  }
+  return coverage.sort();
+}
+
+function sameCoverage(left, right) {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
 export function normalizeCurrentPositionIds(values) {
   const ids = [];
   const seen = new Set();
@@ -183,17 +213,26 @@ function isLegacyDefaultRecord(record, chainKey) {
 
 function cleanV3Protocol(raw, chainKey) {
   if (!raw || typeof raw !== 'object') {
-    return { complete: false, records: [], ids: [] };
+    return { complete: false, records: [], ids: [], deploymentCoverage: [] };
   }
   const values = Array.isArray(raw.records) ? raw.records : raw.ids;
   const { records, rejected } = normalizeCurrentV3RecordSet(values, chainKey);
+  const configuredCoverage = configuredV3DeploymentCoverage(chainKey);
+  const storedCoverage = cleanV3DeploymentCoverage(raw.deploymentCoverage);
+  // A stored Full rescan is exhaustive only for the exact deployment IDs and
+  // manager addresses it covered. Rows written before this proof existed keep
+  // all known IDs, but cannot enable Refresh current. This also fails closed
+  // when a future release adds, removes, or replaces a manager.
+  const coverageMatches = configuredCoverage.length > 0
+    && sameCoverage(storedCoverage, configuredCoverage);
   return {
-    complete: raw.complete === true && !rejected,
+    complete: raw.complete === true && !rejected && coverageMatches,
     records,
     // Compatibility for the shipped popup/current scanner. It receives only
     // default-manager, wallet-custodied IDs and therefore cannot accidentally
     // query an UP33 token ID against the Uniswap manager.
     ids: legacyV3Ids(records, chainKey),
+    deploymentCoverage: storedCoverage,
   };
 }
 
@@ -276,6 +315,8 @@ function mergeV3Protocol(previous, incoming, chainKey) {
     complete: false,
     records,
     ids: legacyV3Ids(records, chainKey),
+    deploymentCoverage: next.deploymentCoverage.length
+      ? next.deploymentCoverage : previous.deploymentCoverage,
   };
 }
 
@@ -297,13 +338,16 @@ export async function writeFullDiscoveryScope({
     chainKey,
     fullScanAt: null,
     refreshedAt: null,
-    v3: { complete: false, records: [], ids: [] },
+    v3: { complete: false, records: [], ids: [], deploymentCoverage: [] },
     v4: { complete: false, ids: [] },
   };
   const value = {
     ...previous,
     fullScanAt: Number.isFinite(at) && at > 0 ? at : Date.now(),
-    v3: mergeV3Protocol(previous.v3, discovery.v3, chainKey),
+    v3: mergeV3Protocol(previous.v3, {
+      ...discovery.v3,
+      deploymentCoverage: configuredV3DeploymentCoverage(chainKey),
+    }, chainKey),
     v4: mergeProtocol(previous.v4, discovery.v4),
   };
   try {
@@ -333,14 +377,22 @@ export async function writeCurrentRefreshScope({
   let nextV3 = previous.v3;
   if (incomingV3 !== undefined && hasExplicitRecords) {
     nextV3 = cleanV3Protocol({
-      complete: previous.v3.complete,
       ...(Array.isArray(incomingV3) ? { records: incomingV3 } : incomingV3),
+      // Only Full rescan can prove completeness or deployment coverage. A
+      // current-refresh payload may replace records, but it cannot promote an
+      // incomplete scope or rewrite the manager set that was discovered.
+      complete: previous.v3.complete,
+      deploymentCoverage: previous.v3.deploymentCoverage,
     }, chainKey);
   } else if (Array.isArray(incomingV3)) {
     // The shipped v1 current scanner knows only the historical default
     // manager. Replace that subset but retain alternate-manager and gauge
     // records it cannot verify or disprove.
-    const legacy = cleanV3Protocol({ complete: previous.v3.complete, ids: incomingV3 }, chainKey);
+    const legacy = cleanV3Protocol({
+      complete: previous.v3.complete,
+      ids: incomingV3,
+      deploymentCoverage: previous.v3.deploymentCoverage,
+    }, chainKey);
     const records = normalizeCurrentV3Records([
       ...previous.v3.records.filter((record) => !isLegacyDefaultRecord(record, chainKey)),
       ...legacy.records,
@@ -349,6 +401,7 @@ export async function writeCurrentRefreshScope({
       complete: legacy.complete,
       records,
       ids: legacyV3Ids(records, chainKey),
+      deploymentCoverage: legacy.deploymentCoverage,
     };
   }
   const value = {

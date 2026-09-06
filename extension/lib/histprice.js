@@ -20,12 +20,11 @@
  * chains independently produce the same WETH price to within 0.4 basis points —
  * which is the cross-check that the derivation is right.
  *
- * BRIDGED CHAINS. Some chains have no stablecoin liquidity at all — Robinhood
- * Chain's WETH trades against thirty memecoins and nothing dollar-denominated,
- * so there is no local pool to read a dollar price from. Its WETH is a bridged
- * asset, though, so the price exists on-chain on ETHEREUM. Those chains are
- * priced by mapping the local block to its timestamp, that timestamp to an
- * Ethereum block, and reading the Ethereum reference pool there.
+ * BRIDGED ASSETS. Some chains do not have a trusted local dollar route for
+ * their wrapped native asset. Robinhood Chain's WETH is one example, so that
+ * asset is priced by mapping the local block to its timestamp, that timestamp
+ * to an Ethereum block, and reading the Ethereum reference pool there. A
+ * configured stablecoin on the same chain remains a direct $1 anchor.
  *
  * That last path carries an ASSUMPTION the same-chain path does not: that the
  * bridged token holds its peg to the asset it represents. Arbitrage makes that
@@ -442,17 +441,22 @@ export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts
   };
   const t0 = normaliseToken(token0);
   const t1 = normaliseToken(token1);
-  // Bridged chains have no local stablecoin at all; absent, not empty.
+  // A stable address is optional, but when present it is the exact verified
+  // contract address. Token symbols never participate in this trust decision.
   const stable = (ref.stable || '').toLowerCase();
 
-  if (stable && t1 === stable) return { usd0: poolPrice, usd1: 1 };
-  if (stable && t0 === stable) return { usd0: 1, usd1: 1 / poolPrice };
+  if (stable && t1 === stable) {
+    return { usd0: poolPrice, usd1: 1, bridged: false };
+  }
+  if (stable && t0 === stable) {
+    return { usd0: 1, usd1: 1 / poolPrice, bridged: false };
+  }
   if (weth && (t1 === weth || t0 === weth)) {
     const wethUsd = await refUsdAtBlock(chainKey, block, opts);
     if (!wethUsd) return null;
     return t1 === weth
-      ? { usd0: poolPrice * wethUsd, usd1: wethUsd }
-      : { usd0: wethUsd, usd1: wethUsd / poolPrice };
+      ? { usd0: poolPrice * wethUsd, usd1: wethUsd, bridged: !!ref.via }
+      : { usd0: wethUsd, usd1: wethUsd / poolPrice, bridged: !!ref.via };
   }
   return null;
 }
@@ -498,17 +502,24 @@ async function directPairAt(chainKey, p, flow, opts = {}) {
   const amounts = [flow.amount0, flow.amount1];
   const stable = String(ref.stable || '').toLowerCase();
   let wethUsd;
+  let bridged = false;
   const out = [];
   for (let i = 0; i < 2; i++) {
-    if (stable && tokens[i] === stable) out[i] = 1;
+    // A zero leg does not need a price. In particular, do not make an
+    // origin-chain request or attach its caveat to a cash flow that did not
+    // actually contain the bridged reference asset.
+    if (amounts[i] === 0) out[i] = 0;
+    else if (stable && tokens[i] === stable) out[i] = 1;
     else if (weth && tokens[i] === weth) {
       if (wethUsd === undefined) wethUsd = await refUsdAtBlock(chainKey, flow.block, opts);
       if (!(wethUsd > 0)) return null;
       out[i] = wethUsd;
-    } else if (amounts[i] === 0) out[i] = 0;
-    else return null;
+      bridged ||= !!ref.via;
+    } else return null;
   }
-  return { usd0: out[0], usd1: out[1], exact: true, source: 'direct-reference' };
+  return {
+    usd0: out[0], usd1: out[1], exact: true, source: 'direct-reference', bridged,
+  };
 }
 
 /**
@@ -572,6 +583,7 @@ export async function sumDepositBasis(deposits, priceAt) {
   if (!Array.isArray(deposits) || !deposits.length) return null;
   let basis = 0;
   let exact = true;
+  let bridged = false;
   const legs = [];
   for (const deposit of deposits) {
     const pair = await priceAt(deposit);
@@ -579,11 +591,13 @@ export async function sumDepositBasis(deposits, priceAt) {
     const value = deposit.amount0 * pair.usd0 + deposit.amount1 * pair.usd1;
     if (!Number.isFinite(value) || value < 0) return null;
     basis += value;
+    bridged ||= pair.bridged === true;
     if (pair.exact === false || (pair.exact === undefined
         && (!deposit.entry || deposit.entry.exact === false))) exact = false;
     legs.push({
       block: deposit.block, value, usd0: pair.usd0, usd1: pair.usd1,
       exact: pair.exact !== false, source: pair.source || null,
+      bridged: pair.bridged === true,
       time: deposit.time || null,
       transactionHash: deposit.transactionHash || null,
       amount0: deposit.amount0,
@@ -596,6 +610,7 @@ export async function sumDepositBasis(deposits, priceAt) {
     basis,
     block: deposits[0].block,
     exact,
+    bridged,
     bound: exact ? null : 'one or more liquidity additions were single-sided',
     legs,
   };
@@ -607,10 +622,13 @@ export async function collectedProceedsUsd(chainKey, p, opts = {}) {
   const h = p.history;
   if (!chain?.usdRef || !h || h.unavailable) return null;
   const collections = Array.isArray(h.collections) ? h.collections : [];
-  if (!collections.length) return { proceeds: 0, exact: true, bound: null, legs: [] };
+  if (!collections.length) {
+    return { proceeds: 0, exact: true, bridged: false, bound: null, legs: [] };
+  }
 
   let proceeds = 0;
   let exact = true;
+  let bridged = false;
   const legs = [];
   for (const flow of collections) {
     const pair = await historicalPairAt(chainKey, p, flow, opts);
@@ -618,15 +636,18 @@ export async function collectedProceedsUsd(chainKey, p, opts = {}) {
     const value = flow.amount0 * pair.usd0 + flow.amount1 * pair.usd1;
     if (!Number.isFinite(value) || value < 0) return null;
     proceeds += value;
+    bridged ||= pair.bridged === true;
     if (pair.exact === false) exact = false;
     legs.push({
       block: flow.block, value, usd0: pair.usd0, usd1: pair.usd1,
       exact: pair.exact !== false, source: pair.source || null,
+      bridged: pair.bridged === true,
     });
   }
   return {
     proceeds,
     exact,
+    bridged,
     bound: exact ? null : 'one or more collections could only be bounded',
     legs,
   };

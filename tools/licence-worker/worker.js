@@ -4,6 +4,7 @@
  * POST / { key, installationId? } -> { valid, expires, reason }
  * POST /history { key, installationId, chainId, fields } -> provider logs
  * POST /blockscout remains a backwards-compatible alias for 0.27 clients.
+ * POST /receipt { key, installationId, chainId, transactionHash } -> receipt
  * POST /telemetry { key, version, surface, outcome, buckets, errors } -> ok
  *
  * Keys are stored as SHA-256 hex hashes, never plaintext. Add or revoke a
@@ -18,7 +19,7 @@ export const KEYS = {
   '21554fb69f9c37727db72020eef2ec2a51cd562ab106cb0c56a567d703d72587': { label: 'beta-003', expires: '2026-09-08' },
   '0c73a6ebca20a8c12a053fc96a8b9d60e6a383f79b6446dca8c548278ca4603f': { label: 'beta-004', expires: '2026-09-08' },
   '154091f4e547299cae430254259f6155717417657fd277e09a1e7a5d07af0795': { label: 'beta-005', expires: '2026-09-08' },
-  'da1d4ef8e832f84d207e1f8b56b3beb500bc807abe5ab8e10dbbcb3fa622c02d': { label: 'beta-006', expires: '2026-09-08' },
+  'da1d4ef8e832f84d207e1f8b56b3beb500bc807abe5ab8e10dbbcb3fa622c02d': { label: 'beta-006', expires: '2026-09-30' },
   'a63479acc4ee626ab2f9b5aeac329c52c9e907c8f367afa7064faadb50c5dac9': { label: 'beta-007', expires: '2026-09-08' },
   'c7f3da3eecba8e2ba08e76125ba9bd5deb7f84d8f4d1c34a6c8682bc31258777': { label: 'cws-reviewer', expires: '2027-08-31' },
   '69448619e77f5ce22fbe0435871e8183a3b4f0ce341ae952e8c2db7c0f63e077': { label: 'owner-primary', expires: '2030-12-31' },
@@ -30,6 +31,7 @@ const DEFAULT_INSTALLATION_LIMIT = 5;
 const ENFORCE_INSTALLATION_LIMITS = false;
 const RELAY_REQUESTS_PER_LICENCE_PER_DAY = 1000;
 const BLOCKSCOUT_PRO = 'https://api.blockscout.com/v2/api';
+const ROBINHOOD_RECEIPT_RPC = 'https://api.blockscout.com/4663/json-rpc';
 const ETHERSCAN_V2 = 'https://api.etherscan.io/v2/api';
 const MAX_BODY_BYTES = 8192;
 const TELEMETRY_VERSION = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/;
@@ -44,6 +46,10 @@ const TELEMETRY_ERROR_CODES = new Set([
   'rate_limit', 'timeout', 'network', 'history', 'ownership', 'unreadable', 'rpc', 'unknown',
 ]);
 const MAX_TELEMETRY_ERRORS = 16;
+const TRANSACTION_HASH = /^0x[0-9a-fA-F]{64}$/;
+const RECEIPT_FIELDS = new Set(['key', 'installationId', 'chainId', 'transactionHash']);
+const ROBINHOOD_V4_POOL_MANAGER = '0x8366a39cc670b4001a1121b8f6a443a643e40951';
+const ROBINHOOD_V4_POSITION_MANAGER = '0x58daec3116aae6d93017baaea7749052e8a04fa7';
 
 // The relay is deliberately not a general Blockscout proxy. Only the exact
 // contracts and chains LPLens reads for v3 history, v4 ownership replay and
@@ -119,7 +125,7 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>LPLens privacy policy</h1>
-<p class="meta">Effective 1 September 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
+<p class="meta">Effective 4 September 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
 <p>LPLens is a read-only Chrome extension that inspects concentrated-liquidity positions from Uniswap, ProjectX and UP33 for an Ethereum-style address you paste. It never connects a wallet, never asks for a signature, and never sees a private key.</p>
 <p>This policy uses the Chrome Web Store data-category names so the store listing and this page say the same things.</p>
 
@@ -134,11 +140,11 @@ const PRIVACY_HTML = `<!DOCTYPE html>
   <dt>Web history</dt>
   <dd>Only if you independently turn on an optional overlay: the extension reads whether you opened the Uniswap positions list or an individual position page (<code>app.uniswap.org/positions</code> and its position-detail paths), the ProjectX portfolio page (<code>www.prjx.com/portfolio</code>), the UP33 liquidity page (<code>up33.xyz/liquidity</code> and its subpages), or a Dexscreener pair page (<code>dexscreener.com</code>). Each site permission is off until you grant it in options. We do not collect browsing history for any other site or store browsing history. For a Dexscreener pair page only, the service worker sends the URL-derived chain and pool identifier, without the active wallet address, to <code>api.dexscreener.com</code> to retrieve base/quote token orientation for the range display. If you separately enable chart alignment, the local chart handling described under Website content occurs while a matching overlay is open.</dd>
   <dt>Website content</dt>
-  <dd>On an individual Uniswap position page, the overlay uses the URL. On the Uniswap positions list, it reads position links whose paths identify v3 or v4 positions and the first line of visible row text so it can discover positions, label its panels, and place each panel beside the matching row. This page-derived label stays in the tab and is not sent to LPLens or a third party. ProjectX does not expose stable position-NFT links, so its overlay does not read ProjectX page content or the connected wallet; it displays the HyperEVM positions for the active overlay wallet you explicitly select in LPLens. On the exact UP33 liquidity list, the overlay reads only each concentrated-position row's public <code>data-flow="cl-&lt;NFT ID&gt;"</code> attribute, matching visible <code>#ID</code>, and row geometry so local PnL cards can align with matching rows. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so the cards move left instead of covering it; it does not read dialog contents. Those page-derived IDs are matched only against the active-wallet scan and are not sent to a network or stored. It does not read UP33 connected-wallet state, balances, forms, transaction controls, signing prompts, the wallet provider, or other UP33 page content. The route also triggers a public Robinhood Chain read for the active overlay wallet selected in LPLens; only a shortened wallet label and the display fields needed by the panel cross into the isolated page script. On Dexscreener, the overlay uses the chain and pool identifier in a pair-page URL. The service worker sends those two route values, without the wallet address, to Dexscreener's API to match token orientation.</dd>
+  <dd>On an individual Uniswap position page, the overlay uses the URL. On the Uniswap positions list, it reads position links whose paths identify v3 or v4 positions and the first line of visible row text so it can discover positions, label its panels, and place each panel beside the matching row. This page-derived label stays in the tab and is not sent to LPLens or a third party. ProjectX does not expose stable position-NFT links, so its overlay does not read ProjectX page content or the connected wallet; it displays the HyperEVM positions for the active overlay wallet you explicitly select in LPLens. On the exact UP33 liquidity list, the overlay reads only each concentrated-position row's public <code>data-flow="cl-&lt;NFT ID&gt;"</code> attribute, matching visible <code>#ID</code>, and row geometry so local PnL cards can align with matching rows. If you activate a validated row, LPLens keeps that public NFT ID and click state in memory for up to five seconds while it associates a newly opened Manage drawer with the matching already-scanned position. Once matched, the selected public NFT ID remains in memory only until the drawer closes, the route or active wallet changes, or site access is revoked. Neither state is persisted, transmitted, or included in telemetry. Opening the validated drawer automatically starts a fresh public-chain UP33 scan for the active overlay wallet; completed custody proofs are not reused. The drawer contributes only its visible boundary; LPLens does not read dialog contents. Expanded values are limited to allowlisted current amounts, range, fees and rewards, cash flow, capital additions, and performance fields from public on-chain data. Page-derived IDs are matched only against the active-wallet scan. It does not read UP33 connected-wallet state, balances, forms, transaction controls, signing prompts, the wallet provider, or other UP33 page content. The route also triggers a public Robinhood Chain read for the active overlay wallet selected in LPLens; only a shortened wallet label and the display fields needed by the panel cross into the isolated page script. On Dexscreener, the overlay uses the chain and pool identifier in a pair-page URL. The service worker sends those two route values, without the wallet address, to Dexscreener's API to match token orientation.</dd>
   <dd>Chart alignment is a separate, versioned opt-in. While a matching overlay is open with chart alignment enabled, the service worker repeatedly runs a packaged, short-lived function in Dexscreener's MAIN world so the range follows chart movement and mode changes. Each call receives at most three unlabelled LP range values for low, current, and high, plus public pair-conversion values. The call receives no wallet address, token or position ID, PnL, access key, custom endpoint, or provider key directly. Unlabelled does not mean anonymous: the pool and bounds are public on-chain, so Dexscreener page code could correlate them with a specific position and owner while each call runs.</dd>
   <dd>The function reads chart mode, the latest public chart close once per measurement, plot geometry, and numeric price coordinates through Dexscreener's private TradingView interface. The close stays inside that short-lived MAIN-world call. Only validated chart mode, plot geometry, and numeric coordinates return to the persistent isolated content script, which draws LPLens's own overlay; the close is not returned. The returned result is not stored, logged, or transmitted over the network. The function does not read or call the wallet provider and does not create chart drawings, change autoscale, move the visible range, or otherwise alter chart state. If consent is absent, off, or obsolete, LPLens uses its own exact on-chain ruler and does not read chart state. The private interface may break when Dexscreener changes, in which case the same ruler remains available. The overlays do not read balances, form fields, connected-wallet state, wallet-provider state, or signing prompts. Position amounts and history are loaded from public chain data through the extension's background worker, not scraped from the page.</dd>
   <dt>User activity</dt>
-  <dd>The address you look up is stored locally so you do not have to retype it. We do not run advertising analytics. If “Share anonymous scan outcomes” is on, the extension sends its version, popup or side-panel surface, success/empty/partial/failed outcome, coarse position-count and duration buckets, and allowlisted per-chain error categories. It never sends raw error text, wallet addresses, labels, token names, pool or position identifiers, custom endpoints, provider keys, or the random installation identifier with these scan events. The Worker stores only daily aggregate rows that have no access-code hash or installation hash column. You can turn this off in Settings.</dd>
+  <dd>The address you look up is stored locally so you do not have to retype it. If you activate a validated UP33 concentrated-position row while the optional UP33 overlay is enabled, LPLens keeps that public NFT ID and click state in memory for up to five seconds while it associates a newly opened Manage drawer with the already-scanned position. Once matched, the selected public NFT ID remains in memory only until the drawer closes, the route or active wallet changes, or site access is revoked. Neither state is persisted or transmitted. We do not run advertising analytics. If “Share anonymous scan outcomes” is on, the extension sends its version, popup or side-panel surface, success/empty/partial/failed outcome, coarse position-count and duration buckets, and allowlisted per-chain error categories. It never sends raw error text, wallet addresses, labels, token names, pool or position identifiers, custom endpoints, provider keys, or the random installation identifier with these scan events. The Worker stores only daily aggregate rows that have no access-code hash or installation hash column. You can turn this off in Settings.</dd>
   <dt>Health information</dt>
   <dd>Not collected.</dd>
   <dt>Personal communications</dt>
@@ -152,12 +158,15 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <ul>
   <li>the JSON-RPC endpoint for the selected chain (built-in public or Alchemy URLs, or a URL you set in options), using read-only methods <code>eth_call</code>, <code>eth_getLogs</code>, <code>eth_getBlockByNumber</code>, and <code>eth_getTransactionReceipt</code>;</li>
   <li>DexScreener (<code>api.dexscreener.com</code>), which receives token contract addresses so the extension can fetch USD marks. When the optional Dexscreener overlay is enabled, it also receives the URL-derived chain and pool identifier, without the wallet address, so LPLens can match the pair's base/quote token orientation;</li>
-  <li>Etherscan and/or Blockscout, when lifetime event history, v4 position lists, or v4 addition proofs are fetched. v3 history queries use the position-manager contract and the position’s token id. For a direct UP33 NFT, the public manager and token id are sent directly to Robinhood Chain’s public RPC for complete exact-token Transfer history; returned Transfer addresses stay in extension context and are not sent through or stored by this Worker. v4 history queries use the PoolManager, pool id, and PositionManager, then match the token id locally from event data; v4 enumeration also uses your address as a log-filter topic. When a v4 NFT has later additions, its public transaction hashes are sent directly to the chain’s public Blockscout trace endpoint so PoolManager’s principal and already-earned fee deltas can be separated exactly. By default, licensed builds send allowlisted log filters through this Worker to Blockscout Pro on supported Uniswap chains and to Etherscan V2 for ProjectX on HyperEVM, so shared API credentials never enter the extension. If that route is unavailable, the extension may fall back to a public Blockscout instance or the chain RPC. If you save an Etherscan API key in options, that key is sent directly to Etherscan.</li>
+  <li>Etherscan and/or Blockscout, when lifetime event history, v4 position lists, or v4 addition proofs are fetched. v3 history queries use the position-manager contract and the position’s token id. For a direct UP33 NFT, the public manager and token id are sent directly to Robinhood Chain’s public RPC for complete exact-token Transfer history; returned Transfer addresses stay in extension context and are not sent through or stored by this Worker. v4 history queries use the PoolManager, pool id, and PositionManager, then match the token id locally from event data; v4 enumeration also uses your address as a log-filter topic. When a v4 NFT has later additions, its public transaction hashes are sent directly to the chain’s public Blockscout trace endpoint so PoolManager’s principal and already-earned fee deltas can be separated exactly. If Robinhood Chain’s public RPC exhausts its addition-receipt retries, the extension first requests the public transaction and log records from Robinhood Chain’s public Blockscout v2 REST API using the public transaction hash. If those records are unavailable, the extension sends chain id 4663 and the public transaction hash, together with its access key and random installation identifier, to this authenticated Worker. The Worker requests the exact successful receipt from Blockscout Pro and returns it only when it contains the expected v4 PoolManager <code>ModifyLiquidity</code> event attributed to the configured PositionManager. It does not store the transaction hash or receipt body. By default, licensed builds send allowlisted log filters through this Worker to Blockscout Pro on supported Uniswap chains and to Etherscan V2 for ProjectX on HyperEVM, so shared API credentials never enter the extension. If that route is unavailable, the extension may fall back to a public Blockscout instance or the chain RPC. If you save an Etherscan API key in options, that key is sent directly to Etherscan.</li>
 </ul>
 <p>Those hosts are not operated by LPLens. They see ordinary HTTPS request metadata (including IP address) under their own policies.</p>
 
+<h2>External position links</h2>
+<p>Supported standard Uniswap position cards can show a user-clicked Revert link. LPLens constructs the URL locally from the public network and position NFT ID. It does not contact Revert until you click the link, does not call Revert's analytics API, and requests no Revert site permission. Revert Finance is a separate third-party site. Any wallet connection, approval, signature, or transaction after navigation happens on Revert, not in LPLens. ProjectX, UP33, and unsupported Uniswap v4 networks do not receive this link.</p>
+
 <h2>What this Worker receives</h2>
-<p>This site provides the access check, authenticated history relay and optional anonymous scan counters. It receives the access key and random installation identifier when access is checked. For history requests it also receives a chain id, an allowlisted Uniswap or ProjectX position-manager or PoolManager contract and event-log filters. A v3-family filter identifies a public position NFT; a v4 ownership filter can contain the public address being inspected; and a v4 history filter identifies a public pool and PositionManager. The Worker forwards those filters to Blockscout Pro or Etherscan V2 but does not store wallet addresses, token ids, contract filters, response bodies or IP addresses. A telemetry request includes the access key only for validation; it does not include the random installation identifier, and the stored aggregate scan rows contain neither the access-code hash nor an installation hash.</p>
+<p>This site provides the access check, authenticated history and Robinhood v4 receipt relays, and optional anonymous scan counters. It receives the access key and random installation identifier when access is checked. For history requests it also receives a chain id, an allowlisted Uniswap or ProjectX position-manager or PoolManager contract and event-log filters. A v3-family filter identifies a public position NFT; a v4 ownership filter can contain the public address being inspected; and a v4 history filter identifies a public pool and PositionManager. After the public RPC and public Blockscout v2 receipt sources are unavailable, a Robinhood receipt request contains the access key, random installation identifier, chain id 4663, and public transaction hash. The Worker asks Blockscout Pro for the exact successful receipt, strictly requires the expected v4 PoolManager <code>ModifyLiquidity</code> event attributed to the configured PositionManager, and does not store the transaction hash or receipt body. The Worker forwards allowlisted history filters to Blockscout Pro or Etherscan V2 but does not store wallet addresses, token ids, contract filters, response bodies or IP addresses. A telemetry request includes the access key only for validation; it does not include the random installation identifier, and the stored aggregate scan rows contain neither the access-code hash nor an installation hash.</p>
 <p>We retain hashed installation records and per-licence daily request totals to operate the beta, diagnose sharing and protect the shared API allowance. Separately, when enabled, we retain anonymous daily scan outcomes and allowlisted error-category totals to improve reliability. These are operational and product-quality counters, not advertising analytics. Cloudflare, which hosts the Worker, processes the HTTPS requests.</p>
 
 <h2>What stays on your machine</h2>
@@ -171,10 +180,10 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </ul>
 
 <h2>Optional on-page overlays</h2>
-<p>Access to <code>app.uniswap.org</code>, <code>www.prjx.com</code>, <code>up33.xyz</code> and <code>dexscreener.com</code> is separately optional and off at install. Before Chrome asks for a permission, Settings explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show an active-wallet panel only on the ProjectX portfolio; granting UP33 access lets it show that active wallet's concentrated positions only on the UP33 liquidity route. On the exact liquidity list, LPLens reads only each concentrated-position row's public <code>data-flow="cl-&lt;NFT ID&gt;"</code> attribute, matching visible <code>#ID</code>, and row geometry to align local PnL cards. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so the cards move left instead of covering it; it does not read dialog contents. Those page-derived IDs are matched only against the active-wallet scan and are not sent to a network or stored. It does not read connected-wallet state, balances, forms, transaction controls, signing prompts, the wallet provider, or other UP33 page content. Granting Dexscreener access lets it show matching positions for that same active wallet on pair pages. UP33 v2 LP and liquidity-locker positions are not read. Dexscreener chart alignment has its own consent control and remains off when <code>dexscreenerChartConsentV1</code> is missing or is not strictly <code>true</code>. Enabling site access alone leaves LPLens on its exact on-chain ruler. Turning chart alignment off stops the repeated measurement, removes the chart graphic, and restores that ruler. Revoking a site permission tells any open LPLens overlay on that site to shut down and unregisters future injection. The service worker also re-checks UP33 and Dexscreener permission before returning position data and re-checks Dexscreener chart consent before measuring geometry, so an already-open stale script fails closed.</p>
+<p>Access to <code>app.uniswap.org</code>, <code>www.prjx.com</code>, <code>up33.xyz</code> and <code>dexscreener.com</code> is separately optional and off at install. Before Chrome asks for a permission, Settings explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show an active-wallet panel only on the ProjectX portfolio; granting UP33 access lets it show that active wallet's concentrated positions only on the UP33 liquidity route. On the exact liquidity list, LPLens reads only each concentrated-position row's public <code>data-flow="cl-&lt;NFT ID&gt;"</code> attribute, matching visible <code>#ID</code>, and row geometry to align local PnL cards. A user-initiated activation of a validated row keeps that public NFT ID and click state in memory for up to five seconds while LPLens associates a newly opened Manage drawer with the matching already-scanned position. Once matched, the selected public NFT ID remains in memory only until drawer close, route or active-wallet change, or permission revocation. Neither state is persisted, transmitted, or included in telemetry. The drawer contributes only its visible boundary; dialog contents are not read. Expanded values use an explicit allowlist of public on-chain display fields. Page-derived IDs are matched only against the active-wallet scan. It does not read connected-wallet state, balances, forms, transaction controls, signing prompts, the wallet provider, or other UP33 page content. Granting Dexscreener access lets it show matching positions for that same active wallet on pair pages. UP33 v2 LP and liquidity-locker positions are not read. Dexscreener chart alignment has its own consent control and remains off when <code>dexscreenerChartConsentV1</code> is missing or is not strictly <code>true</code>. Enabling site access alone leaves LPLens on its exact on-chain ruler. Turning chart alignment off stops the repeated measurement, removes the chart graphic, and restores that ruler. Revoking a site permission tells any open LPLens overlay on that site to shut down and unregisters future injection. The service worker also re-checks UP33 and Dexscreener permission before returning position data and re-checks Dexscreener chart consent before measuring geometry, so an already-open stale script fails closed.</p>
 
 <h2>Limited Use</h2>
-<p>Data listed above is used only to provide LPLens’s single purpose: showing concentrated-liquidity positions and available performance or reward context for an address you choose, placing that context on optional protocol and Dexscreener pages, controlling beta access, protecting the shared history allowance, and improving scan reliability through the optional anonymous counters described above. It is not used or transferred for advertising, credit, or unrelated profiling. Transfers to RPC providers, DexScreener, Etherscan, Blockscout, and this Worker happen only as needed for that purpose, or as required by law.</p>
+<p>Data listed above is used only to provide LPLens’s single purpose: showing concentrated-liquidity positions and available performance or reward context for an address you choose, placing that context on optional protocol and Dexscreener pages, offering an explicit outbound position link, controlling beta access, protecting the shared history allowance, and improving scan reliability through the optional anonymous counters described above. It is not used or transferred for advertising, credit, or unrelated profiling. Transfers to RPC providers, DexScreener, Etherscan, Blockscout, and this Worker happen only as needed for that purpose, or as required by law. Revert receives the public network and NFT ID only when the user follows the external link, under Revert Finance's own policies.</p>
 
 <h2>Changes</h2>
 <p>If data handling changes, the effective date at the top will change and LPLens will present the change in-product before the affected feature handles the newly disclosed data. A changed chart-data boundary uses a new consent version and therefore defaults off until the user opts in again. There is no in-product mailing list.</p>
@@ -468,6 +477,109 @@ async function relayRequest(payload, env) {
   }
 }
 
+/** Validate the only transaction-receipt request this relay is allowed to make. */
+export function receiptQuery(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('invalid receipt request');
+  }
+  const fields = Object.keys(payload);
+  if (fields.length !== RECEIPT_FIELDS.size
+      || fields.some((name) => !RECEIPT_FIELDS.has(name))
+      || [...RECEIPT_FIELDS].some((name) => !Object.hasOwn(payload, name))) {
+    throw new Error('unsupported receipt field');
+  }
+  if (typeof payload.key !== 'string' || typeof payload.installationId !== 'string') {
+    throw new Error('invalid receipt credentials');
+  }
+  if (payload.chainId !== '4663') throw new Error('unsupported receipt chain');
+  if (typeof payload.transactionHash !== 'string'
+      || !TRANSACTION_HASH.test(payload.transactionHash)) {
+    throw new Error('invalid transaction hash');
+  }
+  return {
+    chainId: '4663',
+    transactionHash: payload.transactionHash.toLowerCase(),
+  };
+}
+
+async function receiptRequest(payload, env) {
+  let query;
+  try { query = receiptQuery(payload); }
+  catch (err) { return json({ error: err.message || 'Invalid receipt request.' }, 400); }
+
+  const key = String(payload.key).trim();
+  const installationId = String(payload.installationId).trim();
+  if (!key || !INSTALLATION_ID.test(installationId)) {
+    return json({ error: 'Access not granted.' }, 401);
+  }
+
+  let auth;
+  try {
+    auth = await authorise(key, installationId, env);
+  } catch {
+    return json({ error: 'Access verification is temporarily unavailable.' }, 503);
+  }
+  if (!auth.valid) return json({ error: auth.reason || GENERIC }, 403);
+
+  const secret = env && env.BLOCKSCOUT_PRO_API_KEY;
+  if (!secret) return json({ error: 'Receipt relay is not configured.' }, 503);
+
+  let quota;
+  try { quota = await takeRelayQuota(env, auth.keyHash, auth.entry); }
+  catch { return json({ error: 'Receipt relay is temporarily unavailable.' }, 503); }
+  if (!quota.allowed) {
+    return json({ error: 'This access key reached its daily history allowance.' }, 429);
+  }
+
+  try {
+    const response = await fetch(ROBINHOOD_RECEIPT_RPC, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getTransactionReceipt',
+        params: [query.transactionHash],
+      }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) throw new Error('upstream rejected receipt request');
+    const text = await response.text();
+    if (text.length > 5_000_000) throw new Error('upstream response too large');
+    let body;
+    try { body = JSON.parse(text); }
+    catch { throw new Error('upstream returned non-JSON'); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+        || body.jsonrpc !== '2.0' || body.id !== 1 || Object.hasOwn(body, 'error')) {
+      throw new Error('upstream returned an invalid JSON-RPC response');
+    }
+    const receipt = body.result;
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+        || typeof receipt.transactionHash !== 'string'
+        || receipt.transactionHash.toLowerCase() !== query.transactionHash
+        || receipt.status !== '0x1'
+        || !Array.isArray(receipt.logs)) {
+      return json({ error: 'Receipt is unavailable for this request.' }, 404);
+    }
+    const managerLog = receipt.logs.some((log) => {
+      const address = log && typeof log === 'object' && !Array.isArray(log)
+        ? String(log.address || '').toLowerCase() : '';
+      const topics = log && Array.isArray(log.topics) ? log.topics : [];
+      return address === ROBINHOOD_V4_POOL_MANAGER
+        && String(topics[0] || '').toLowerCase() === MODIFY_LIQUIDITY_TOPIC
+        && String(topics[2] || '').toLowerCase() === topicAddress(ROBINHOOD_V4_POSITION_MANAGER);
+    });
+    if (!managerLog) return json({ error: 'Receipt is unavailable for this request.' }, 404);
+    return json({ result: receipt });
+  } catch {
+    return json({ error: 'Blockscout Pro receipt is temporarily unavailable.' }, 502);
+  }
+}
+
 /** Copy only the anonymous, allowlisted telemetry shape. */
 export function telemetryEvent(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -580,13 +692,15 @@ export default {
     let payload;
     try { payload = await readPayload(request); }
     catch {
-      return path === '/blockscout' || path === '/history' || path === '/telemetry'
+      return path === '/blockscout' || path === '/history'
+        || path === '/receipt' || path === '/telemetry'
         ? json({ error: 'Invalid request.' }, 400)
         : json({ valid: false, expires: null, reason: GENERIC }, 400);
     }
 
     if (path === '/') return validateRequest(payload, env);
     if (path === '/blockscout' || path === '/history') return relayRequest(payload, env);
+    if (path === '/receipt') return receiptRequest(payload, env);
     if (path === '/telemetry') return telemetryRequest(payload, env);
     return json({ error: 'Not found.' }, 404);
   },

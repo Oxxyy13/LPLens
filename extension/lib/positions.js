@@ -238,14 +238,17 @@ const PRICE_MEMO_TTL_MS = 60_000;
 const PRICE_MEMO_MAX = 500;
 
 function tagPosition(p, chainKey, deployment = null) {
-  const chainProtocol = CHAINS[chainKey] && CHAINS[chainKey].protocol;
+  const chain = CHAINS[chainKey];
+  const chainProtocol = chain && chain.protocol;
+  const version = p.version || 'v3';
+  const standardV4 = version === 'v4' && chain?.v4PositionManager && !chainProtocol;
   return {
     ...p,
     chainKey,
-    version: p.version || 'v3',
-    deploymentId: p.deploymentId || deployment?.id || null,
-    manager: p.manager || deployment?.nfpm || null,
-    protocol: p.protocol || deployment?.protocol || chainProtocol || null,
+    version,
+    deploymentId: p.deploymentId || deployment?.id || (standardV4 ? 'uniswap-v4' : null),
+    manager: p.manager || deployment?.nfpm || (standardV4 ? chain.v4PositionManager : null),
+    protocol: p.protocol || deployment?.protocol || chainProtocol || (standardV4 ? 'Uniswap' : null),
   };
 }
 
@@ -1281,7 +1284,10 @@ export async function attachUsd(chainKey, p, opts = {}) {
       latestAddPriceChange,
       capitalEvents,
       markSource: chainPair ? 'pool' : 'dexscreener',
-      bridged: !!(CHAINS[chainKey] && CHAINS[chainKey].usdRef && CHAINS[chainKey].usdRef.via),
+      // Only show the bridge caveat when this position actually used the
+      // wrapped-native origin-chain price. A direct USDG anchor on Robinhood
+      // must not inherit the chain's unrelated WETH pricing assumption.
+      bridged: !!(chainPair?.bridged || basis?.bridged || proceeds?.bridged),
       grossAdded: basis ? basis.basis : null,
       grossAddedExact: basis ? basis.exact : null,
       grossAddedBound: basis ? basis.bound : null,

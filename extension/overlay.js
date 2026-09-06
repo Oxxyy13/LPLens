@@ -746,21 +746,66 @@ function up33BoundarySafePlacement(rect, viewportWidth, dialogLeft,
   if (!Number.isFinite(width) || width < minWidth || left < gap) return null;
   return { left, width };
 }
+
+function up33ManageDetailPlacement(viewportWidth, dialogLeft,
+  gap = GUTTER_GAP, minWidth = 280, maxWidth = 384) {
+  const viewportRight = Number(viewportWidth);
+  const boundary = Number(dialogLeft);
+  if (!Number.isFinite(viewportRight) || viewportRight <= 0
+      || !Number.isFinite(boundary) || boundary >= viewportRight) return null;
+  const width = Math.min(maxWidth, Math.floor(boundary - gap * 2));
+  const left = Math.floor(boundary - gap - width);
+  if (!Number.isFinite(width) || width < minWidth || left < gap) return null;
+  return { left, width };
+}
 // END PURE UP33 ROW ANCHORING
+
+function up33VisibleDockedDialogLeft(dialog, viewportWidth) {
+  const viewportRight = Number(viewportWidth);
+  if (!dialog || !dialog.isConnected
+      || !Number.isFinite(viewportRight) || viewportRight <= 0) return null;
+  const rect = dialog.getBoundingClientRect();
+  if (![rect.left, rect.right, rect.top, rect.bottom, rect.width, rect.height]
+    .every(Number.isFinite)) return null;
+  const horizontalOverlap = Math.min(rect.right, viewportRight) - Math.max(rect.left, 0);
+  const verticalOverlap = Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0);
+  const rightDocked = rect.right >= viewportRight - 2
+    && horizontalOverlap >= Math.min(GUTTER_MIN, rect.width);
+  const drawerSized = rect.width >= GUTTER_MIN
+    && rect.height >= Math.min(innerHeight * 0.5, 360);
+  let visible = verticalOverlap >= Math.min(48, rect.height);
+  for (let node = dialog; visible && node; node = node.parentElement) {
+    if (node.hidden === true
+        || String(node.getAttribute && node.getAttribute('aria-hidden') || '').toLowerCase() === 'true') {
+      visible = false;
+      break;
+    }
+    const style = getComputedStyle(node);
+    const opacity = Number.parseFloat(style.opacity);
+    if (style.display === 'none' || style.visibility === 'hidden'
+        || style.visibility === 'collapse' || style.contentVisibility === 'hidden'
+        || (Number.isFinite(opacity) && opacity <= 0)) {
+      visible = false;
+    }
+  }
+  return rightDocked && drawerSized && visible ? rect.left : null;
+}
+
+function up33DockedDialogs(viewportWidth) {
+  const matches = [];
+  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+    const left = up33VisibleDockedDialogLeft(dialog, viewportWidth);
+    if (left !== null) matches.push({ dialog, left });
+  }
+  return matches;
+}
 
 function up33DockedDialogLeft(viewportWidth) {
   const viewportRight = Number(viewportWidth);
-  let boundary = viewportRight;
   if (!Number.isFinite(viewportRight) || viewportRight <= 0) return 0;
-  for (const dialog of document.querySelectorAll('[role="dialog"]')) {
-    const rect = dialog.getBoundingClientRect();
-    const rightDocked = Number.isFinite(rect.left) && Number.isFinite(rect.right)
-      && rect.right >= viewportRight - 2 && rect.left >= 0;
-    const drawerSized = Number.isFinite(rect.width) && Number.isFinite(rect.height)
-      && rect.width >= GUTTER_MIN
-      && rect.height >= Math.min(innerHeight * 0.5, 360);
-    const visible = rect.bottom > 0 && rect.top < innerHeight;
-    if (rightDocked && drawerSized && visible) boundary = Math.min(boundary, rect.left);
+  let boundary = viewportRight;
+  for (const match of up33DockedDialogs(viewportWidth)) {
+    boundary = Math.min(boundary, match.left);
   }
   return boundary;
 }
@@ -778,6 +823,7 @@ function up33RowPlacement(rect, viewportWidth, gap = GUTTER_GAP,
 function placeGutterCards() {
   gutterRaf = false;
   const leftWidth = Math.min(190, gutterWidth());
+  const manageDetailVisible = placeUp33ManageDetail();
   let hasUp33Rows = false;
   let up33PlacementComplete = true;
   for (const row of gutterRows) {
@@ -794,6 +840,10 @@ function placeGutterCards() {
     const onScreen = r.bottom > 0 && r.top < innerHeight && r.width > 0;
     if (row.placement === 'up33-right') {
       hasUp33Rows = true;
+      if (manageDetailVisible) {
+        row.el.style.display = 'none';
+        continue;
+      }
       const placement = up33RowPlacement(r, innerWidth);
       if (!placement) {
         up33PlacementComplete = false;
@@ -828,7 +878,7 @@ function placeGutterCards() {
   }
   if (hasUp33Rows) {
     const dialogOpen = up33DockedDialogLeft(innerWidth) < innerWidth;
-    setUp33FloatingVisible(!up33PlacementComplete && !dialogOpen);
+    setUp33FloatingVisible(!manageDetailVisible && !up33PlacementComplete && !dialogOpen);
   }
 }
 
@@ -926,6 +976,254 @@ function gutterCard(row, includeRange = true) {
     <div class="gc-sub gc-status">${esc([protocol, d.custody === 'gauge' ? 'staked' : null, closed ? 'closed' : d.status, a ? a.dur : null].filter(Boolean).join(' · '))}</div>`;
 }
 
+function up33DetailNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function up33DetailMoney(value, signed = false) {
+  const number = up33DetailNumber(value);
+  if (number === null) return 'unavailable';
+  const prefix = signed ? (number < 0 ? '−' : '+') : (number < 0 ? '−' : '');
+  return `${prefix}$${Math.abs(number).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: Math.abs(number) < 1 ? 4 : 2,
+  })}`;
+}
+
+function up33DetailPct(value, digits = 2) {
+  const number = up33DetailNumber(value);
+  if (number === null) return 'unavailable';
+  return `${number > 0 ? '+' : number < 0 ? '−' : ''}${Math.abs(number).toFixed(digits)}%`;
+}
+
+function up33DetailTone(value) {
+  const number = up33DetailNumber(value);
+  return number === null ? 'muted' : number > 0 ? 'pos' : number < 0 ? 'neg' : '';
+}
+
+function up33DetailAmounts(amount0, amount1, s0, s1) {
+  const first = up33DetailNumber(amount0);
+  const second = up33DetailNumber(amount1);
+  if (first === null || second === null) return 'unavailable';
+  return `${fmt(first)} ${esc(s0)}<br>${fmt(second)} ${esc(s1)}`;
+}
+
+function up33DetailMetric(label, value, note = '', tone = '') {
+  return `<div class="up33-detail-metric"><span>${esc(label)}</span>`
+    + `<b class="${tone}">${value}</b>${note ? `<small>${note}</small>` : ''}</div>`;
+}
+
+function up33DetailReadTime(value) {
+  const milliseconds = up33DetailNumber(value);
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0
+      || milliseconds > 8_640_000_000_000_000) return '';
+  return new Date(milliseconds).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+}
+
+/**
+ * Expanded, page-facing detail for the exact public row the user activated.
+ * Every value here comes from up33OverlayPosition's allowlisted shape. The
+ * dialog contributes geometry only and is never used as a data source.
+ */
+function up33ManageDetailCard(d, positionId, freshness = {}) {
+  const h = d && d.history || {};
+  const u = d && d.usd || {};
+  const v = h.vsHodl || null;
+  const s0 = String(d && d.token0Meta && d.token0Meta.symbol || '?');
+  const s1 = String(d && d.token1Meta && d.token1Meta.symbol || '?');
+  const feeLabel = Number.isFinite(Number(d && d.fee))
+    ? `${(Number(d.fee) / 10000).toFixed(2)}%` : 'dynamic';
+  const statusClass = ({
+    'in-range': 'in-range', below: 'below', above: 'above', closed: 'closed',
+  })[d && d.status] || 'closed';
+  const pnl = up33DetailNumber(u.pnl);
+  const pnlPct = up33DetailNumber(u.pnlPct);
+  const vsUsd = up33DetailNumber(u.vsHodl);
+  const vsPct = up33DetailNumber(v && v.pct);
+  const lifetimeReason = String(h.unavailable || u.returnUnavailable
+    || 'Lifetime return is unavailable for this position.');
+  const readTime = up33DetailReadTime(freshness.readAt);
+  const refreshStatus = freshness.refreshing
+    ? 'Refreshing current on-chain data...'
+    : freshness.error || (readTime ? `On-chain read ${readTime}` : 'On-chain read time unavailable');
+  const refreshNote = (freshness.refreshing || freshness.error) && readTime
+    ? `Last completed read ${readTime}. Reopen Manage after a transaction to refresh again.`
+    : 'Reopen Manage after a transaction to refresh again.';
+
+  const summary = [
+    up33DetailMetric(
+      'gross added',
+      up33DetailMoney(u.grossAdded),
+      up33DetailNumber(u.grossAdded) === null ? esc(lifetimeReason)
+        : (u.grossAddedExact === false ? 'bounded' : ''),
+    ),
+    up33DetailMetric(
+      'current value',
+      up33DetailMoney(u.totalNow),
+      u.currentValueIncomplete ? 'active liquidity only' : '',
+    ),
+    up33DetailMetric('active liquidity', up33DetailMoney(u.value)),
+    up33DetailMetric(
+      'collectable',
+      up33DetailMoney(u.collectable),
+      d.collectable0 === null || d.collectable1 === null
+        ? 'current amounts unavailable' : '',
+    ),
+    up33DetailMetric(
+      h.feeCreditsOnAdd ? 'fees credited' : 'cash returned',
+      up33DetailMoney(u.collectedProceeds),
+      up33DetailNumber(u.collectedProceeds) === null && h.unavailable
+        ? 'history unavailable' : (u.collectedProceedsExact === false ? 'bounded' : ''),
+    ),
+    up33DetailMetric('net cash in', up33DetailMoney(u.netCashIn)),
+  ].join('');
+
+  const lo = Math.min(Number(d.priceLower), Number(d.priceUpper));
+  const hi = Math.max(Number(d.priceLower), Number(d.priceUpper));
+  const current = up33DetailNumber(d.price);
+  const rangeValid = Number.isFinite(lo) && Number.isFinite(hi) && hi > lo && lo > 0;
+  const unit = `${esc(s1)} per ${esc(s0)}`;
+  const entry = h.entry
+    ? `${priceText(h.entry)}<br><span class="unit">${unit}</span>` : 'unavailable';
+  const currentPrice = current !== null
+    ? `${fmt(current, 8)}<br><span class="unit">${unit}</span>` : 'unavailable';
+  const range = rangeValid
+    ? `${fmt(lo, 8)} to ${fmt(hi, 8)}<br><span class="unit">${unit}</span>` : 'unavailable';
+
+  const ledger = [
+    up33DetailMetric('gross deposited', up33DetailAmounts(
+      h.deposited0, h.deposited1, s0, s1,
+    )),
+    up33DetailMetric('active tokens', up33DetailAmounts(
+      d.amount0, d.amount1, s0, s1,
+    )),
+    up33DetailMetric('collected', up33DetailAmounts(
+      h.received0, h.received1, s0, s1,
+    )),
+    up33DetailMetric('collectable', up33DetailAmounts(
+      d.collectable0, d.collectable1, s0, s1,
+    )),
+  ].join('');
+  const rangeShiftComplete = [
+    h.deposited0, h.deposited1, h.received0, h.received1,
+    d.amount0, d.amount1, d.collectable0, d.collectable1,
+  ].every((value) => up33DetailNumber(value) !== null);
+
+  const decomposition = [];
+  if (up33DetailNumber(v && v.feesPct) !== null) {
+    decomposition.push(up33DetailMetric(
+      'fees earned', up33DetailPct(v.feesPct, 3), '', up33DetailTone(v.feesPct),
+    ));
+  }
+  if (up33DetailNumber(v && v.ilPct) !== null) {
+    const ilPerformance = -Number(v.ilPct);
+    decomposition.push(up33DetailMetric(
+      'impermanent loss', up33DetailPct(ilPerformance, 3), '', up33DetailTone(ilPerformance),
+    ));
+  }
+  const rewards = pendingRewards(d);
+  for (const reward of rewards) {
+    decomposition.push(up33DetailMetric(
+      `pending ${reward.symbol}`,
+      `${fmt(reward.amount)} ${esc(reward.symbol)}`,
+      'excluded from LP return', reward.amount > 0 ? 'pos' : '',
+    ));
+  }
+
+
+  const capitalEvents = Array.isArray(u.capitalEvents) ? u.capitalEvents : [];
+  const capitalRows = capitalEvents.map((event) => {
+    const when = up33DetailNumber(event.time) !== null
+      ? new Date(Number(event.time) * 1000).toISOString().slice(0, 10)
+      : `block ${Number(event.block).toLocaleString('en-US')}`;
+    return `<div class="up33-capital-row"><span>${esc(event.kind)}<small>${esc(when)}</small></span>`
+      + `<b>${up33DetailMoney(event.value)}${event.exact ? '' : '*'}<small>`
+      + `${fmt(event.amount0)} ${esc(s0)} + ${fmt(event.amount1)} ${esc(s1)}</small></b></div>`;
+  }).join('');
+
+  const priceGroups = [u.tokenPriceChange, u.latestAddPriceChange].filter(Boolean);
+  const priceMoveGroups = priceGroups.map((group) => {
+    const moves = [[s0, group.token0], [s1, group.token1]]
+      .filter(([, move]) => move && up33DetailNumber(move.pct) !== null)
+      .map(([symbol, move]) => up33DetailMetric(
+        `${symbol} price`, up33DetailPct(move.pct),
+        `$${fmt(move.from, move.from < 1 ? 8 : 2)} to $${fmt(move.to, move.to < 1 ? 8 : 2)}`,
+        up33DetailTone(move.pct),
+      )).join('');
+    return moves ? `<div class="up33-price-moves"><span>since ${esc(group.label)}</span>`
+      + `<div class="up33-detail-grid">${moves}</div></div>` : '';
+  }).join('');
+
+  const caveats = [];
+  if (h.unavailable) caveats.push(String(h.unavailable));
+  if (u.returnUnavailable && u.returnUnavailable !== h.unavailable) {
+    caveats.push(String(u.returnUnavailable));
+  }
+  if (h.currentUnavailable) {
+    caveats.push(d.custody === 'gauge'
+      ? 'UP33 does not expose the user trading-fee balance while this position is staked.'
+      : 'Current collectable amounts could not be read.');
+  }
+  if (d.rewardsUnavailable) caveats.push(String(d.rewardsUnavailable));
+  if (!rangeValid || current === null) caveats.push('Current range pricing is unavailable.');
+  if (u.capitalEventsTruncated) {
+    caveats.push('Only the first 12 capital additions are shown in this page card.');
+  }
+  if (capitalEvents.some((event) => event.exact !== true)) {
+    caveats.push('Capital additions marked with * are bounded estimates.');
+  }
+  if (!h.unavailable && !rangeShiftComplete) {
+    caveats.push('Range shift is unavailable because one or more token amounts are incomplete.');
+  }
+  if (up33DetailNumber(u.totalNow) === null) {
+    caveats.push('Complete current position value is unavailable.');
+  }
+
+  return `<div class="up33-detail-head">
+      <div><strong><span class="gc-dot ${statusClass}"></span>${esc(s0)} / ${esc(s1)}</strong>
+        <span>${esc(feeLabel)} · position #${esc(positionId)} · ${d.custody === 'gauge' ? 'staked' : 'direct custody'}</span></div>
+      <div class="up33-detail-badges"><span class="up33-detail-brand">LPLens</span>
+        <span class="pill ${statusClass}">${esc(d.status)}</span></div>
+    </div>
+    <div class="up33-detail-freshness ${freshness.error ? 'err' : ''}">
+      <strong>${esc(refreshStatus)}</strong><span>${esc(refreshNote)}</span>
+    </div>
+    <div class="up33-detail-hero">
+      ${up33DetailMetric(
+        'LP return', pnl === null ? 'unavailable' : up33DetailMoney(pnl, true),
+        pnlPct === null ? esc(lifetimeReason) : `${up33DetailPct(pnlPct)} on gross added`,
+        up33DetailTone(pnl),
+      )}
+      ${up33DetailMetric(
+        'vs holding', vsUsd === null ? 'unavailable' : up33DetailMoney(vsUsd, true),
+        vsPct === null ? esc(lifetimeReason) : `${up33DetailPct(vsPct)} · fees minus IL`,
+        up33DetailTone(vsUsd !== null ? vsUsd : vsPct),
+      )}
+    </div>
+    ${rangeValid && current !== null ? rangeBar(d, h) : ''}
+    <div class="up33-detail-grid">${summary}</div>
+    <div class="up33-detail-section"><span class="up33-detail-title">prices</span>
+      <div class="up33-detail-grid up33-detail-grid-three">
+        ${up33DetailMetric('entry', entry, h.entry ? '' : esc(lifetimeReason))}
+        ${up33DetailMetric('current', currentPrice)}
+        ${up33DetailMetric('range', range)}
+      </div>
+    </div>
+    <div class="up33-detail-section"><span class="up33-detail-title">token ledger</span>
+      <div class="up33-detail-grid">${ledger}</div>
+      ${rangeShiftComplete ? rebalanceLine(d, h, s0, s1) : ''}
+    </div>
+    ${capitalRows ? `<div class="up33-detail-section"><span class="up33-detail-title">capital additions</span>
+      <div class="up33-capital-list">${capitalRows}</div></div>` : ''}
+    ${priceMoveGroups ? `<div class="up33-detail-section"><span class="up33-detail-title">token price context</span>
+      ${priceMoveGroups}</div>` : ''}
+    ${decomposition.length ? `<div class="up33-detail-section"><span class="up33-detail-title">performance</span>
+      <div class="up33-detail-grid">${decomposition.join('')}</div></div>` : ''}
+    ${caveats.length ? `<div class="up33-detail-caveat">${[...new Set(caveats)].map(esc).join(' ')}</div>` : ''}`;
+}
+
 function portfolioCard(position) {
   return `<div class="portfolio-card">${gutterCard({ data: position })}</div>`;
 }
@@ -997,11 +1295,13 @@ async function syncProjectXPortfolio() {
     const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
     const address = String(res.data && res.data.address || '');
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+    const unavailable = String(res.data && res.data.unavailable || '');
     const content = positions.length
       ? positions.map(portfolioCard).join('')
-      : '<div class="note">No open ProjectX positions found for the active wallet.</div>';
+      : unavailable ? '' : '<div class="note">No open ProjectX positions found for the active wallet.</div>';
     render(head(`<span class="pill">ProjectX · ${positions.length}</span>`) + `<div class="bd">
       <div class="note">Active wallet: <span class="num">${esc(short)}</span>. ProjectX wallet data is not read.</div>
+      ${unavailable ? `<div class="err note" role="status">${esc(unavailable)}</div>` : ''}
       ${content}
     </div>`, true);
   } finally {
@@ -1032,7 +1332,225 @@ let up33Busy = false;
 let up33Pending = false;
 let up33Generation = 0;
 let up33PositionMap = new Map();
+let up33DataRevision = 0;
+let up33DataReadAt = 0;
 let up33ResizeObserver = null;
+let up33PendingPositionId = null;
+let up33PendingPositionAt = 0;
+let up33ManagePositionId = null;
+let up33ManageDialogOpen = false;
+let up33ManageDialogElement = null;
+let up33ManageRefreshNonce = 0;
+let up33ManageRefreshing = false;
+let up33ManageRefreshError = '';
+const UP33_MANAGE_ACTIVATION_MS = 5_000;
+
+function clearUp33ManageSelection() {
+  up33ManageRefreshNonce++;
+  up33PendingPositionId = null;
+  up33PendingPositionAt = 0;
+  up33ManagePositionId = null;
+  up33ManageDialogOpen = false;
+  up33ManageDialogElement = null;
+  up33ManageRefreshing = false;
+  up33ManageRefreshError = '';
+}
+
+function up33MapPositions(positions) {
+  return new Map((Array.isArray(positions) ? positions : []).flatMap((position) => {
+    const positionId = parseUp33FlowKey(`cl-${String(position && position.positionId || '')}`);
+    return positionId === null ? [] : [[positionId, position]];
+  }));
+}
+
+function renderUp33FloatingSnapshot(positionsValue, unavailableValue, walletLabelValue) {
+  const positions = Array.isArray(positionsValue) ? positionsValue : [];
+  const unavailable = String(unavailableValue || '');
+  const short = String(walletLabelValue || '');
+  const shown = positions.slice(0, 8);
+  const overflow = positions.length - shown.length;
+  let content;
+  if (shown.length) {
+    content = shown.map(portfolioCard).join('')
+      + (overflow > 0 ? `<div class="note">${overflow} more UP33 position${overflow === 1 ? '' : 's'} not shown here.</div>` : '');
+  } else if (unavailable) {
+    content = `<div class="err note">UP33 positions could not be read: ${esc(unavailable)}</div>`;
+  } else {
+    content = '<div class="note">No open UP33 concentrated positions found for the active wallet. UP33 v2 LP and liquidity-locker positions are not read yet.</div>';
+  }
+  render(head(`<span class="pill">UP33 · ${positions.length}</span>`) + `<div class="bd">
+    <div class="note">Active wallet: <span class="num">${esc(short)}</span>. On this list, LPLens reads only validated public position NFT IDs and row geometry. When you open Manage from a matching row, its ID and click state stay in memory for up to five seconds while LPLens associates the new drawer. Once matched, the selected ID remains in memory only until the drawer closes or context changes. Neither state is persisted or transmitted. The drawer contributes boundary geometry only. Dialog content, connected wallet data, and transaction controls are not read.</div>
+    ${content}
+  </div>`, true);
+}
+
+async function refreshUp33ManageSnapshot(positionId) {
+  const nonce = ++up33ManageRefreshNonce;
+  const generation = up33Generation;
+  up33ManageRefreshing = true;
+  up33ManageRefreshError = '';
+  up33DataRevision++;
+
+  let res;
+  try {
+    // The active overlay wallet remains the worker's only scan input. The
+    // public row ID is deliberately not included in this request.
+    res = await chrome.runtime.sendMessage({ type: 'LPLENS_UP33_LIQUIDITY' });
+  } catch (err) {
+    if (isOrphanError(err)) return shutdownOrphan();
+    res = null;
+  }
+  if (torndown || nonce !== up33ManageRefreshNonce || generation !== up33Generation
+      || up33ManagePositionId !== positionId || !up33ManageDialogOpen
+      || !UP33_LIST_ROUTE.test(location.pathname)) return;
+  if (res && res.permissionRevoked) return shutdownRevoked();
+
+  up33ManageRefreshing = false;
+  if (!res || !res.ok) {
+    up33ManageRefreshError = 'Automatic on-chain refresh failed. Reopen Manage to try again.';
+    up33DataRevision++;
+    syncUp33Rows();
+    return;
+  }
+
+  const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
+  up33PositionMap = up33MapPositions(positions);
+  up33DataReadAt = Date.now();
+  up33ManageRefreshError = '';
+  up33DataRevision++;
+  renderUp33FloatingSnapshot(
+    positions,
+    res.data && res.data.unavailable,
+    res.data && res.data.walletLabel,
+  );
+  syncUp33Rows();
+}
+
+function reconcileUp33ManageSelection() {
+  if (up33ManageDialogElement) {
+    const selectedDialogLeft = up33VisibleDockedDialogLeft(
+      up33ManageDialogElement, innerWidth,
+    );
+    if (selectedDialogLeft === null || !up33ManagePositionId) {
+      clearUp33ManageSelection();
+      return { dialogLeft: up33DockedDialogLeft(innerWidth), positionId: null };
+    }
+    up33ManageDialogOpen = true;
+    // Identity remains bound to the trusted Manage drawer. Layout must also
+    // avoid any wider secondary drawer, without reading either one's contents.
+    return {
+      dialogLeft: Math.min(selectedDialogLeft, up33DockedDialogLeft(innerWidth)),
+      positionId: up33ManagePositionId,
+    };
+  }
+
+  const dialogs = up33DockedDialogs(innerWidth);
+  const dialogLeft = dialogs.reduce(
+    (left, match) => Math.min(left, match.left), innerWidth,
+  );
+  const dialogOpen = dialogs.length > 0;
+  if (!dialogOpen) {
+    if (up33ManageDialogOpen) clearUp33ManageSelection();
+    up33ManageDialogOpen = false;
+    if (up33PendingPositionId
+        && Date.now() - up33PendingPositionAt > UP33_MANAGE_ACTIVATION_MS) {
+      up33PendingPositionId = null;
+      up33PendingPositionAt = 0;
+    }
+    return { dialogLeft, positionId: null };
+  }
+
+  if (!up33ManageDialogOpen && up33PendingPositionId
+      && Date.now() - up33PendingPositionAt <= UP33_MANAGE_ACTIVATION_MS) {
+    if (dialogs.length === 1) {
+      up33ManageDialogElement = dialogs[0].dialog;
+      up33ManagePositionId = up33PendingPositionId;
+      up33PendingPositionId = null;
+      up33PendingPositionAt = 0;
+      void refreshUp33ManageSnapshot(up33ManagePositionId);
+    } else {
+      up33PendingPositionId = null;
+      up33PendingPositionAt = 0;
+    }
+  }
+  up33ManageDialogOpen = true;
+  return { dialogLeft, positionId: up33ManagePositionId };
+}
+
+function placeUp33ManageDetail() {
+  if (!ON_UP33) return false;
+  const host = document.getElementById(LIST_HOST_ID);
+  const card = host && host.__shadow
+    ? host.__shadow.querySelector('.gc.up33-manage-detail') : null;
+  if (!card) return false;
+  const selection = reconcileUp33ManageSelection();
+  const placement = selection.positionId === card.dataset.positionId
+      && up33PositionMap.has(selection.positionId)
+    ? up33ManageDetailPlacement(innerWidth, selection.dialogLeft) : null;
+  if (!placement) {
+    card.style.display = 'none';
+    return false;
+  }
+  card.style.display = 'block';
+  card.style.left = placement.left + 'px';
+  card.style.width = placement.width + 'px';
+  card.style.top = GUTTER_GAP + 'px';
+  card.style.maxHeight = Math.max(280, innerHeight - GUTTER_GAP * 2) + 'px';
+  return true;
+}
+
+function renderUp33ManageDetail() {
+  const selection = reconcileUp33ManageSelection();
+  if (!selection.positionId) {
+    const existing = document.getElementById(LIST_HOST_ID);
+    const stale = existing && existing.__shadow
+      ? existing.__shadow.querySelector('.gc.up33-manage-detail') : null;
+    if (stale) stale.remove();
+    return false;
+  }
+  const data = up33PositionMap.get(selection.positionId);
+  const placement = data
+    ? up33ManageDetailPlacement(innerWidth, selection.dialogLeft) : null;
+  if (!data || !placement) {
+    const existing = document.getElementById(LIST_HOST_ID);
+    const stale = existing && existing.__shadow
+      ? existing.__shadow.querySelector('.gc.up33-manage-detail') : null;
+    if (stale) {
+      if (!data) stale.remove();
+      else stale.style.display = 'none';
+    }
+    return false;
+  }
+
+  const shadow = listHost().__shadow;
+  const cards = shadow.getElementById('cards');
+  let card = cards.querySelector('.gc.up33-manage-detail');
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'gc up33-manage-detail';
+    cards.appendChild(card);
+  }
+  const renderRevision = `${selection.positionId}:${up33DataRevision}`;
+  const previousScrollTop = card.scrollTop;
+  card.dataset.positionId = selection.positionId;
+  if (card.dataset.renderRevision !== renderRevision) {
+    card.dataset.renderRevision = renderRevision;
+    card.innerHTML = up33ManageDetailCard(data, selection.positionId, {
+      readAt: up33DataReadAt,
+      refreshing: up33ManageRefreshing,
+      error: up33ManageRefreshError,
+    });
+    if (previousScrollTop > 0) {
+      card.scrollTop = previousScrollTop;
+      requestAnimationFrame(() => {
+        if (card.isConnected && card.dataset.renderRevision === renderRevision) {
+          card.scrollTop = previousScrollTop;
+        }
+      });
+    }
+  }
+  return placeUp33ManageDetail();
+}
 
 function setUp33FloatingVisible(visible) {
   if (!ON_UP33) return;
@@ -1044,7 +1562,12 @@ function setUp33FloatingVisible(visible) {
 function clearUp33Rows(removeHost = false, clearPositions = false) {
   if (up33ResizeObserver) up33ResizeObserver.disconnect();
   up33ResizeObserver = null;
-  if (clearPositions) up33PositionMap = new Map();
+  if (clearPositions) {
+    up33PositionMap = new Map();
+    up33DataReadAt = 0;
+    up33DataRevision++;
+    clearUp33ManageSelection();
+  }
   gutterRows = [];
   if (removeHost) {
     teardownList();
@@ -1054,15 +1577,44 @@ function clearUp33Rows(removeHost = false, clearPositions = false) {
   if (!host || !host.__shadow) return;
   const cards = host.__shadow.getElementById('cards');
   const panel = host.__shadow.querySelector('.panel');
-  if (cards) cards.innerHTML = '';
+  if (cards) {
+    if (clearPositions) cards.innerHTML = '';
+    else for (const row of cards.querySelectorAll('.gc.up33-row')) row.remove();
+  }
   if (panel) panel.style.display = 'none';
+}
+
+function up33PositionIdLeafVisible(leaf, anchor) {
+  if (!leaf || !anchor || !anchor.contains(leaf)) return false;
+  const rect = leaf.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const visibleWidth = Math.min(rect.right, anchorRect.right, innerWidth)
+    - Math.max(rect.left, anchorRect.left, 0);
+  const visibleHeight = Math.min(rect.bottom, anchorRect.bottom, innerHeight)
+    - Math.max(rect.top, anchorRect.top, 0);
+  if (!(rect.width > 0) || !(rect.height > 0)
+      || !(visibleWidth > 0) || !(visibleHeight > 0)) return false;
+  for (let node = leaf; node; node = node.parentElement) {
+    if (node.hidden === true
+        || String(node.getAttribute && node.getAttribute('aria-hidden') || '').toLowerCase() === 'true') {
+      return false;
+    }
+    const style = getComputedStyle(node);
+    const opacity = Number.parseFloat(style.opacity);
+    if (style.display === 'none' || style.visibility === 'hidden'
+        || style.visibility === 'collapse' || style.contentVisibility === 'hidden'
+        || (Number.isFinite(opacity) && opacity <= 0)) return false;
+    if (node === anchor) return true;
+  }
+  return false;
 }
 
 function up33RowHasExactPositionId(anchor, positionId) {
   if (!anchor || anchor.tagName !== 'BUTTON') return false;
   const expected = `#${positionId}`;
   for (const leaf of anchor.querySelectorAll('span')) {
-    if (leaf.children.length === 0 && String(leaf.textContent || '').trim() === expected) {
+    if (leaf.children.length === 0 && up33PositionIdLeafVisible(leaf, anchor)
+        && String(leaf.textContent || '').trim() === expected) {
       return true;
     }
   }
@@ -1147,17 +1699,18 @@ function syncUp33Rows() {
 
   if (!complete || matched.length !== candidatesById.size) {
     clearUp33Rows(false, false);
+    const detailVisible = renderUp33ManageDetail();
     // If a right-docked dialog leaves no safe card space, hide LPLens until the
     // dialog closes instead of replacing the small cards with a larger panel.
-    setUp33FloatingVisible(!dialogOpen);
-    return false;
+    setUp33FloatingVisible(!detailVisible && !dialogOpen);
+    return detailVisible;
   }
 
   const shadow = listHost().__shadow;
   const cards = shadow.getElementById('cards');
   const panel = shadow.querySelector('.panel');
   panel.style.display = 'none';
-  cards.innerHTML = '';
+  for (const row of cards.querySelectorAll('.gc.up33-row')) row.remove();
   gutterRows = matched;
   for (const row of gutterRows) {
     const el = document.createElement('div');
@@ -1166,6 +1719,7 @@ function syncUp33Rows() {
     cards.appendChild(el);
     row.el = el;
   }
+  renderUp33ManageDetail();
   watchUp33RowGeometry(gutterRows);
   setUp33FloatingVisible(false);
   placeSoon();
@@ -1179,6 +1733,7 @@ async function syncUp33Liquidity() {
     return teardown();
   }
   if (!UP33_LIST_ROUTE.test(location.pathname)) {
+    clearUp33ManageSelection();
     clearUp33Rows(true, false);
     setUp33FloatingVisible(true);
   }
@@ -1227,27 +1782,14 @@ async function syncUp33Liquidity() {
     }
 
     const positions = Array.isArray(res.data && res.data.positions) ? res.data.positions : [];
-    up33PositionMap = new Map(positions.flatMap((position) => {
-      const positionId = parseUp33FlowKey(`cl-${String(position && position.positionId || '')}`);
-      return positionId === null ? [] : [[positionId, position]];
-    }));
-    const unavailable = String(res.data && res.data.unavailable || '');
-    const short = String(res.data && res.data.walletLabel || '');
-    const shown = positions.slice(0, 8);
-    const overflow = positions.length - shown.length;
-    let content;
-    if (shown.length) {
-      content = shown.map(portfolioCard).join('')
-        + (overflow > 0 ? `<div class="note">${overflow} more UP33 position${overflow === 1 ? '' : 's'} not shown here.</div>` : '');
-    } else if (unavailable) {
-      content = `<div class="err note">UP33 positions could not be read: ${esc(unavailable)}</div>`;
-    } else {
-      content = '<div class="note">No open UP33 concentrated positions found for the active wallet. UP33 v2 LP and liquidity-locker positions are not read yet.</div>';
-    }
-    render(head(`<span class="pill">UP33 · ${positions.length}</span>`) + `<div class="bd">
-      <div class="note">Active wallet: <span class="num">${esc(short)}</span>. On this list, LPLens reads only public position NFT IDs and row geometry to align PnL with the matching row. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so cards do not cover it. Dialog content, connected wallet data, and transaction controls are not read.</div>
-      ${content}
-    </div>`, true);
+    up33PositionMap = up33MapPositions(positions);
+    up33DataReadAt = Date.now();
+    up33DataRevision++;
+    renderUp33FloatingSnapshot(
+      positions,
+      res.data && res.data.unavailable,
+      res.data && res.data.walletLabel,
+    );
     syncUp33Rows();
   } finally {
     up33Busy = false;
@@ -1860,6 +2402,7 @@ async function syncDexscreener() {
     const pair = res.data && res.data.pair || null;
     const pairError = String(res.data && res.data.pairError || '');
     const wrappedNative = String(res.data && res.data.wrappedNative || '');
+    const unavailable = String(res.data && res.data.unavailable || '');
     const address = String(res.data && res.data.address || '');
     const short = address.length === 42 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
     const shown = positions.slice(0, 8);
@@ -1872,12 +2415,13 @@ async function syncDexscreener() {
         position, pair, wrappedNative, pairError, prepared.rangeIdByIndex.get(index) || '',
       )).join('')
         + (overflow > 0 ? `<div class="note">${overflow} more matching position${overflow === 1 ? '' : 's'} not shown here.</div>` : '')
-      : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
+      : unavailable ? '' : '<div class="note">No open matching position for the active wallet. Switch it in LPLens Saved wallets if this LP belongs to another address.</div>';
     const chartNote = dexscreenerChartConsented
       ? 'Chart alignment is on. Up to three unlabelled low, current, and high range values are shared with this page while the overlay is open. The pool and bounds are public on-chain, so Dexscreener could correlate them to a position and owner.'
       : 'Chart alignment is off. LPLens is using its own exact on-chain range ruler. Enable chart alignment in Settings to place it on the chart.';
     render(head(`<span class="pill">Dexscreener · ${positions.length}</span>`) + `<div class="bd">
       <div class="note">Active wallet: <span class="num">${esc(short)}</span>. ${esc(chartNote)} Dexscreener wallet data is not read.</div>
+      ${unavailable ? `<div class="err note" role="status">${esc(unavailable)}</div>` : ''}
       ${content}
     </div>`);
     if (dexscreenerChartConsented) {
@@ -2010,6 +2554,47 @@ const scheduleList = () => {
     }
   }, LIST_DEBOUNCE_MS);
 };
+
+addEventListener('click', (event) => {
+  if (torndown || !ON_UP33 || !UP33_LIST_ROUTE.test(location.pathname)) return;
+  if (event.isTrusted !== true) return;
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const anchor = target.closest('button[data-flow^="cl-"]');
+  if (!anchor) return;
+  const positionId = parseUp33FlowKey(anchor.getAttribute('data-flow'));
+  if (positionId === null || !up33RowHasExactPositionId(anchor, positionId)) return;
+  if (!up33PositionMap.has(positionId)) return;
+  const rect = anchor.getBoundingClientRect();
+  if (!(rect.width > 0) || !(rect.height > 0)
+      || rect.bottom <= 0 || rect.top >= innerHeight
+      || rect.right <= 0 || rect.left >= innerWidth) return;
+
+  // A drawer that was already open cannot be proven to belong to this new
+  // activation without reading its contents. Remove the old selection and
+  // wait for an observable close-then-open transition before showing details.
+  if (up33DockedDialogLeft(innerWidth) < innerWidth) {
+    clearUp33ManageSelection();
+    up33ManageDialogOpen = true;
+    placeSoon();
+    scheduleList();
+    return;
+  }
+
+  // The click proves only which public CL row the user activated. A separate
+  // geometry check must observe a newly opened right-docked semantic dialog
+  // before the ID can drive an expanded card. Dialog content is never read.
+  up33PendingPositionId = positionId;
+  up33PendingPositionAt = Date.now();
+  const activationAt = up33PendingPositionAt;
+  setTimeout(() => {
+    if (torndown || up33PendingPositionAt !== activationAt || up33ManageDialogOpen) return;
+    up33PendingPositionId = null;
+    up33PendingPositionAt = 0;
+    scheduleList();
+  }, UP33_MANAGE_ACTIVATION_MS);
+  scheduleList();
+}, { passive: true, capture: true });
 
 addEventListener('scroll', () => {
   placeSoon();

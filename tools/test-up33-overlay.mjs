@@ -15,7 +15,7 @@ const UP33_ORIGIN = 'https://up33.xyz/*';
 const ADDRESS = '0x2222222222222222222222222222222222222222';
 const LIQUIDITY_URL = 'https://up33.xyz/liquidity';
 
-assert.equal(manifest.version, '0.33.0');
+assert.equal(manifest.version, '0.34.0');
 assert.ok(manifest.optional_host_permissions.includes(UP33_ORIGIN),
   'UP33 must remain optional site access');
 assert.ok(!(manifest.host_permissions || []).includes(UP33_ORIGIN),
@@ -38,7 +38,7 @@ assert.match(worker, /id: UP33_OVERLAY_ID/);
 
 assert.match(overlay, /const UP33_ROUTE = \/\^\\\/liquidity/);
 assert.match(overlay, /type: 'LPLENS_UP33_LIQUIDITY'/);
-assert.match(overlay, /reads only public position NFT IDs and row geometry to align PnL/);
+assert.match(overlay, /reads only validated public position NFT IDs and row geometry/);
 assert.match(overlay, /button\[data-flow\^="cl-"\]/);
 assert.match(overlay, /up33RowHasExactPositionId/);
 assert.match(overlay, /Active wallet:/);
@@ -198,7 +198,11 @@ const allowed = await workerHarness({
         protocol: 'UP33', tokenId: '77', privateSentinel: 'must-not-cross',
         custody: 'gauge', status: 'in-range', fee: 100,
         price: 2, priceLower: 1, priceUpper: 3,
-        token0Meta: { symbol: 'UP' }, token1Meta: { symbol: 'WETH' },
+        token0Meta: {
+          symbol: '<UP&"012345678901234567890123456789',
+          privateSymbolTail: 'must-not-cross',
+        },
+        token1Meta: { symbol: 'WETH' },
         history: {
           unavailable: 'private detail',
           vsHodl: { pct: 999, apr: 999, aprDays: 1 },
@@ -213,18 +217,45 @@ const allowed = await workerHarness({
         protocol: 'UP33', tokenId: '78', privateSentinel: 'must-not-cross',
         custody: 'wallet', status: 'in-range', fee: 10_000,
         price: 2, priceLower: 1, priceUpper: 3,
+        amount0: 7, amount1: 11, collectable0: 0.5, collectable1: 1.5,
         token0Meta: { symbol: 'UP' }, token1Meta: { symbol: 'WETH' },
         history: {
           firstTime: 100, lastTime: 100,
-          vsHodl: { pct: 4.5, apr: 8.5, aprDays: 30 },
+          entry: { price: 1.5, exact: true, bound: null, spread: 0.0001 },
+          exit: null, adds: 2,
+          deposited0: 10, deposited1: 8, received0: 2, received1: 3,
+          fees0: 0.75, fees1: 1.25, feeCreditsOnAdd: false,
+          vsHodl: {
+            delta: 2.25, pct: 4.5, fees: 1.75, feesPct: 3.25,
+            il: 0.5, ilPct: 0.75, apr: 8.5, aprDays: 30,
+          },
           directCustodyProven: true,
           privateProof: 'must-not-cross',
         },
         usd: {
-          pnl: 5.25, pnlPct: 3.5, totalNow: 155,
-          value: 150, currentValueIncomplete: false,
+          pnl: 5.25, pnlPct: 3.5, vsHodl: 2.25,
+          grossAdded: 160, grossAddedExact: true,
+          collectedProceeds: 10, collectedProceedsExact: true, netCashIn: 150,
+          returnUnavailable: null, totalNow: 155, value: 150, collectable: 5,
+          currentValueIncomplete: false,
+          tokenPriceChange: {
+            label: 'first add', token0: { from: 1, to: 1.5, pct: 50 },
+            token1: { from: 2, to: 1.5, pct: -25 }, private: 'must-not-cross',
+          },
+          latestAddPriceChange: {
+            label: 'latest add', token0: { from: 1.25, to: 1.5, pct: 20 },
+            token1: null,
+          },
+          capitalEvents: [{
+            kind: 'forged-kind', block: 50, time: 75,
+            amount0: 4, amount1: 6, value: 80, exact: true,
+            transactionHash: 'must-not-cross',
+          }, {
+            kind: 'forged-kind', block: 70, time: Number.MAX_SAFE_INTEGER,
+            amount0: 6, amount1: 2, value: 80, exact: true,
+          }],
         },
-        rewards: [],
+        rewards: [{ symbol: 'UP', amount: 1.25, raw: 'must-not-cross' }],
       },
       {
         protocol: 'UP33', tokenId: '79', privateSentinel: 'must-not-cross',
@@ -249,7 +280,10 @@ const allowed = await workerHarness({
         usd: { pnl: 100, pnlPct: 100, value: 100 }, rewards: [],
       },
     ],
-    deploymentIssues: [],
+    deploymentIssues: [{
+      protocol: 'UP33',
+      error: 'HTTP 429 from https://provider.invalid/?key=must-not-cross',
+    }],
   }),
 });
 const allowedReply = await allowed.dispatch('https://up33.xyz/liquidity/pools');
@@ -259,49 +293,103 @@ assert.deepEqual(JSON.parse(JSON.stringify(allowedReply.data.positions)), [
     positionId: '77',
     protocol: 'UP33', custody: 'gauge', status: 'in-range', fee: 100,
     price: 2, priceLower: 1, priceUpper: 3,
-    token0Meta: { symbol: 'UP' }, token1Meta: { symbol: 'WETH' },
+    amount0: null, amount1: null, collectable0: null, collectable1: null,
+    token0Meta: { symbol: '<UP&"0123456789012345678' },
+    token1Meta: { symbol: 'WETH' },
     history: {
-      unavailable: 'UP33 lifetime accounting unavailable',
-      firstTime: null, lastTime: null, exit: null, vsHodl: null,
+      unavailable: 'Staked position lifetime return is unavailable until historical gauge emissions and trading fees can be included.',
+      currentUnavailable: true, firstTime: null, lastTime: null,
+      entry: null, exit: null,
+      deposited0: null, deposited1: null, received0: null, received1: null,
+      feeCreditsOnAdd: false, vsHodl: null,
     },
     usd: {
-      pnl: null, pnlPct: null, totalNow: null, value: 12.5,
+      pnl: null, pnlPct: null, vsHodl: null,
+      grossAdded: null, grossAddedExact: null,
+      collectedProceeds: null, collectedProceedsExact: null,
+      netCashIn: null, returnUnavailable: null,
+      tokenPriceChange: null, latestAddPriceChange: null,
+      capitalEvents: [], capitalEventsTruncated: false,
+      totalNow: null, value: 12.5, collectable: null,
       currentValueIncomplete: true,
     },
     rewards: [{ symbol: 'UP', amount: 4 }],
+    rewardsUnavailable: null,
   },
   {
     positionId: '78',
     protocol: 'UP33', custody: 'wallet', status: 'in-range', fee: 10_000,
     price: 2, priceLower: 1, priceUpper: 3,
+    amount0: 7, amount1: 11, collectable0: 0.5, collectable1: 1.5,
     token0Meta: { symbol: 'UP' }, token1Meta: { symbol: 'WETH' },
     history: {
-      unavailable: null,
-      firstTime: 100, lastTime: 100, exit: null,
-      vsHodl: { pct: 4.5, apr: 8.5, aprDays: 30 },
+      unavailable: null, currentUnavailable: false,
+      firstTime: 100, lastTime: 100,
+      entry: { price: 1.5, exact: true, bound: null, spread: 0.0001 },
+      exit: null,
+      deposited0: 10, deposited1: 8, received0: 2, received1: 3,
+      feeCreditsOnAdd: false,
+      vsHodl: {
+        pct: 4.5, feesPct: 3.25, ilPct: 0.75, apr: 8.5, aprDays: 30,
+      },
     },
     usd: {
-      pnl: 5.25, pnlPct: 3.5, totalNow: 155, value: 150,
+      pnl: 5.25, pnlPct: 3.5, vsHodl: 2.25,
+      grossAdded: 160, grossAddedExact: true,
+      collectedProceeds: 10, collectedProceedsExact: true, netCashIn: 150,
+      returnUnavailable: null,
+      tokenPriceChange: {
+        label: 'first add', token0: { from: 1, to: 1.5, pct: 50 },
+        token1: { from: 2, to: 1.5, pct: -25 },
+      },
+      latestAddPriceChange: {
+        label: 'latest add', token0: { from: 1.25, to: 1.5, pct: 20 },
+        token1: null,
+      },
+      capitalEvents: [{
+        kind: 'opened', block: 50, time: 75,
+        amount0: 4, amount1: 6, value: 80, exact: true,
+      }, {
+        kind: 'added', block: 70, time: null,
+        amount0: 6, amount1: 2, value: 80, exact: true,
+      }],
+      capitalEventsTruncated: false,
+      totalNow: 155, value: 150, collectable: 5,
       currentValueIncomplete: false,
     },
-    rewards: [],
+    rewards: [{ symbol: 'UP', amount: 1.25 }], rewardsUnavailable: null,
   },
   {
     positionId: '79',
     protocol: 'UP33', custody: 'wallet', status: 'in-range', fee: 10_000,
     price: 2, priceLower: 1, priceUpper: 3,
+    amount0: null, amount1: null, collectable0: null, collectable1: null,
     token0Meta: { symbol: 'UP' }, token1Meta: { symbol: 'WETH' },
     history: {
-      unavailable: 'UP33 lifetime accounting unavailable',
-      firstTime: 100, lastTime: 100, exit: null, vsHodl: null,
+      unavailable: 'Complete direct-custody history could not be proven.',
+      currentUnavailable: true, firstTime: 100, lastTime: 100,
+      entry: null, exit: null,
+      deposited0: null, deposited1: null, received0: null, received1: null,
+      feeCreditsOnAdd: false, vsHodl: null,
     },
     usd: {
-      pnl: null, pnlPct: null, totalNow: null, value: 20,
+      pnl: null, pnlPct: null, vsHodl: null,
+      grossAdded: null, grossAddedExact: null,
+      collectedProceeds: null, collectedProceedsExact: null,
+      netCashIn: null, returnUnavailable: null,
+      tokenPriceChange: null, latestAddPriceChange: null,
+      capitalEvents: [], capitalEventsTruncated: false,
+      totalNow: null, value: 20, collectable: null,
       currentValueIncomplete: false,
     },
-    rewards: [],
+    rewards: [], rewardsUnavailable: null,
   },
 ]);
+assert.equal(
+  allowedReply.data.unavailable,
+  'UP33 positions could not be read from Robinhood Chain. Refresh and try again.',
+  'raw deployment errors must become one allowlisted page-facing reason',
+);
 assert.doesNotMatch(JSON.stringify(allowedReply), /must-not-cross|Uniswap|tokenId|private raw|private detail/i,
   'non-UP33 positions and private extension details must not cross into the UP33 page');
 assert.doesNotMatch(JSON.stringify(allowedReply), new RegExp(ADDRESS, 'i'),
@@ -317,6 +405,17 @@ const cachedReply = await allowed.dispatch('https://up33.xyz/liquidity/pools');
 assert.equal(cachedReply.ok, true);
 assert.equal(allowed.counters.loadPositions, 2,
   'completed UP33 custody proofs must be refreshed instead of served stale');
+
+const thrown = await workerHarness({
+  loadPositionsImpl: async () => {
+    throw new Error('https://provider.invalid/?key=must-not-cross');
+  },
+});
+const thrownReply = await thrown.dispatch();
+assert.deepEqual(JSON.parse(JSON.stringify(thrownReply)), {
+  ok: false,
+  error: 'UP33 positions could not be read from Robinhood Chain. Refresh and try again.',
+});
 
 const scanGate = deferred();
 const scanStarted = deferred();

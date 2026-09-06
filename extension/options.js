@@ -142,12 +142,20 @@ async function paintPermissions() {
   if (up33Granted) pageRows.push(`<li class="yes"><b>up33.xyz/liquidity</b>: can add the
     UP33 panel on that route and its subpages. It uses the active overlay wallet selected
     in LPLens. On the exact liquidity list it reads only each concentrated-position
-    row's public data-flow="cl-&lt;NFT ID&gt;" attribute, matching visible #ID, and row geometry to align local PnL cards. If a semantic dialog reaches the right edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary so the cards move left instead of covering it; it does not read dialog contents. Those page-derived
-    IDs are matched only against the active-wallet scan and are not sent to a network or
-    stored. It does not read connected-wallet state, balances, forms, transaction controls,
-    signing prompts, the wallet provider, or other UP33 page content. Only a shortened wallet
-    label and minimized display fields enter the page script. V2 LP and liquidity-locker
-    positions are not read.</li>`);
+    row's public data-flow="cl-&lt;NFT ID&gt;" attribute, matching visible #ID, and row geometry
+    to align local PnL cards. If you activate a validated row, its public NFT ID and click
+    state stay in memory for up to five seconds while LPLens associates a newly opened Manage
+    drawer with the matching already-scanned position. Once matched, the selected public NFT ID
+    remains in memory only until drawer close, route or active-wallet change, or permission
+    revocation. Neither state is persisted, transmitted, or included in telemetry. Opening
+    the validated drawer automatically starts a fresh public-chain UP33 scan for the active
+    overlay wallet; completed custody proofs are not reused. The drawer contributes only its visible
+    boundary; dialog contents are not read. Expanded values are limited to allowlisted public
+    on-chain display fields. Page-derived IDs are matched only against the active-wallet scan.
+    It does not read connected-wallet state, balances, forms, transaction controls, signing
+    prompts, the wallet provider, or other UP33 page content. Only a shortened wallet label
+    and minimized display fields enter the page script. V2 LP and liquidity-locker positions
+    are not read.</li>`);
   if (dexscreenerGranted) pageRows.push(`<li class="yes"><b>dexscreener.com pair pages</b> - can read
     the chain and pool identifier in the URL and append a matching-position panel.
     It sends those two route values, without the wallet address, to api.dexscreener.com to match

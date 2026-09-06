@@ -43,9 +43,11 @@ jobs:
           node tools/test-dexscreener-range.mjs
           node tools/test-dexscreener-pair-cache.mjs
           node tools/test-dexscreener-revocation.mjs
+          node tools/test-overlay-discovery-errors.mjs
           node tools/test-dexscreener-main-bridge.mjs
           node tools/test-dexscreener-chart-overlay.mjs
           node tools/test-price-orientation.mjs
+          node tools/test-revert-link.mjs
           node tools/test-hidden-positions.mjs
           node tools/test-chain-preferences.mjs
           node tools/test-current-position-index.mjs
@@ -62,6 +64,7 @@ jobs:
           node tools/test-histprice-archive.mjs
           node tools/test-histprice-blockscout.mjs
           node tools/test-last-log-retry.mjs
+          node tools/test-filtered-log-splitting.mjs
           node tools/test-v4-history.mjs
           node tools/test-v4-ownership-cache.mjs
           node tools/test-v4-ownership-checkpoint.mjs

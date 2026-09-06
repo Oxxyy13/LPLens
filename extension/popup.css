@@ -381,6 +381,26 @@ details.scan-networks fieldset { min-width: 0; margin: 0; padding: 8px 10px 9px;
 .showmore .more::after { content: "  ↑"; }
 .card-actions { display: flex; align-items: stretch; gap: 7px; margin: 8px 11px 10px; }
 .card-actions .more { flex: 1 1 auto; width: auto; margin: 0; }
+.revert-position-link {
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 9px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+  background: var(--panel-2);
+  color: var(--signal-strong);
+  font: 10px/1 var(--mono);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color .12s ease, background .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.revert-position-link:hover { border-color: var(--signal); background: var(--signal-soft); color: var(--signal-strong); }
+.revert-position-link:focus-visible { border-color: var(--signal); box-shadow: var(--ring); }
 .hide-position {
   flex: 0 0 auto; min-height: 32px; padding: 6px 9px; border: 1px solid var(--line);
   border-radius: 8px; background: transparent; color: var(--ink-3);

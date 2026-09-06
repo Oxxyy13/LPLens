@@ -26,12 +26,41 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.33.0 Store submission candidate
+## Status: 0.33.0 live, 0.34.0 release candidate
 
-The public Store release remains 0.30.0 until Google reviews 0.33.0. The
-deterministic suite, rendered UI harnesses, machine-local dev mirror,
-provider-backed fresh-install check, and real-wallet UP33 position smoke all
-pass. The submitted source and ZIP are published together for exact comparison.
+The public Store release is 0.33.0. Version 0.34 is prepared for Store review
+and is not yet a Store release. Release source and ZIP files are published
+together for exact comparison.
+
+The 0.34 release checks cover paginated v4 history, explicit failed/partial
+overlay discovery, and UP33 detail placement around multiple drawers. Failed
+scans are not cached as successful empty results. Missing or unsupported
+lifecycle history continues to withhold return figures instead of inventing
+them.
+
+Version 0.34 expands a validated UP33 position when its Manage drawer opens.
+The card shows the same proof-backed direct-custody breakdown available in
+LPLens: LP return and vs holding in dollars and percent, gross added, current
+value, collectable value, cash returned, net cash in, entry and range prices,
+token balances, range shift, capital additions, token-price context, fees,
+impermanent loss, and pending UP. Staked-position lifetime return remains
+unavailable until historical gauge rewards and trading fees can be proven.
+
+Supported standard Uniswap position cards also include a user-clicked
+**Revert** link. LPLens builds it locally from the public network and NFT ID and
+does not contact Revert until the user opens it. Revert Finance is a separate
+third-party site. Any wallet connection, approval, signature, or transaction
+happens there, not in LPLens. No Revert host permission or analytics API is
+added, and ProjectX, UP33, and unsupported Uniswap v4 networks do not receive a
+link. Robinhood v4 is a best-effort route verified against two live positions
+on 2026-09-04 even though Revert's public coverage summary does not list it.
+
+The same version makes the side panel's current-position index aware of every
+configured v3 protocol deployment and manager. An index written by 0.33 or
+earlier keeps its remembered cards but cannot claim complete discovery, so one
+Full rescan is required after the upgrade. That authoritative rescan discovers
+UP33 positions and enables Refresh current again. A later manager-set change
+will also fail closed to the same visible Full-rescan prompt.
 
 Version 0.33 adds UP33 concentrated-liquidity positions on Robinhood Chain as a
 separate protocol deployment, so equal NFT numbers from different managers can
@@ -51,17 +80,25 @@ and liquidity-locker positions are not read.
 The optional UP33 overlay runs only on `up33.xyz/liquidity` and descendants.
 The UP33 panel uses the active overlay wallet selected in LPLens, reads positions
 from public chain data, and, on the exact liquidity list, reads only each
-concentrated-position row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row geometry so local PnL
-cards can align with the matching rows. If a semantic dialog reaches the right
-edge, such as UP33's Manage drawer, it reads only the dialog's visible boundary
-so the cards move left instead of covering it; it does not read dialog contents. Those page-derived IDs are matched only
-against the active-wallet scan; they are not sent to a network or stored. LPLens
-does not read UP33 connected-wallet state, balances, forms, transaction controls,
-signing prompts, its wallet provider, or other UP33 page content. The page
-receives only a shortened wallet label and the narrow display fields needed for
-the panel. The worker coalesces only concurrently in-flight same-wallet scans.
-It does not reuse a completed UP33 custody proof, so a reload checks current
-ownership again.
+concentrated-position row's public `data-flow="cl-<NFT ID>"` attribute, matching
+visible `#ID`, and row geometry so local PnL cards can align with matching rows.
+If you activate a validated row, LPLens keeps its public NFT ID and click state
+in memory for up to five seconds while it associates a newly opened Manage
+drawer with the matching already-scanned position. Once matched, the selected
+public NFT ID remains in memory only until the drawer closes, the route or
+active wallet changes, or site access is revoked. Neither state is persisted,
+sent to any network, or included in telemetry. Opening the validated drawer
+automatically starts a fresh public-chain UP33 scan for the active overlay
+wallet; completed custody proofs are not reused. The drawer contributes only
+its visible boundary; LPLens does not read dialog contents. Expanded values
+are limited to allowlisted current amounts, range, fees and rewards, cash flow, capital
+additions, and performance fields from public on-chain data. Page-derived IDs
+are matched only against the active-wallet scan. LPLens does not read UP33
+connected-wallet state, balances, forms, transaction controls, signing prompts,
+its wallet provider, or other UP33 page content. The page receives only a
+shortened wallet label and the narrow display fields needed for the panel. The
+worker coalesces only concurrently in-flight same-wallet scans. It does not reuse
+a completed UP33 custody proof, so a reload checks current ownership again.
 
 Dexscreener chart alignment has a separate, versioned consent control and is
 off until the user enables it. Site permission alone shows the existing exact
@@ -155,7 +192,8 @@ Access is currently gated:
 `lib/license.js` has `GATING_ENABLED = true`, and **there is no trial**, so a
 link on its own grants nothing. A key is validated against a Cloudflare Worker
 whose registry is `SHA-256 hash -> { label, expires }`. The same Worker provides
-an authenticated history relay backed by Blockscout Pro and Etherscan, so a
+authenticated history and Robinhood v4 receipt relays backed by Blockscout Pro
+and Etherscan, so a
 tester supplies no RPC or explorer key: paste the LPLens access key, paste a
 wallet address, and scan. The source is
 in this repo at `tools/licence-worker/worker.js`. It stores hashes of access
@@ -182,7 +220,7 @@ minifier, and no build step that could introduce anything:
 
 ```bash
 node tools/package.mjs          # produces build/lplens-<version>/ and a zip
-diff -r extension build/lplens-0.33.0
+diff -r extension build/lplens-0.34.0
 ```
 
 That diff is empty on a release commit. `tools/package.mjs` also refuses to
@@ -406,11 +444,19 @@ understanding rather than skimming:
   ProjectX it reads no page content: `/portfolio` has no stable NFT links, so
   the panel uses only the active overlay wallet explicitly selected in LPLens.
   On the exact UP33 `/liquidity` list it reads only each concentrated-position
-  row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row geometry so local PnL cards can align with
-  matching rows. If a semantic dialog reaches the right edge, such as UP33's
-  Manage drawer, it reads only the dialog's visible boundary so the cards move
-  left instead of covering it; it does not read dialog contents. Those page-derived IDs are matched only against the active-wallet
-  scan and are not sent to a network or stored. It does not read UP33
+  row's public `data-flow="cl-<NFT ID>"` attribute, matching visible `#ID`, and row
+  geometry so local PnL cards can align with matching rows. A user-initiated
+  activation of a validated row keeps that public NFT ID and click state in memory
+  for up to five seconds while associating a newly opened Manage drawer with the
+  matching already-scanned position. Once matched, the selected public NFT ID
+  remains in memory only until drawer close, route or active-wallet change, or
+  permission revocation. Neither state is persisted, transmitted, or included in
+  telemetry. Opening the validated drawer automatically starts a fresh
+  public-chain UP33 scan for the active overlay wallet; completed custody proofs
+  are not reused. The drawer contributes only its visible boundary; its
+  contents are not read. Expanded
+  values use an explicit allowlist of public on-chain display fields. Page-derived
+  IDs are matched only against the active-wallet scan. It does not read UP33
   connected-wallet state, balances, forms, transaction controls, signing prompts,
   wallet-provider objects, or other UP33 page content. The route also triggers a
   public Robinhood Chain read for the same active overlay wallet. Only a shortened
@@ -482,10 +528,19 @@ identifier without the wallet address. Those hosts see ordinary HTTPS metadata,
 including your IP address. For v4 ownership enumeration, an address-bearing log
 filter also passes through the LPLens Worker to Blockscout Pro; it is processed
 but not stored. Point the options page at your own RPC to reduce direct RPC
-exposure. If a v4 NFT has
-later additions, its public transaction hashes are sent directly to that
-chain's public Blockscout trace endpoint; this is what makes the principal/fee
-split exact without sending wallet credentials or requesting a signature.
+exposure. If a v4 NFT has later additions, its public transaction hashes are
+sent directly to that chain's public Blockscout trace endpoint; this is what
+makes the principal/fee split exact without sending wallet credentials or
+requesting a signature. If Robinhood Chain's public RPC exhausts its retries
+while reading an addition receipt, LPLens first requests the public transaction
+and log records from Robinhood Chain's public Blockscout v2 REST API using the
+public transaction hash. If those records are unavailable, a licensed build
+sends chain id 4663 and the public transaction hash, together with its access
+key and random installation ID, to the authenticated LPLens Worker. The Worker
+requests the exact successful receipt from Blockscout Pro and returns it only
+when it contains the expected v4 PoolManager `ModifyLiquidity` event attributed
+to the configured PositionManager. It does not store the transaction hash or
+receipt body; it stores only the ordinary per-licence daily relay count.
 Saved addresses, the separately selected active overlay wallet address, chain
 and refresh-scope choices, hidden-position choices, overlay layout,
 Dexscreener chart consent, the local current-position ID index, the exact v4
@@ -511,6 +566,12 @@ enabled in Settings, the extension sends the same coarse version/surface,
 outcome, count bucket, duration bucket, and per-chain error categories. Worker
 storage has no access-code hash or installation hash on those aggregate rows.
 
+Supported standard Uniswap cards may contain a Revert link constructed locally
+from the public network and NFT ID. No request goes to Revert unless the user
+clicks that link, and the extension requests no Revert site permission. Revert
+Finance is an independent site. Wallet connections, approvals, signatures, and
+transactions performed after navigation happen on Revert, outside LPLens.
+
 ### The one real risk: never load unpacked from a synced or shared folder
 
 An unpacked extension is read from disk every time Chrome starts, with no
@@ -529,7 +590,7 @@ rsync -a --delete ./extension/ "$HOME/.local/share/LPLens/extension/"
 
 ```powershell
 # Windows
-robocopy .\extension "$env:LOCALAPPDATA\LPLens\extension" /MIR
+robocopy .\extension "$env:LOCALAPPDATA\R2D2\LPLens\dev" /MIR
 ```
 
 Then Load unpacked from the local copy, and re-run the copy after edits. This
@@ -569,11 +630,26 @@ applies to any unpacked extension, not just this one.
     100,000 credits/day and 5 requests/second; clients serialize and retry
     transient capacity responses.
   - **Robinhood Chain's public RPC serves it keylessly.** Nothing to configure.
+    Uniswap v4 first proves the NFT's global zero-address mint and starts its
+    pool-event history at that block, so activity before the position existed
+    is not downloaded. If a bounded pool query still reaches the RPC's 10,000
+    log limit, LPLens pins one chain head and bisects only that explicit limit
+    into complete, non-overlapping ranges. One unreadable range withholds the
+    entire lifetime result; partial history is never used for PnL.
     For a direct UP33 NFT, the RPC receives an exact lifetime Transfer filter
     for the public manager and token ID. PnL unlocks only when that complete
     result is one mint directly to the selected wallet and its transaction
     matches the first liquidity addition. The Transfer rows stay inside the
     extension and are not sent to LPLens.
+    If that rate-limited public RPC exhausts its receipt retries, LPLens first
+    queries Robinhood Chain's public Blockscout v2 transaction and log REST
+    endpoints using the public transaction hash. If that public source is
+    unavailable, the licensed receipt relay sends chain id 4663 and the public
+    transaction hash, together with the access key and random installation ID,
+    through the authenticated LPLens Worker. The Worker requests the exact
+    successful receipt from Blockscout Pro, requires the expected
+    PositionManager-attributed `ModifyLiquidity` event, and stores neither the
+    hash nor the receipt body.
   - **No public Ethereum RPC does.** Verified refusals from `eth.drpc.org`
     (10k blocks), `ethereum-rpc.publicnode.com` (archive needs a token),
     `rpc.ankr.com` (key), `rpc.mevblocker.io` (10k), `eth-pokt.nodies.app`,
@@ -668,6 +744,7 @@ extension/
   lib/dashboard-snapshot.js  bounded last-rendered side-panel view
   lib/refresh-deltas.js  bounded consecutive accepted-refresh samples
   lib/position-lineage.js  receipt-verified v3 replacement graph
+  lib/revert.js      allowlisted external Revert position links
   lib/scan-preferences.js  local portfolio network selection
   lib/v4-ownership-cache.js  exact block-anchored v4 ownership checkpoint
   lib/diagnostics.js  sanitized local support report and error categories

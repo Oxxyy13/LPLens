@@ -226,6 +226,7 @@ export async function historyRelayCredentials() {
   if (!key) return null;
   return {
     url: new URL('history', VALIDATE_URL).href,
+    receiptUrl: new URL('receipt', VALIDATE_URL).href,
     key,
     installationId: await installationId(),
   };

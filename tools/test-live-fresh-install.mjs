@@ -2,7 +2,7 @@
 /**
  * Exercise the shipped licence client and hosted history relay as a brand
  * new browser profile. The access code is read from a local file or .env and
- * is never printed. This is a live test and intentionally consumes three or
+ * is never printed. This is a live test and intentionally consumes four or
  * more relay requests plus one installation row for the supplied code.
  *
  * Usage: node tools/test-live-fresh-install.mjs --env CWS_REVIEWER_ACCESS_KEY
@@ -138,6 +138,24 @@ try {
   assert.ok(v4.logs.some((log) => BigInt('0x' + log.data.slice(-64)) === 1000n),
     'hosted v4 history did not return the immutable NFT 1000 mint');
 
+  // The final receipt fallback must actually be deployed before this client
+  // ships. Use a fixed successful mint, not a position's mutable lifecycle.
+  assert.equal(relay.receiptUrl, `${WORKER_ORIGIN}/receipt`);
+  const mintHash = '0x00e8fa6cc9dd87fe357bb5da81e6c399f7cde8228fb022e1505bc4b25eb36ff5';
+  const receiptResponse = await fetch(relay.receiptUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: relay.key, installationId: relay.installationId,
+      chainId: '4663', transactionHash: mintHash }),
+    signal: AbortSignal.timeout(30000),
+  });
+  assert.equal(receiptResponse.status, 200, 'hosted receipt fallback unavailable');
+  const receipt = (await receiptResponse.json()).result;
+  assert.equal(receipt?.transactionHash?.toLowerCase(), mintHash);
+  assert.equal(receipt?.status, '0x1');
+  assert.ok(receipt.logs.some(log => log.address?.toLowerCase() === CHAINS.robinhood.v4PoolManager.toLowerCase()
+    && log.topics?.[0]?.toLowerCase() === V4_MODIFY));
+
   // A local operator can keep the provider secret in .env for deployment and
   // regression tests, but it must remain absent from everything Chrome ships.
   const providerSecrets = [
@@ -153,7 +171,7 @@ try {
       }
     }
   }
-  console.log('fresh install: licence validation and hosted v3/v4 Blockscout Pro + ProjectX Etherscan history pass');
+  console.log('fresh install: licence validation, hosted v3/v4 Blockscout Pro + ProjectX Etherscan history, and Robinhood v4 receipt pass');
 } finally {
   delete globalThis.chrome;
 }
