@@ -77,8 +77,35 @@ function release() {
   if (next) next(); else active--;
 }
 
+// Discovery can return readable positions alongside failed deployments or
+// unreadable NFTs. An empty array alone is never proof that the wallet is empty.
+function overlayDiscoveryResult(result) {
+  const positions = Array.isArray(result?.positions) ? result.positions : [];
+  const errors = [
+    ...(result?.deploymentIssues || []).map((issue) => issue.error || ''),
+    result?.v4?.unavailable || '',
+  ].filter(Boolean);
+  const incomplete = !Array.isArray(result?.positions) || errors.length > 0
+    || (result?.deploymentIssues || []).length > 0
+    || Number(result?.enumUnreadable || 0) > 0
+    || Number(result?.positionUnreadable || 0) > 0
+    || Number(result?.v4?.unreadable || 0) > 0
+    || result?.truncated === true || result?.stoppedEarly === true
+    || result?.discovery?.v3?.complete === false
+    || result?.discovery?.v4?.complete === false;
+  const reason = errors.some((error) => /429|rate.?limit/i.test(String(error)))
+    ? 'The data provider is rate-limiting requests.'
+    : 'Some positions could not be read.';
+  return {
+    positions,
+    unavailable: incomplete ? `${reason} Refresh this page to retry.` : null,
+  };
+}
+
 async function cachedDexscreenerPositions(chainKey, address, store) {
-  const key = `${chainKey}:${address}`;
+  const key = JSON.stringify([
+    chainKey, address, store.rpcOverrides?.[chainKey] || '', store.etherscanKey || '',
+  ]);
   const existing = dexscreenerScanCache.get(key);
   if (existing && existing.data && Date.now() - existing.at < DEXSCREENER_CACHE_MS) {
     return existing.data;
@@ -98,7 +125,7 @@ async function cachedDexscreenerPositions(chainKey, address, store) {
         etherscanKey: store.etherscanKey || undefined,
         historyRelay,
       });
-      return result.positions || [];
+      return overlayDiscoveryResult(result);
     } finally {
       release();
     }
@@ -106,7 +133,10 @@ async function cachedDexscreenerPositions(chainKey, address, store) {
   dexscreenerScanCache.set(key, { promise });
   try {
     const data = await promise;
-    dexscreenerScanCache.set(key, { data, at: Date.now() });
+    // Share active work, but never retain a failed/partial discovery as a
+    // successful empty snapshot. A subsequent request must be able to recover.
+    if (data.unavailable) dexscreenerScanCache.delete(key);
+    else dexscreenerScanCache.set(key, { data, at: Date.now() });
     return data;
   } catch (err) {
     dexscreenerScanCache.delete(key);
@@ -166,6 +196,106 @@ function canonicalUint256OrNull(value) {
   }
 }
 
+function up33PricePoint(point) {
+  const price = finiteOrNull(point && point.price);
+  if (!(price > 0)) return null;
+  const rawBound = String(point && point.bound || '');
+  const bound = ['at or below', 'at or above', 'at most', 'at least'].includes(rawBound)
+    ? rawBound : null;
+  const exact = point && point.exact === true;
+  if (!exact && !bound) return null;
+  return {
+    price,
+    exact,
+    bound,
+    spread: finiteOrNull(point && point.spread),
+  };
+}
+
+function up33HistoryUnavailable(position, history, lifetimeAvailable) {
+  if (lifetimeAvailable) return null;
+  if (position && position.custody === 'gauge') {
+    return 'Staked position lifetime return is unavailable until historical gauge emissions and trading fees can be included.';
+  }
+  const reason = String(history && history.unavailable || '').toLowerCase();
+  if (reason.includes('after staking') || reason.includes('custody transfer')) {
+    return 'Lifetime return is unavailable after staking or another custody transfer.';
+  }
+  if (reason.includes('changed during refresh') || reason.includes('retry in a moment')
+      || reason.includes('latest transaction')) {
+    return 'Position history changed during refresh. Refresh again.';
+  }
+  if (reason.includes('mint and first liquidity addition')) {
+    return 'The mint and first liquidity addition could not be matched.';
+  }
+  if (reason.includes('event history incomplete') || reason.includes('zero lifetime events')) {
+    return 'Complete lifetime events could not be proven.';
+  }
+  if (reason.includes('position identity')) {
+    return 'The position identity needed for lifetime history is incomplete.';
+  }
+  return 'Complete direct-custody history could not be proven.';
+}
+
+function up33ReturnUnavailable(value) {
+  return ({
+    'gross additions unpriced': 'Gross additions could not be priced at their event times.',
+    'gross additions are bounded': 'At least one gross addition is only a bound.',
+    'collected proceeds unpriced': 'Collected proceeds could not be priced at their event times.',
+    'collected proceeds are bounded': 'At least one collected amount is only a bound.',
+    'current collectable unavailable': 'Current collectable amounts could not be read.',
+  })[String(value || '')] || null;
+}
+
+function up33TokenMove(move) {
+  const from = finiteOrNull(move && move.from);
+  const to = finiteOrNull(move && move.to);
+  const pct = finiteOrNull(move && move.pct);
+  if (from === null || to === null || pct === null || from < 0 || to < 0) return null;
+  return { from, to, pct };
+}
+
+function up33TokenMoveGroup(group) {
+  const label = ['first add', 'latest add', 'opened'].includes(String(group && group.label || ''))
+    ? String(group.label) : null;
+  if (!label) return null;
+  const token0 = up33TokenMove(group && group.token0);
+  const token1 = up33TokenMove(group && group.token1);
+  return token0 || token1 ? { label, token0, token1 } : null;
+}
+
+function up33CapitalEvents(events) {
+  if (!Array.isArray(events)) return [];
+  return events.slice(0, 12).flatMap((event, index) => {
+    const block = finiteOrNull(event && event.block);
+    const time = up33TimestampOrNull(event && event.time);
+    const amount0 = finiteOrNull(event && event.amount0);
+    const amount1 = finiteOrNull(event && event.amount1);
+    const value = finiteOrNull(event && event.value);
+    if (!Number.isSafeInteger(block) || block < 0 || amount0 === null || amount1 === null
+        || value === null || value < 0) return [];
+    return [{
+      kind: index === 0 ? 'opened' : 'added',
+      block,
+      time,
+      amount0,
+      amount1,
+      value,
+      exact: event && event.exact === true,
+    }];
+  });
+}
+
+function up33Symbol(value) {
+  return String(value || '?').trim().slice(0, 24) || '?';
+}
+
+function up33TimestampOrNull(value) {
+  const number = finiteOrNull(value);
+  return Number.isSafeInteger(number) && number > 0 && number <= 8_640_000_000_000
+    ? number : null;
+}
+
 /** Minimal page-facing shape. Raw accounting and wallet data stay in extension context. */
 function up33OverlayPosition(position) {
   const positionId = canonicalUint256OrNull(position && position.tokenId);
@@ -175,7 +305,13 @@ function up33OverlayPosition(position) {
   const lifetimeAvailable = history.directCustodyProven === true
     && !history.unavailable && position && position.custody !== 'gauge';
   const vs = lifetimeAvailable ? (history.vsHodl || null) : null;
-  const exit = history.exit || null;
+  const historyUnavailable = up33HistoryUnavailable(position, history, lifetimeAvailable);
+  const collectable0 = finiteOrNull(position && position.collectable0);
+  const collectable1 = finiteOrNull(position && position.collectable1);
+  const currentComplete = collectable0 !== null && collectable1 !== null
+    && usd.currentValueIncomplete !== true;
+  const grossAdded = lifetimeAvailable ? finiteOrNull(usd.grossAdded) : null;
+  const collectedProceeds = lifetimeAvailable ? finiteOrNull(usd.collectedProceeds) : null;
   return {
     positionId,
     protocol: 'UP33',
@@ -186,15 +322,28 @@ function up33OverlayPosition(position) {
     price: finiteOrNull(position && position.price),
     priceLower: finiteOrNull(position && position.priceLower),
     priceUpper: finiteOrNull(position && position.priceUpper),
-    token0Meta: { symbol: String(position && position.token0Meta?.symbol || '?') },
-    token1Meta: { symbol: String(position && position.token1Meta?.symbol || '?') },
+    amount0: finiteOrNull(position && position.amount0),
+    amount1: finiteOrNull(position && position.amount1),
+    collectable0,
+    collectable1,
+    token0Meta: { symbol: up33Symbol(position && position.token0Meta?.symbol) },
+    token1Meta: { symbol: up33Symbol(position && position.token1Meta?.symbol) },
     history: {
-      unavailable: lifetimeAvailable ? null : 'UP33 lifetime accounting unavailable',
-      firstTime: finiteOrNull(history.firstTime),
-      lastTime: finiteOrNull(history.lastTime),
-      exit: exit ? { price: finiteOrNull(exit.price) } : null,
+      unavailable: historyUnavailable,
+      currentUnavailable: history.currentUnavailable === true || !currentComplete,
+      firstTime: up33TimestampOrNull(history.firstTime),
+      lastTime: up33TimestampOrNull(history.lastTime),
+      entry: lifetimeAvailable ? up33PricePoint(history.entry) : null,
+      exit: lifetimeAvailable ? up33PricePoint(history.exit) : null,
+      deposited0: lifetimeAvailable ? finiteOrNull(history.deposited0) : null,
+      deposited1: lifetimeAvailable ? finiteOrNull(history.deposited1) : null,
+      received0: lifetimeAvailable ? finiteOrNull(history.received0) : null,
+      received1: lifetimeAvailable ? finiteOrNull(history.received1) : null,
+      feeCreditsOnAdd: lifetimeAvailable && history.feeCreditsOnAdd === true,
       vsHodl: vs ? {
         pct: finiteOrNull(vs.pct),
+        feesPct: finiteOrNull(vs.feesPct),
+        ilPct: finiteOrNull(vs.ilPct),
         apr: finiteOrNull(vs.apr),
         aprDays: finiteOrNull(vs.aprDays),
       } : null,
@@ -202,15 +351,32 @@ function up33OverlayPosition(position) {
     usd: position && position.usd ? {
       pnl: lifetimeAvailable ? finiteOrNull(usd.pnl) : null,
       pnlPct: lifetimeAvailable ? finiteOrNull(usd.pnlPct) : null,
-      totalNow: lifetimeAvailable ? finiteOrNull(usd.totalNow) : null,
+      vsHodl: lifetimeAvailable ? finiteOrNull(usd.vsHodl) : null,
+      grossAdded,
+      grossAddedExact: grossAdded === null ? null : usd.grossAddedExact === true,
+      collectedProceeds,
+      collectedProceedsExact: collectedProceeds === null
+        ? null : usd.collectedProceedsExact === true,
+      netCashIn: lifetimeAvailable ? finiteOrNull(usd.netCashIn) : null,
+      returnUnavailable: lifetimeAvailable ? up33ReturnUnavailable(usd.returnUnavailable) : null,
+      tokenPriceChange: lifetimeAvailable ? up33TokenMoveGroup(usd.tokenPriceChange) : null,
+      latestAddPriceChange: lifetimeAvailable
+        ? up33TokenMoveGroup(usd.latestAddPriceChange) : null,
+      capitalEvents: lifetimeAvailable ? up33CapitalEvents(usd.capitalEvents) : [],
+      capitalEventsTruncated: lifetimeAvailable && Array.isArray(usd.capitalEvents)
+        && usd.capitalEvents.length > 12,
+      totalNow: currentComplete ? finiteOrNull(usd.totalNow ?? usd.currentValue) : null,
       value: finiteOrNull(usd.value),
+      collectable: finiteOrNull(usd.collectable),
       currentValueIncomplete: usd.currentValueIncomplete === true,
     } : null,
     rewards: (Array.isArray(position && position.rewards) ? position.rewards : [])
       .slice(0, 4).map((reward) => ({
-        symbol: String(reward && reward.symbol || '?'),
+        symbol: up33Symbol(reward && reward.symbol),
         amount: finiteOrNull(reward && reward.amount),
       })),
+    rewardsUnavailable: position && position.rewardsUnavailable
+      ? 'Pending UP rewards could not be read.' : null,
   };
 }
 
@@ -312,8 +478,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return { ok: false, error: 'Open LPLens and select an overlay wallet first.' };
     }
 
-    const allPositions = await cachedDexscreenerPositions(chainKey, address, store);
-    const positions = allPositions.filter((position) => {
+    const scan = await cachedDexscreenerPositions(chainKey, address, store);
+    const positions = scan.positions.filter((position) => {
       const id = String(position.version === 'v4' ? position.poolId : position.pool || '')
         .toLowerCase();
       return id === poolRef;
@@ -339,7 +505,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     const usdRef = CHAINS[chainKey].usdRef || {};
     const wrappedNative = usdRef.nativeEquivalent ? String(usdRef.weth || '').toLowerCase() : '';
-    const safe = JSON.parse(JSON.stringify({ address, positions, pair, pairError, wrappedNative }, (_key, value) =>
+    const safe = JSON.parse(JSON.stringify({
+      address, positions, pair, pairError, wrappedNative, unavailable: scan.unavailable,
+    }, (_key, value) =>
       typeof value === 'bigint' ? value.toString() : value));
     return { ok: true, data: safe };
   })().then(
@@ -1068,8 +1236,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       });
       const safe = JSON.parse(JSON.stringify({
         address,
-        positions: result.positions || [],
-        unavailable: result.v4 && result.v4.unavailable || null,
+        ...overlayDiscoveryResult(result),
       }, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
       return { ok: true, data: safe };
     } finally {
@@ -1141,12 +1308,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const safe = JSON.parse(JSON.stringify({
       walletLabel: `${address.slice(0, 6)}...${address.slice(-4)}`,
       positions,
-      unavailable: issue && issue.error || null,
+      unavailable: issue
+        ? 'UP33 positions could not be read from Robinhood Chain. Refresh and try again.'
+        : null,
     }, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
     return { ok: true, data: safe };
   })().then(
     (result) => sendResponse(result),
-    (err) => sendResponse({ ok: false, error: err.message || String(err) }),
+    () => sendResponse({
+      ok: false,
+      error: 'UP33 positions could not be read from Robinhood Chain. Refresh and try again.',
+    }),
   );
 
   return true;

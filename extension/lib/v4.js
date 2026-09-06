@@ -41,7 +41,8 @@ import {
 } from './v3.js';
 import { CHAINS } from './chains.js';
 import {
-  fetchBlockCheckpoint, fetchFilteredLogs, fetchRecentFilteredLogs, fetchTransfers,
+  fetchBlockCheckpoint, fetchFilteredLogs, fetchRecentFilteredLogs, fetchTokenTransfersRpc,
+  fetchTransfers,
 } from './logs.js';
 import {
   readV4OwnershipCheckpoint, writeV4OwnershipCheckpoint,
@@ -66,12 +67,26 @@ export const V4_TOPIC = Object.freeze({
 
 const Q128 = 1n << 128n;
 const MAX256 = 1n << 256n;
-const V4_POOL_LOG_TTL_MS = 10_000;
 const v4PoolLogCache = new Map();
 const v4TraceCache = new Map();
+const v4ReceiptCache = new Map();
 const V4_TRACE_CACHE_MAX = 200;
+const V4_RECEIPT_CACHE_MAX = 400;
+const V4_RECEIPT_TTL_MS = 60_000;
 const MAX_SIMPLE_V4_ADDS = 20;
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const MODIFY_LIQUIDITY_SELECTOR = '0x5a6bcfda';
+const TRANSACTION_HASH_RE = /^0x[0-9a-f]{64}$/;
+const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
+const ADDRESS_TOPIC_RE = /^0x0{24}[0-9a-f]{40}$/;
+const HEX_DATA_RE = /^0x(?:[0-9a-f]{2})*$/;
+const PERMIT2_ADDRESS = '0x000000000022d473030f116ddee9f6b43ac78ba3';
+const PERMIT2_PERMIT_TOPIC =
+  '0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec';
+const UINT160_MAX = (1n << 160n) - 1n;
+const UINT48_MAX = (1n << 48n) - 1n;
+const MAX_V4_RECEIPT_PAGES = 10;
+const MAX_V4_RECEIPT_LOGS = 200;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function retryRead(fn, attempts = 4) {
   let last;
@@ -86,6 +101,236 @@ async function retryRead(fn, attempts = 4) {
     }
   }
   throw last;
+}
+
+/** Share only an active pool-history read; completed snapshots are never reused. */
+export function coalesceV4PoolLogTask(cacheKey, fromBlock, load) {
+  let cached = v4PoolLogCache.get(cacheKey);
+  if (!cached || !Number.isSafeInteger(cached.fromBlock)
+      || cached.fromBlock > fromBlock) {
+    const task = Promise.resolve().then(load);
+    cached = { fromBlock, task };
+    v4PoolLogCache.set(cacheKey, cached);
+    const evict = () => {
+      if (v4PoolLogCache.get(cacheKey)?.task === task) v4PoolLogCache.delete(cacheKey);
+    };
+    task.then(evict, evict);
+    if (v4PoolLogCache.size > 100) {
+      for (const key of [...v4PoolLogCache.keys()].slice(0, v4PoolLogCache.size - 100)) {
+        v4PoolLogCache.delete(key);
+      }
+    }
+  }
+  return cached.task;
+}
+
+function cleanTransactionHash(value) {
+  const hash = String(value || '').trim().toLowerCase();
+  return TRANSACTION_HASH_RE.test(hash) ? hash : null;
+}
+
+function cleanAddress(value) {
+  const address = String(value || '').trim().toLowerCase();
+  return ADDRESS_RE.test(address) ? address : null;
+}
+
+function receiptResult(value, transactionHash) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || cleanTransactionHash(value.transactionHash) !== transactionHash
+      || value.status !== '0x1'
+      || !Array.isArray(value.logs)) {
+    throw new Error('receipt response did not match the requested transaction');
+  }
+  return value;
+}
+
+async function hostedV4Receipt(relay, chainId, transactionHash) {
+  const receiptUrl = String(relay?.receiptUrl || '').trim();
+  const key = String(relay?.key || '').trim();
+  const installationId = String(relay?.installationId || '').trim();
+  if (!receiptUrl || !key || !installationId || !chainId) {
+    throw new Error('hosted receipt relay is not configured');
+  }
+
+  let response;
+  try {
+    response = await fetch(receiptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key,
+        installationId,
+        chainId: String(chainId),
+        transactionHash,
+      }),
+    });
+  } catch (err) {
+    throw new Error(err.message || String(err));
+  }
+  let body = null;
+  try { body = await response.json(); } catch { /* handled below */ }
+  if (!response.ok) {
+    throw new Error(body && (body.error || body.reason)
+      ? String(body.error || body.reason) : `HTTP ${response.status}`);
+  }
+  return receiptResult(body?.result, transactionHash);
+}
+
+async function blockscoutReceiptJson(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new Error('malformed response');
+    }
+    return body;
+  } finally { clearTimeout(timer); }
+}
+
+function blockscoutReceiptCursor(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('malformed log pagination');
+  }
+  const allowed = new Set(['index', 'items_count', 'block_number']);
+  const entries = Object.entries(value);
+  if (!entries.length || entries.some(([key, raw]) => {
+    const number = Number(raw);
+    return !allowed.has(key) || !/^\d+$/.test(String(raw))
+      || !Number.isSafeInteger(number) || number < 0;
+  })) {
+    throw new Error('malformed log pagination');
+  }
+  return Object.fromEntries(entries.map(([key, raw]) => [key, String(raw)]));
+}
+
+async function publicBlockscoutV4Receipt(chain, transactionHash) {
+  const base = blockscoutV2(chain || {});
+  if (!base) throw new Error('Blockscout receipt REST is not configured');
+  const transactionUrl = `${base}/transactions/${transactionHash}`;
+  const transaction = await blockscoutReceiptJson(transactionUrl);
+  const from = cleanAddress(transaction.from?.hash);
+  const to = cleanAddress(transaction.to?.hash);
+  const blockNumber = Number(transaction.block_number);
+  if (cleanTransactionHash(transaction.hash) !== transactionHash
+      || transaction.status !== 'ok' || transaction.result !== 'success'
+      || !from || !to || !Number.isSafeInteger(blockNumber) || blockNumber < 0) {
+    throw new Error('transaction metadata did not prove a successful receipt');
+  }
+
+  const logs = [];
+  const indexes = new Set();
+  const cursors = new Set();
+  let logUrl = `${transactionUrl}/logs`;
+  for (let page = 0; page < MAX_V4_RECEIPT_PAGES; page++) {
+    const body = await blockscoutReceiptJson(logUrl);
+    if (!Array.isArray(body.items)
+        || !Object.prototype.hasOwnProperty.call(body, 'next_page_params')) {
+      throw new Error('transaction logs response may be incomplete');
+    }
+    for (const item of body.items) {
+      const address = cleanAddress(item?.address?.hash || item?.address_hash?.hash);
+      const itemHash = cleanTransactionHash(item?.transaction_hash);
+      const topics = Array.isArray(item?.topics) ? [...item.topics] : null;
+      while (topics?.length && topics[topics.length - 1] === null) topics.pop();
+      const normalisedTopics = topics
+        ? topics.map((topic) => String(topic || '').toLowerCase()) : null;
+      const data = String(item?.data || '').toLowerCase();
+      const index = Number(item?.index);
+      if (!address || itemHash !== transactionHash || !normalisedTopics
+          || normalisedTopics.length > 4
+          || normalisedTopics.some((topic) => !TRANSACTION_HASH_RE.test(topic))
+          || !HEX_DATA_RE.test(data) || !Number.isSafeInteger(index) || index < 0
+          || indexes.has(index) || Number(item?.block_number) !== blockNumber) {
+        throw new Error('transaction logs did not match the requested receipt');
+      }
+      indexes.add(index);
+      logs.push({
+        address,
+        transactionHash: itemHash,
+        logIndex: '0x' + index.toString(16),
+        topics: normalisedTopics,
+        data,
+      });
+      if (logs.length > MAX_V4_RECEIPT_LOGS) {
+        throw new Error('transaction receipt exceeds the safe log limit');
+      }
+    }
+    if (body.next_page_params === null) {
+      logs.sort((a, b) => Number.parseInt(a.logIndex, 16) - Number.parseInt(b.logIndex, 16));
+      return receiptResult({
+        transactionHash,
+        status: '0x1',
+        from,
+        to,
+        blockNumber: '0x' + blockNumber.toString(16),
+        logs,
+      }, transactionHash);
+    }
+    const cursor = blockscoutReceiptCursor(body.next_page_params);
+    const cursorKey = JSON.stringify(Object.entries(cursor).sort());
+    if (cursors.has(cursorKey)) throw new Error('transaction log pagination repeated');
+    cursors.add(cursorKey);
+    const next = new URL(`${transactionUrl}/logs`);
+    for (const [key, value] of Object.entries(cursor)) next.searchParams.set(key, value);
+    logUrl = next.href;
+  }
+  throw new Error('transaction log pagination exceeded the safe page limit');
+}
+
+/**
+ * Read an immutable v4 addition receipt. The chain RPC remains first choice,
+ * followed by the chain's public Blockscout REST API. Licensed Robinhood reads
+ * can use the authenticated, contract-allowlisted receipt relay as the final
+ * fallback without exposing the shared Blockscout credential in this public
+ * extension.
+ */
+export async function fetchV4Receipt(rpc, chain, transactionHash, opts = {}) {
+  const hash = cleanTransactionHash(transactionHash);
+  if (!hash) throw new Error('invalid v4 addition transaction hash');
+  const relay = opts.historyRelay || opts.blockscoutRelay || null;
+  const relayChainId = chain?.receiptRelayChainId || null;
+  const receiptExplorer = blockscoutV2(chain || {});
+  const cacheKey = [rpc, receiptExplorer || '-', relayChainId || '-',
+    relay?.receiptUrl ? 'h' : '-', hash].join('|');
+  const now = Date.now();
+  const cached = v4ReceiptCache.get(cacheKey);
+  if (cached && now - cached.at <= V4_RECEIPT_TTL_MS) return cached.task;
+
+  const task = (async () => {
+    const errors = [];
+    try {
+      const receipt = await rpcCall(rpc, 'eth_getTransactionReceipt', [hash]);
+      return receiptResult(receipt, hash);
+    } catch (err) {
+      errors.push(err.message || String(err));
+    }
+    if (receiptExplorer) {
+      try {
+        return await publicBlockscoutV4Receipt(chain, hash);
+      } catch (err) {
+        errors.push(`public Blockscout receipt fallback: ${err.message || String(err)}`);
+      }
+    }
+    if (!relay || !relayChainId) throw new Error(errors.join('; '));
+    try {
+      return await hostedV4Receipt(relay, relayChainId, hash);
+    } catch (fallbackError) {
+      errors.push(`hosted receipt fallback: ${fallbackError.message || String(fallbackError)}`);
+      throw new Error(errors.join('; '));
+    }
+  })();
+  v4ReceiptCache.set(cacheKey, { at: now, task });
+  task.catch(() => {
+    if (v4ReceiptCache.get(cacheKey)?.task === task) v4ReceiptCache.delete(cacheKey);
+  });
+  if (v4ReceiptCache.size > V4_RECEIPT_CACHE_MAX) {
+    for (const old of [...v4ReceiptCache.keys()]
+      .slice(0, v4ReceiptCache.size - V4_RECEIPT_CACHE_MAX)) v4ReceiptCache.delete(old);
+  }
+  return task;
 }
 
 /** ABI int24: sign-extended across the full 256-bit word, not masked to 24 bits. */
@@ -249,7 +494,7 @@ export function validateSimpleV4Receipt({
   if (!event || !event.transactionHash || event.liquidityDelta <= 0n) {
     return fail('the v4 addition event is invalid');
   }
-  if (!receipt || String(receipt.status || '0x1') === '0x0' || !Array.isArray(receipt.logs)) {
+  if (!receipt || receipt.status !== '0x1' || !Array.isArray(receipt.logs)) {
     return fail('the v4 addition receipt is unavailable');
   }
 
@@ -259,8 +504,11 @@ export function validateSimpleV4Receipt({
   const tokenIdTopic = '0x' + BigInt(event.tokenId).toString(16).padStart(64, '0');
   const zeroTopic = '0x' + '0'.repeat(64);
   let mintCount = 0, modifyCount = 0, mirrorCount = 0;
+  let mintOwnerTopic = null;
   const tokenAddresses = [token0, token1].map((token) => String(token).toLowerCase());
   const incoming = [0n, 0n];
+  const incomingOwnerTopics = [null, null];
+  const permits = [null, null];
 
   for (const log of receipt.logs) {
     const address = String(log.address || '').toLowerCase();
@@ -297,7 +545,40 @@ export function validateSimpleV4Receipt({
     if (address === pm && topic0 === V4_TOPIC.transfer
         && String(log.topics?.[1] || '').toLowerCase() === zeroTopic
         && String(log.topics?.[3] || '').toLowerCase() === tokenIdTopic) {
+      const ownerTopic = String(log.topics?.[2] || '').toLowerCase();
+      if (!ADDRESS_TOPIC_RE.test(ownerTopic)) {
+        return fail('the v4 mint recipient is invalid');
+      }
+      if (mintOwnerTopic && mintOwnerTopic !== ownerTopic) {
+        return fail('the receipt minted the v4 NFT to multiple recipients');
+      }
+      mintOwnerTopic = ownerTopic;
       mintCount++;
+      continue;
+    }
+    if (address === PERMIT2_ADDRESS && topic0 === PERMIT2_PERMIT_TOPIC) {
+      const topics = Array.isArray(log.topics) ? log.topics.map((topic) =>
+        String(topic || '').toLowerCase()) : [];
+      const ownerTopic = topics[1] || '';
+      const tokenTopic = topics[2] || '';
+      const spenderTopic = topics[3] || '';
+      const side = tokenAddresses.findIndex((token) =>
+        !isNative(token) && tokenTopic === addressTopic(token));
+      const amount = dataWord(log.data, 0);
+      const expiration = dataWord(log.data, 1);
+      const nonce = dataWord(log.data, 2);
+      if (!expectMint
+          || String(log.transactionHash || '').toLowerCase()
+            !== String(event.transactionHash).toLowerCase()
+          || topics.length !== 4 || !ADDRESS_TOPIC_RE.test(ownerTopic)
+          || side < 0 || spenderTopic !== addressTopic(positionManager)
+          || !/^0x[0-9a-fA-F]{192}$/.test(String(log.data || ''))
+          || amount === null || amount <= 0n || amount > UINT160_MAX
+          || expiration === null || expiration > UINT48_MAX
+          || nonce === null || nonce > UINT48_MAX || permits[side]) {
+        return fail('the receipt contains an unrelated Permit2 authorization');
+      }
+      permits[side] = { ownerTopic, amount };
       continue;
     }
     const side = tokenAddresses.findIndex((token) => token === address && !isNative(token));
@@ -308,7 +589,17 @@ export function validateSimpleV4Receipt({
       if (amount === null || (to !== managerTopic && from !== managerTopic) || to === from) {
         return fail('the receipt contains a non-settlement token transfer');
       }
-      if (to === managerTopic) incoming[side] += amount;
+      if (expectMint && from === managerTopic) {
+        return fail('the mint receipt contains an outgoing token transfer');
+      }
+      if (to === managerTopic) {
+        if (!ADDRESS_TOPIC_RE.test(from)
+            || (incomingOwnerTopics[side] && incomingOwnerTopics[side] !== from)) {
+          return fail('the receipt contains settlement from multiple owners');
+        }
+        incomingOwnerTopics[side] = from;
+        incoming[side] += amount;
+      }
       continue;
     }
     return fail('the v4 addition receipt contains additional actions');
@@ -317,6 +608,17 @@ export function validateSimpleV4Receipt({
     return fail(expectMint
       ? 'the receipt does not prove one NFT mint and one liquidity addition'
       : 'the receipt does not prove one isolated liquidity addition');
+  }
+  for (let side = 0; side < permits.length; side++) {
+    const permit = permits[side];
+    if (!permit) continue;
+    const receiptFrom = cleanAddress(receipt.from);
+    const receiptTo = cleanAddress(receipt.to);
+    if (!receiptFrom || receiptTo !== pm || mintOwnerTopic !== addressTopic(receiptFrom)
+        || incoming[side] <= 0n || incomingOwnerTopics[side] !== permit.ownerTopic
+        || permit.ownerTopic !== mintOwnerTopic || permit.amount < incoming[side]) {
+      return fail('the Permit2 authorization does not match the token settlement');
+    }
   }
   return { incoming };
 }
@@ -485,6 +787,10 @@ function v4VsHodl(position, history) {
 
 async function v4History(rpc, chain, position, opts) {
   if (!chain.v4PoolManager) return { unavailable: 'v4 PoolManager is not configured' };
+  const historyRpc = opts.rpcOverride || chain.logsRpc || rpc;
+  const historyFromBlock = chain.v4HistoryMintBoundRpc
+    ? await verifiedV4MintBlock(historyRpc, chain.v4PositionManager, position.tokenId)
+    : 0;
   const topics = [
     V4_TOPIC.modifyLiquidity,
     position.poolId,
@@ -493,7 +799,7 @@ async function v4History(rpc, chain, position, opts) {
   const source = {
     contract: chain.v4PoolManager,
     topics,
-    rpc: opts.rpcOverride || chain.logsRpc || rpc,
+    rpc: historyRpc,
     etherscanKey: opts.etherscanKey || chain.etherscanKey || null,
     etherscanChainId: chain.etherscanChainId || null,
     historyRelay: opts.historyRelay || opts.blockscoutRelay || null,
@@ -501,38 +807,32 @@ async function v4History(rpc, chain, position, opts) {
     blockscout: chain.blockscout || null,
   };
   // Several NFTs commonly share one pool. The PoolManager filter returns that
-  // pool's PositionManager events and salt is matched locally, so three cards
-  // asking at once must share the same network request rather than download the
-  // same log set three times. Ten seconds covers one scan without making a
-  // just-mined action stale on the next deliberate refresh.
+  // pool's PositionManager events and salt is matched locally, so cards asking
+  // concurrently share one in-flight network request. Completed snapshots are
+  // never retained: a fee-only v4 action can change PnL without changing the
+  // position's liquidity, so even a ten-second result cache can look reconciled
+  // while being stale on the next deliberate refresh.
   const cacheKey = [
-    chain.v4PoolManager.toLowerCase(), position.poolId.toLowerCase(),
+    chain.v4PoolManager.toLowerCase(), chain.v4PositionManager.toLowerCase(),
+    position.poolId.toLowerCase(),
     source.etherscanKey ? 'e' : '-', source.historyRelay ? 'h' : '-',
     source.blockscout ? 'b' : '-',
   ].join(':');
-  const now = Date.now();
-  let cached = v4PoolLogCache.get(cacheKey);
-  if (!cached || now - cached.at > V4_POOL_LOG_TTL_MS) {
-    cached = {
-      at: now,
-      task: Promise.all([
-        fetchFilteredLogs(source),
-        fetchRecentFilteredLogs({
-          contract: chain.v4PoolManager,
-          topics,
-          rpc: opts.rpcOverride || chain.logsRpc || rpc,
-        }),
-      ]),
-    };
-    v4PoolLogCache.set(cacheKey, cached);
-    if (v4PoolLogCache.size > 100) {
-      for (const key of [...v4PoolLogCache.keys()].slice(0, v4PoolLogCache.size - 100)) {
-        v4PoolLogCache.delete(key);
-      }
-    }
+  // An earlier verified mint bound is a safe superset for every newer NFT in
+  // the same pool. The reverse is unsafe, so replace a newer cached bound when
+  // an older position asks for its history.
+  const poolLogTask = coalesceV4PoolLogTask(cacheKey, historyFromBlock, () => Promise.all([
+      fetchFilteredLogs({ ...source, fromBlock: historyFromBlock }),
+      fetchRecentFilteredLogs({
+        contract: chain.v4PoolManager,
+        topics,
+        rpc: opts.rpcOverride || chain.logsRpc || rpc,
+      }),
+    ]));
+  const [full, recent] = await poolLogTask;
+  if (full.unavailable) {
+    return { unavailable: full.unavailable };
   }
-  const [full, recent] = await cached.task;
-  if (full.unavailable) return { unavailable: full.unavailable };
 
   const merged = new Map();
   for (const log of [...(full.logs || []), ...(recent.logs || [])]) merged.set(logId(log), log);
@@ -568,7 +868,7 @@ async function v4History(rpc, chain, position, opts) {
   const receipts = [];
   try {
     for (const event of events) {
-      receipts.push(await rpcCall(rpc, 'eth_getTransactionReceipt', [event.transactionHash]));
+      receipts.push(await fetchV4Receipt(rpc, chain, event.transactionHash, opts));
     }
   } catch (err) {
     return { unavailable: `v4 addition receipt unavailable — ${err.message || String(err)}` };
@@ -687,6 +987,30 @@ async function v4History(rpc, chain, position, opts) {
   };
   history.vsHodl = v4VsHodl(position, history);
   return history;
+}
+
+/**
+ * Prove the earliest safe PoolManager-history block from this exact ERC-721.
+ *
+ * A wallet's first incoming transfer is not enough because the NFT may have a
+ * prior owner. Only the canonical zero-address mint from global token history
+ * is accepted. Any missing or malformed proof returns block zero, which is the
+ * slower but complete fallback.
+ */
+export async function verifiedV4MintBlock(rpc, positionManager, tokenId) {
+  const transfers = await fetchTokenTransfersRpc({
+    contract: positionManager,
+    tokenId,
+    rpc,
+    fromBlock: 0,
+    toBlock: 'latest',
+    requireNonEmpty: true,
+  });
+  if (transfers.unavailable) return 0;
+  const events = transfers.events || [];
+  const mints = events.filter((event) => event.from === ZERO_ADDRESS);
+  if (mints.length !== 1 || events[0] !== mints[0]) return 0;
+  return Number.isSafeInteger(mints[0].block) && mints[0].block >= 0 ? mints[0].block : 0;
 }
 
 async function currencyMeta(rpc, chain, address, tokenMeta) {

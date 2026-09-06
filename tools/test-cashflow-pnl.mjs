@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
-  collectedProceedsUsd, findBlockAtOrBefore, strategyReturn, sumDepositBasis,
+  collectedProceedsUsd, costBasisUsd, findBlockAtOrBefore, strategyReturn,
+  sumDepositBasis, usdPairAt,
 } from '../extension/lib/histprice.js';
 import {
   aggregateReasonText, classifyPosition, summarizeAggregate,
@@ -81,11 +82,14 @@ async function testEveryAddUsesItsOwnEventPrice() {
   const basis = await sumDepositBasis(deposits, async (deposit) => (
     deposit.block === 10
       ? { usd0: 5, usd1: 1, exact: true, source: 'event-math' }
-      : { usd0: 9, usd1: 1, exact: true, source: 'event-math' }
+      : { usd0: 9, usd1: 1, exact: true, source: 'event-math', bridged: true }
   ));
   assert.equal(basis.basis, 42,
     'gross added must sum all additions at their own prices, not reuse the latest buy');
   assert.deepEqual(basis.legs.map((leg) => leg.value), [11, 31]);
+  assert.equal(basis.bridged, true,
+    'one origin-chain-priced addition must preserve the bridge caveat');
+  assert.deepEqual(basis.legs.map((leg) => leg.bridged), [false, true]);
   assert.deepEqual(basis.legs.map((leg) => [leg.time, leg.amount0, leg.poolPrice]), [
     [1000, 2, 1], [2000, 3, 2],
   ], 'capital-event metadata must survive historical pricing for the UI timeline');
@@ -120,6 +124,78 @@ async function testCollectionAtEventPrice() {
   const got = await collectedProceedsUsd('base', p);
   assert.equal(got.proceeds, 11);
   assert.equal(got.exact, true);
+}
+
+async function testRobinhoodUsdGExactHistoricalBasis() {
+  const USDG = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
+  const MOO = '0xd9db30bb0d2b8d2eae3826a1372117e058791e18';
+  const entryPrice = 45.40275379784704;
+  const mintBlock = 53_329_346;
+  const mintTime = 1_788_429_506;
+  const transactionHash = '0xb53c932d436fafe1199464d31b092dc11597595b4739d182b0cfcb938785cbad';
+
+  assert.equal(CHAINS.robinhood.usdRef.stable.toLowerCase(), USDG);
+  assert.equal(CHAINS.robinhood.usdRef.stableDecimals, 6);
+  assert.equal(CHAINS.robinhood.usdRef.via, 'ethereum',
+    'the direct USDG anchor must not remove WETH origin-chain pricing');
+
+  const pair = await usdPairAt(
+    'robinhood', USDG.toUpperCase(), MOO, entryPrice, mintBlock);
+  assert.equal(pair.usd0, 1);
+  assert.ok(Math.abs(pair.usd1 - 0.022025095756359588) < 1e-15);
+  assert.equal(pair.bridged, false,
+    'direct USDG pricing must not inherit the unrelated WETH bridge caveat');
+
+  const basis = await costBasisUsd('robinhood', {
+    token0: USDG,
+    token1: MOO,
+    token0Meta: { symbol: 'USDG', decimals: 6 },
+    token1Meta: { symbol: 'MOO', decimals: 18 },
+    history: {
+      deposits: [{
+        block: mintBlock,
+        time: mintTime,
+        transactionHash,
+        amount0: 28.022119,
+        amount1: 2319.9461165619887,
+        entry: { price: entryPrice, exact: true },
+      }],
+    },
+  });
+  assert.ok(basis);
+  assert.ok(Math.abs(basis.basis - 79.11915436687237) < 1e-10);
+  assert.equal(basis.exact, true);
+  assert.equal(basis.bridged, false);
+  assert.deepEqual(basis.legs.map((leg) => ({
+    block: leg.block,
+    time: leg.time,
+    transactionHash: leg.transactionHash,
+    source: leg.source,
+    bridged: leg.bridged,
+  })), [{
+    block: mintBlock,
+    time: mintTime,
+    transactionHash,
+    source: 'event-math',
+    bridged: false,
+  }]);
+
+  const spoof = await costBasisUsd('robinhood', {
+    token0: '0x1111111111111111111111111111111111111111',
+    token1: MOO,
+    token0Meta: { symbol: 'USDG', decimals: 6 },
+    token1Meta: { symbol: 'MOO', decimals: 18 },
+    history: {
+      deposits: [{
+        block: mintBlock,
+        amount0: 28.022119,
+        amount1: 2319.9461165619887,
+        entry: { price: entryPrice, exact: true },
+      }],
+    },
+  });
+  assert.equal(spoof, null,
+    'a token named USDG must not be trusted unless its address is canonical');
 }
 
 async function testNoCollectedTokensInCurrentValue() {
@@ -281,9 +357,10 @@ await testExactPairCanResolveSingleSidedAdd();
 await testEveryAddUsesItsOwnEventPrice();
 await testKeylessTimestampBlockSearch();
 await testCollectionAtEventPrice();
+await testRobinhoodUsdGExactHistoricalBasis();
 await testNoCollectedTokensInCurrentValue();
 await testOverlayKeepsDollarReturnAsHeadline();
 testAggregateLabelsAndExclusions();
 testSinglePositionAggregateAvailability();
 testTokenPriceChangesAreExactAndClearlyAnchored();
-console.log('cash-flow pnl: 13 regression groups passed');
+console.log('cash-flow pnl: 14 regression groups passed');

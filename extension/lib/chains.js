@@ -149,20 +149,27 @@ export const CHAINS = {
     // keyless source that separates v4 addition principal from fees accrued in
     // the same PoolManager balance delta.
     blockscout: 'https://robinhoodchain.blockscout.com/api',
+    // The public RPC is explicitly rate-limited. Licensed builds may retry a
+    // v4 addition receipt through the narrowly allowlisted hosted relay.
+    receiptRelayChainId: 4663,
+    // Bound PoolManager history by this NFT's globally proven mint block.
+    // The exact-token Transfer query is sparse on this RPC and avoids reading
+    // unrelated pool activity from before the position existed.
+    v4HistoryMintBoundRpc: true,
     // v4, verified live 2026-08-18: code present at both contracts and
     // poolManager() returns the expected singleton.
     v4PositionManager: '0x58daec3116aae6d93017baaea7749052e8a04fa7',
     v4PoolManager: '0x8366a39cc670b4001a1121b8f6a443a643e40951',
     v4StateView: '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b',
     nativeSymbol: 'ETH',
-    // No stablecoin liquidity on this chain: its WETH trades against thirty
-    // memecoins and nothing dollar-denominated, so there is no local pool to
-    // read a USD price from. The WETH here is bridged, so dollars come from
-    // Ethereum at the matching timestamp instead. That assumes the bridged
-    // token holds its peg — an assumption the same-chain path does not make,
-    // so results carry a `bridged` flag and the UI says so.
+    // Canonical USDG is a direct $1 historical anchor. Pinning the verified
+    // contract address keeps lookalike symbols from being treated as dollars.
+    // WETH still has no trusted local dollar route, so its price comes from
+    // Ethereum at the matching timestamp and carries the bridge assumption.
     usdRef: {
+      stable: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168',
       weth: '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
+      stableDecimals: 6,
       via: 'ethereum',
       nativeEquivalent: true,
     },

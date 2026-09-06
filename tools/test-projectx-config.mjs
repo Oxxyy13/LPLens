@@ -24,7 +24,7 @@ assert.deepEqual(Object.keys(CHAINS), [
 ]);
 
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
-assert.equal(manifest.version, '0.33.0');
+assert.equal(manifest.version, '0.34.0');
 assert.match(manifest.name, /Concentrated LP Position Reader/);
 assert.match(manifest.description, /Read-only concentrated LP position inspector/);
 assert.doesNotMatch(manifest.description, /Uniswap|ProjectX|UP33/,

@@ -50,6 +50,7 @@ import {
   proveLineageCandidates, readLineageState, relevantLineageEdges,
   validateLineageEdges, writeLineageEdges,
 } from './lib/position-lineage.js';
+import { revertPositionUrl } from './lib/revert.js';
 
 const $ = (id) => document.getElementById(id);
 const form = $('form'), statusEl = $('status'), resultsEl = $('results');
@@ -362,6 +363,7 @@ function scheduleCurrentIndexCheck() {
   const revision = ++currentIndexCheckRevision;
   currentIndexState = 'checking';
   paintScanButtons();
+  paintScanHint();
   void (async () => {
     await Promise.all([scanPreferencesReady, refreshScopeReady]);
     const owners = selectedRefreshOwners();
@@ -375,6 +377,7 @@ function scheduleCurrentIndexCheck() {
     if (revision !== currentIndexCheckRevision) return;
     currentIndexState = next;
     paintScanButtons();
+    paintScanHint();
   })();
 }
 
@@ -536,7 +539,9 @@ function paintScanHint() {
   if (!hint) return;
   const closed = $('includeClosed').checked;
   const enabled = selectedPortfolioChainKeys();
-  if (enabled.length && !closed) {
+  const needsFullRescan = SIDE_PANEL && currentIndexState === 'missing'
+    && enabled.length > 0 && selectedRefreshOwners().length > 0;
+  if (enabled.length && !closed && !needsFullRescan) {
     hint.hidden = true;
     hint.textContent = '';
     hint.classList.remove('error');
@@ -544,6 +549,7 @@ function paintScanHint() {
   }
   hint.hidden = false;
   const bits = enabled.length ? [] : ['Choose at least one network to scan.'];
+  if (needsFullRescan) bits.push('Refresh current needs a Full rescan first.');
   if (closed) bits.push('Closed positions can make scans much slower.');
   hint.textContent = bits.join(' ');
   hint.classList.toggle('error', enabled.length === 0);
@@ -1631,6 +1637,7 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
   );
   const feeLabel = Number.isFinite(Number(p.fee))
     ? `${(Number(p.fee) / 10000).toFixed(2)}%` : 'dynamic';
+  const revertUrl = revertPositionUrl(p);
 
   return `
     <div class="card position-card" data-position-filters="${filterTokens(p)}"
@@ -1661,6 +1668,10 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
       ${rebalanceLine(p, h, s0, s1)}
       <div class="card-actions">
         <button class="more" data-more="${p.tokenId}">details</button>
+        ${revertUrl ? `<a class="revert-position-link" href="${esc(revertUrl)}" target="_blank"
+          rel="noopener noreferrer"
+          aria-label="View ${esc(s0)} / ${esc(s1)} on Revert Finance"
+          title="Open this public position on Revert Finance. Wallet connections and transactions happen on Revert, not in LPLens."><span class="revert-label"><span class="revert-prefix">View on </span>Revert</span><span aria-hidden="true">↗</span></a>` : ''}
         ${hideKey ? `<button type="button" class="hide-position"
           ${scanBusy || dashboardMutationBusy ? 'disabled' : ''}
           aria-label="${locallyHidden ? 'Restore' : 'Hide'} ${esc(s0)} / ${esc(s1)} in this browser"

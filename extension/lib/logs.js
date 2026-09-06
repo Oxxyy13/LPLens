@@ -5,7 +5,9 @@
  * history. Whether that is cheap depends entirely on the endpoint, and the
  * measured landscape as of 2026-08-19 is:
  *
- *   - Robinhood Chain's public RPC serves unbounded eth_getLogs, keylessly.
+ *   - Robinhood Chain's public RPC serves exact eth_getLogs filters keylessly,
+ *     but rejects a query that matches more than 10,000 logs. The filtered v4
+ *     fallback pins the head and bisects only explicit result/range limits.
  *   - No public Ethereum RPC does. Verified refusals from eth.drpc.org (10k
  *     blocks), ethereum-rpc.publicnode.com (archive needs a token),
  *     rpc.ankr.com (key), rpc.mevblocker.io (10k), eth-pokt.nodies.app,
@@ -84,6 +86,14 @@ const EXPLORER_MAX_PAGES = 8;
 // well-formed empty result.
 const RPC_LAST_LOG_ATTEMPTS = 3;
 const RPC_LAST_LOG_RETRY_MS = 100;
+// Robinhood Chain currently rejects eth_getLogs above 10,000 matches. A reply
+// containing exactly the cap is also ambiguous because a provider may truncate
+// rather than reject. Exact lifetime accounting therefore splits that interval
+// again and accepts it only when every non-overlapping child is readable.
+const RPC_FILTER_RESULT_LIMIT = 10_000;
+const RPC_FILTER_MAX_CALLS = 64;
+const RPC_FILTER_MAX_DEPTH = 32;
+const RPC_FILTER_MAX_LOGS = 100_000;
 
 /** Normalised log: what history.js consumes, regardless of source. */
 const normalise = (log) => ({
@@ -153,6 +163,151 @@ async function viaRpcRange(rpc, nfpm, topic1, fromBlock, toBlock) {
   }]);
   if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
   return logs.map(normalise);
+}
+
+function isRpcLogRangeLimit(error) {
+  // A transient outage or request-rate 429 must not fan out into more traffic.
+  // rpcCall already retries those. Only errors that explicitly say this block
+  // interval or result set is too large are safe to repair by bisection.
+  if (error?.status === 429 || error?.retryable) return false;
+  const message = String(error?.message || error || '');
+  if (/too many requests|rate.?limit|temporar|timeout|network|HTTP 5\d\d/i.test(message)) {
+    return false;
+  }
+  return /(?:logs?|results?).{0,80}(?:exceed(?:s|ed)?|more than|too many|limit)/i.test(message)
+    || /(?:exceed(?:s|ed)?|more than|too many).{0,80}(?:logs?|results?)/i.test(message)
+    || /(?:block|query|range).{0,80}(?:too (?:large|wide)|maximum|max |exceed|limit)/i
+      .test(message)
+    || /response (?:size|limit).{0,40}(?:exceed|too (?:large|many))/i.test(message);
+}
+
+function normaliseExactRpcRows(rows, fromBlock, toBlock, contract, filterTopics) {
+  if (!Array.isArray(rows)) throw new Error('malformed getLogs result');
+  const seen = new Map();
+  const logs = [];
+  for (const row of rows) {
+    let log;
+    try { log = normalise(row); }
+    catch { throw new Error('malformed getLogs row'); }
+    const rowAddress = String(row?.address || '').toLowerCase();
+    const rowTopics = Array.isArray(row?.topics)
+      ? row.topics.map((topic) => String(topic).toLowerCase()) : null;
+    const exactTopics = (filterTopics || []).every((expected, index) => {
+      if (expected === null || expected === undefined) return true;
+      const actual = rowTopics?.[index];
+      if (Array.isArray(expected)) {
+        return expected.some((topic) => String(topic).toLowerCase() === actual);
+      }
+      return String(expected).toLowerCase() === actual;
+    });
+    if (rowAddress !== String(contract).toLowerCase() || !rowTopics || !exactTopics
+        || !Number.isSafeInteger(log.block) || log.block < fromBlock || log.block > toBlock
+        || !Number.isSafeInteger(log.logIndex) || log.logIndex < 0
+        || !/^0x[0-9a-f]{64}$/i.test(String(log.transactionHash || ''))) {
+      throw new Error('getLogs returned a row outside the exact requested filter');
+    }
+    log.transactionHash = String(log.transactionHash).toLowerCase();
+    log.topics = rowTopics;
+    log.data = String(log.data).toLowerCase();
+    const id = `${log.transactionHash}:${log.logIndex}`;
+    const prior = seen.get(id);
+    if (prior) {
+      if (prior.block !== log.block || prior.data !== log.data
+          || JSON.stringify(prior.topics) !== JSON.stringify(log.topics)) {
+        throw new Error('getLogs returned a conflicting duplicate log identity');
+      }
+      continue;
+    }
+    seen.set(id, log);
+    logs.push(log);
+  }
+  return logs.sort((a, b) => (a.block - b.block) || (a.logIndex - b.logIndex));
+}
+
+/**
+ * Complete raw-RPC event history for one exact filter.
+ *
+ * The latest block is resolved once so recursive children cover one fixed
+ * numeric interval. Children are inclusive and disjoint. Any unreadable child
+ * rejects the whole task, which prevents partial lifetime history from becoming
+ * a plausible-looking return figure.
+ */
+async function viaRpcFilteredComplete({ rpc, contract, topics, fromBlock, toBlock }) {
+  let pinnedTo = toBlock;
+  if (pinnedTo === 'latest') {
+    const head = await rpcCall(rpc, 'eth_getBlockByNumber', ['latest', false]);
+    try { pinnedTo = Number(BigInt(head?.number)); }
+    catch { throw new Error('latest block unavailable for filtered-log split'); }
+    if (!Number.isSafeInteger(pinnedTo) || pinnedTo < fromBlock) {
+      throw new Error('latest block unavailable for filtered-log split');
+    }
+  }
+
+  let calls = 0;
+  let chunked = false;
+  let acceptedLogs = 0;
+  const read = async (start, end, depth) => {
+    if (depth > RPC_FILTER_MAX_DEPTH) {
+      throw new Error(`filtered-log split exceeded ${RPC_FILTER_MAX_DEPTH} levels`);
+    }
+    if (calls >= RPC_FILTER_MAX_CALLS) {
+      throw new Error(`filtered-log split exceeded ${RPC_FILTER_MAX_CALLS} RPC calls`);
+    }
+    calls++;
+
+    let rows;
+    try {
+      rows = await rpcCall(rpc, 'eth_getLogs', [{
+        address: contract,
+        fromBlock: '0x' + BigInt(start).toString(16),
+        toBlock: '0x' + BigInt(end).toString(16),
+        topics,
+      }]);
+    } catch (error) {
+      if (!isRpcLogRangeLimit(error)) throw error;
+      rows = null;
+    }
+
+    const needsSplit = rows === null
+      || (Array.isArray(rows) && rows.length >= RPC_FILTER_RESULT_LIMIT);
+    if (!needsSplit) {
+      const normalised = normaliseExactRpcRows(rows, start, end, contract, topics);
+      acceptedLogs += normalised.length;
+      if (acceptedLogs > RPC_FILTER_MAX_LOGS) {
+        throw new Error(`filtered-log result exceeded ${RPC_FILTER_MAX_LOGS} logs`);
+      }
+      return normalised;
+    }
+    if (start === end) {
+      throw new Error(
+        `filtered-log completeness cannot be proven: block ${start} reached the provider limit`,
+      );
+    }
+
+    chunked = true;
+    const middle = start + Math.floor((end - start) / 2);
+    const left = await read(start, middle, depth + 1);
+    const right = await read(middle + 1, end, depth + 1);
+    return [...left, ...right];
+  };
+
+  const logs = await read(fromBlock, pinnedTo, 0);
+  const identities = new Map();
+  for (const log of logs) {
+    const id = `${log.transactionHash}:${log.logIndex}`;
+    const prior = identities.get(id);
+    if (prior && (prior.block !== log.block || prior.data !== log.data
+        || JSON.stringify(prior.topics) !== JSON.stringify(log.topics))) {
+      throw new Error('getLogs returned a cross-range conflicting log identity');
+    }
+    identities.set(id, log);
+  }
+  return {
+    logs: [...identities.values()],
+    source: chunked ? 'rpc-chunked' : 'rpc',
+    fromBlock,
+    toBlock: pinnedTo,
+  };
 }
 
 async function explorerGetLogs(url, fields, slot, label) {
@@ -639,14 +794,12 @@ export async function fetchFilteredLogs({
 
   if (etherscanKey && etherscanChainId) {
     const hit = await trySource('etherscan', async () => (
-      await explorerGetLogs(ETHERSCAN_V2, {
-        chainid: String(etherscanChainId),
+      await viaEtherscanRaw(etherscanChainId, etherscanKey, {
         address: contract,
         fromBlock: String(from),
         toBlock: String(to),
-        apikey: etherscanKey,
         ...filter,
-      }, etherscanSlot, 'etherscan')
+      })
     ).map(normalise));
     if (hit) return hit;
   }
@@ -674,17 +827,15 @@ export async function fetchFilteredLogs({
     if (hit) return hit;
   }
 
-  const hit = await trySource('rpc', async () => {
-    const logs = await rpcCall(rpc, 'eth_getLogs', [{
-      address: contract,
-      fromBlock: '0x' + BigInt(from).toString(16),
-      toBlock: to === 'latest' ? 'latest' : '0x' + BigInt(to).toString(16),
-      topics,
-    }]);
-    if (!Array.isArray(logs)) throw new Error('malformed getLogs result');
-    return logs.map(normalise);
-  });
-  if (hit) return hit;
+  try {
+    const complete = await viaRpcFilteredComplete({
+      rpc, contract, topics, fromBlock: from, toBlock: to,
+    });
+    if (complete.logs.length) return complete;
+    errors.push('rpc: zero logs for a position lifetime');
+  } catch (err) {
+    errors.push(err.message || String(err));
+  }
   return { unavailable: errors.join('; ') };
 }
 

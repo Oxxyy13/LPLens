@@ -11,8 +11,9 @@ const panel = readFileSync(new URL('../extension/sidepanel.html', import.meta.ur
 const popup = readFileSync(new URL('../extension/popup.html', import.meta.url), 'utf8');
 const controller = readFileSync(new URL('../extension/popup.js', import.meta.url), 'utf8');
 const panelCss = readFileSync(new URL('../extension/sidepanel.css', import.meta.url), 'utf8');
+const popupCss = readFileSync(new URL('../extension/popup.css', import.meta.url), 'utf8');
 
-assert.equal(manifest.version, '0.33.0');
+assert.equal(manifest.version, '0.34.0');
 assert.ok(Number(manifest.minimum_chrome_version) >= 116);
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -102,6 +103,8 @@ assert.match(controller, /Scope changed\. Refresh to update\./,
   'a saved view must disclose when the wallet scope changed');
 assert.match(controller, /readCurrentPositionJobs\(owners, chainKeys\)/,
   'fast refresh readiness must come from the operational ID index');
+assert.match(controller, /Refresh current needs a Full rescan first\./,
+  'missing or upgrade-stale indexes must visibly require authoritative discovery');
 assert.match(controller, /mode === 'full' && state\.ok === false[\s\S]*markCurrentPositionScopeIncomplete/,
   'a failed Full rescan must disable fast refresh for that wallet and chain');
 assert.match(controller, /await loadKnownSweep\(owners, chainKeys, currentScopes, progressOptions\)/,
@@ -217,6 +220,9 @@ assert.match(controller, /activeAddressRevision === startupAddressRevision/,
 assert.match(controller, /It remains the overlay wallet/,
   'removing a saved row must not silently replace the active wallet');
 assert.match(panelCss, /body\.sidepanel \.hide-position\s*\{\s*display:\s*block/);
+assert.match(controller, /class="revert-position-link"/);
+assert.match(popupCss, /\.revert-position-link/);
+assert.match(panelCss, /@container \(max-width: 280px\)[^]*\.revert-position-link \.revert-prefix/);
 assert.match(panelCss, /body\.sidepanel \.position-card\s*\{\s*container-type:\s*inline-size/);
 assert.match(panelCss, /@container \(max-width: 380px\)/);
 assert.match(panelCss, /\.refresh-delta-grid/);

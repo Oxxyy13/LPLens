@@ -26,6 +26,9 @@ const BASE_V3 = v3Deployment('base');
 const ROBINHOOD_V3 = v3Deployment('robinhood');
 const UP33 = v3Deployment('robinhood', 'up33-cl');
 const GAUGE = `0x${'aa'.repeat(20)}`;
+const coverage = (...deployments) => deployments.map((deployment) => (
+  `${deployment.id}@${deployment.nfpm.toLowerCase()}`
+)).sort();
 
 const record = (tokenId, deployment = BASE_V3, overrides = {}) => ({
   tokenId: String(tokenId),
@@ -38,6 +41,7 @@ const protocol = (complete, ids) => ({
   complete,
   records: ids.map((id) => record(id)),
   ids: ids.map(String),
+  deploymentCoverage: coverage(BASE_V3),
 });
 
 assert.deepEqual(index.normalizeCurrentPositionIds(['9', 2n, '2', '-1', 'bad']), ['2', '9']);
@@ -152,10 +156,115 @@ rows[legacyKey] = {
 scope = await index.readCurrentPositionScope(LEGACY_OWNER, 'robinhood');
 assert.equal(scope.version, index.CURRENT_POSITION_INDEX_VERSION);
 assert.deepEqual(scope.v3, {
-  complete: true,
+  complete: false,
   records: [record('7', ROBINHOOD_V3)],
   ids: ['7'],
+  deploymentCoverage: [],
 });
+jobs = await index.readCurrentPositionJobs([{ address: LEGACY_OWNER }], ['robinhood']);
+assert.equal(jobs[0].ready, false,
+  'a pre-UP33 Robinhood index must require Full rescan before fast refresh');
+
+const LEGACY_SINGLE_OWNER = `0x${'44'.repeat(20)}`;
+const legacySingleKey = `${index.CURRENT_POSITION_INDEX_PREFIX}base:${LEGACY_SINGLE_OWNER}`;
+rows[legacySingleKey] = {
+  version: 1,
+  owner: LEGACY_SINGLE_OWNER,
+  chainKey: 'base',
+  fullScanAt: 525,
+  refreshedAt: null,
+  v3: { complete: true, ids: ['7'] },
+  v4: { complete: true, ids: [] },
+};
+scope = await index.readCurrentPositionScope(LEGACY_SINGLE_OWNER, 'base');
+assert.equal(scope.v3.complete, false,
+  'bare-ID v1 rows must not invent current manager coverage');
+assert.deepEqual(scope.v3.deploymentCoverage, []);
+
+const SCOPED_V2_OWNER = `0x${'55'.repeat(20)}`;
+const scopedV2Key = `${index.CURRENT_POSITION_INDEX_PREFIX}base:${SCOPED_V2_OWNER}`;
+rows[scopedV2Key] = {
+  version: index.CURRENT_POSITION_INDEX_VERSION,
+  owner: SCOPED_V2_OWNER,
+  chainKey: 'base',
+  fullScanAt: 540,
+  refreshedAt: null,
+  v3: { complete: true, records: [record('7')], ids: ['7'] },
+  v4: { complete: true, ids: [] },
+};
+scope = await index.readCurrentPositionScope(SCOPED_V2_OWNER, 'base');
+assert.equal(scope.v3.complete, false,
+  'an early v2 row without exact deployment coverage must require Full rescan');
+assert.deepEqual(scope.v3.deploymentCoverage, []);
+
+// Early v2 rows shipped before the coverage field existed. Even if they hold
+// manager-scoped records, they cannot prove that the configured deployment set
+// has not changed since their Full rescan.
+const PRE_COVERAGE_OWNER = `0x${'33'.repeat(20)}`;
+const preCoverageKey = `${index.CURRENT_POSITION_INDEX_PREFIX}robinhood:${PRE_COVERAGE_OWNER}`;
+rows[preCoverageKey] = {
+  version: index.CURRENT_POSITION_INDEX_VERSION,
+  owner: PRE_COVERAGE_OWNER,
+  chainKey: 'robinhood',
+  fullScanAt: 550,
+  refreshedAt: null,
+  v3: { complete: true, records: [record('7', UP33)], ids: [] },
+  v4: { complete: true, ids: [] },
+};
+scope = await index.readCurrentPositionScope(PRE_COVERAGE_OWNER, 'robinhood');
+assert.equal(scope.v3.complete, false,
+  'a multi-manager v2 row without exact deployment coverage must fail closed');
+jobs = await index.readCurrentPositionJobs([{ address: PRE_COVERAGE_OWNER }], ['robinhood']);
+assert.equal(jobs[0].ready, false);
+
+// A partial Full rescan after the upgrade may add newly proven records, but it
+// must retain pre-upgrade records it could not disprove and remain unready.
+await index.writeFullDiscoveryScope({
+  owner: PRE_COVERAGE_OWNER,
+  chainKey: 'robinhood',
+  at: 575,
+  discovery: {
+    v3: { complete: false, records: [record('9', ROBINHOOD_V3)] },
+    v4: { complete: true, ids: [] },
+  },
+});
+scope = await index.readCurrentPositionScope(PRE_COVERAGE_OWNER, 'robinhood');
+assert.equal(scope.v3.complete, false,
+  'a partial post-upgrade Full rescan must not restore fast-refresh readiness');
+assert.deepEqual(scope.v3.records, [
+  record('9', ROBINHOOD_V3),
+  record('7', UP33),
+], 'a partial post-upgrade Full rescan must preserve remembered manager-scoped records');
+assert.deepEqual(scope.v3.deploymentCoverage, coverage(ROBINHOOD_V3, UP33));
+jobs = await index.readCurrentPositionJobs([{ address: PRE_COVERAGE_OWNER }], ['robinhood']);
+assert.equal(jobs[0].ready, false);
+
+// A nonempty coverage proof can still be stale. This models a row written
+// before UP33 became a configured Robinhood deployment.
+const STALE_COVERAGE_OWNER = `0x${'66'.repeat(20)}`;
+const staleCoverageKey = `${index.CURRENT_POSITION_INDEX_PREFIX}robinhood:${STALE_COVERAGE_OWNER}`;
+rows[staleCoverageKey] = {
+  version: index.CURRENT_POSITION_INDEX_VERSION,
+  owner: STALE_COVERAGE_OWNER,
+  chainKey: 'robinhood',
+  fullScanAt: 580,
+  refreshedAt: null,
+  v3: {
+    complete: true,
+    records: [record('7', ROBINHOOD_V3)],
+    ids: ['7'],
+    deploymentCoverage: coverage(ROBINHOOD_V3),
+  },
+  v4: { complete: true, ids: [] },
+};
+scope = await index.readCurrentPositionScope(STALE_COVERAGE_OWNER, 'robinhood');
+assert.equal(scope.v3.complete, false,
+  'a nonempty but stale deployment coverage proof must require Full rescan');
+assert.deepEqual(scope.v3.records, [record('7', ROBINHOOD_V3)],
+  'invalidating stale coverage must not discard remembered records');
+assert.deepEqual(scope.v3.deploymentCoverage, coverage(ROBINHOOD_V3));
+jobs = await index.readCurrentPositionJobs([{ address: STALE_COVERAGE_OWNER }], ['robinhood']);
+assert.equal(jobs[0].ready, false);
 
 // Equal token IDs in different managers and custody contracts remain distinct.
 assert.equal(await index.writeFullDiscoveryScope({
@@ -185,6 +294,8 @@ assert.equal(scope.v3.complete, false,
   'a complete claim containing an invalid deployment record must not enable fast refresh');
 assert.deepEqual(scope.v3.ids, ['7'],
   'the compatibility ID list must contain only default-manager wallet custody');
+assert.deepEqual(scope.v3.deploymentCoverage, coverage(ROBINHOOD_V3, UP33),
+  'a Full rescan must record every configured manager in its coverage proof');
 assert.equal(new Set(scope.v3.records.map((row) => (
   `${row.manager}:${row.tokenId}`
 ))).size, 3);
@@ -205,6 +316,12 @@ await index.writeFullDiscoveryScope({
     v4: { complete: true, ids: [] },
   },
 });
+scope = await index.readCurrentPositionScope(LEGACY_OWNER, 'robinhood');
+assert.equal(scope.v3.complete, true,
+  'a complete multi-manager Full rescan must restore fast-refresh readiness');
+assert.deepEqual(scope.v3.deploymentCoverage, coverage(ROBINHOOD_V3, UP33));
+jobs = await index.readCurrentPositionJobs([{ address: LEGACY_OWNER }], ['robinhood']);
+assert.equal(jobs[0].ready, true);
 await index.writeCurrentRefreshScope({
   owner: LEGACY_OWNER,
   chainKey: 'robinhood',
@@ -233,5 +350,24 @@ assert.deepEqual(scope.v3.records, [record('7', UP33, {
   custody: 'gauge', custodian: GAUGE,
 })]);
 assert.deepEqual(scope.v3.ids, []);
+assert.deepEqual(scope.v3.deploymentCoverage, coverage(ROBINHOOD_V3, UP33),
+  'fast refresh must preserve the Full rescan deployment coverage proof');
+
+await index.writeCurrentRefreshScope({
+  owner: LEGACY_OWNER,
+  chainKey: 'robinhood',
+  ids: {
+    v3: {
+      complete: true,
+      records: [record('7', UP33, { custody: 'gauge', custodian: GAUGE })],
+      deploymentCoverage: coverage(ROBINHOOD_V3),
+    },
+    v4: [],
+  },
+});
+scope = await index.readCurrentPositionScope(LEGACY_OWNER, 'robinhood');
+assert.equal(scope.v3.complete, true);
+assert.deepEqual(scope.v3.deploymentCoverage, coverage(ROBINHOOD_V3, UP33),
+  'a current-refresh object must not rewrite Full-rescan deployment coverage');
 
 console.log('current position index: migration, deployment/custody identity and readiness pass');
