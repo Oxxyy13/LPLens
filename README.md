@@ -26,11 +26,13 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
-## Status: 0.33.0 live, 0.34.0 release candidate
+## Status: 0.34.0 live
 
-The public Store release is 0.33.0. Version 0.34 is prepared for Store review
-and is not yet a Store release. Release source and ZIP files are published
-together for exact comparison.
+The public Chrome Web Store listing was verified at version 0.34.0 on
+September 7, 2026. Release source and the immutable ZIP are published together
+for exact comparison. Existing access keys and saved preferences are preserved;
+after upgrading from 0.33 or earlier, run Full rescan once to rebuild the
+deployment-aware current-position index.
 
 The 0.34 release checks cover paginated v4 history, explicit failed/partial
 overlay discovery, and UP33 detail placement around multiple drawers. Failed
