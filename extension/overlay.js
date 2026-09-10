@@ -1232,7 +1232,8 @@ function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError, rang
   const tokenId = position && position.tokenId !== undefined ? String(position.tokenId) : '';
   return `<div class="portfolio-card"${rangeId ? ` data-dex-range-id="${esc(rangeId)}"` : ''}>
     ${gutterCard({ data: position }, false)}
-    ${tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
+    ${position?.vault ? `<div class="gc-sub">Smart LP · ${esc(position.vault.strategy)} · ${fmt(position.vault.sharePercent, 4)}% share</div>`
+      : tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
     ${dexscreenerRangeRuler(position, pair, wrappedNative, pairError)}
     ${rangeId ? `<div class="dex-range-aligned">
       <span class="dex-range-aligned-copy">Range drawn on chart</span>

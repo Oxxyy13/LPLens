@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { loadKnownPositions, loadPositions } from '../extension/lib/positions.js';
 import { v3Deployment } from '../extension/lib/chains.js';
+import { SMART_LP } from '../extension/lib/smart-lp.js';
 
 const OWNER = '0x' + '11'.repeat(20);
 const GAUGE = '0x' + '22'.repeat(20);
@@ -89,6 +90,7 @@ globalThis.fetch = async (_url, init = {}) => {
 };
 
 const walletScope = {
+  smartLp: { complete: true, registry: SMART_LP.registry, addresses: [] },
   v3: {
     complete: true,
     ids: [],
@@ -118,6 +120,7 @@ try {
   }]);
 
   const gaugeScope = {
+    smartLp: walletScope.smartLp,
     v3: { complete: true, ids: [], records: staked.currentIndex.v3Records },
     v4: { complete: true, ids: [] },
   };

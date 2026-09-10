@@ -92,7 +92,8 @@ function overlayDiscoveryResult(result) {
     || Number(result?.v4?.unreadable || 0) > 0
     || result?.truncated === true || result?.stoppedEarly === true
     || result?.discovery?.v3?.complete === false
-    || result?.discovery?.v4?.complete === false;
+    || result?.discovery?.v4?.complete === false
+    || result?.discovery?.smartLp?.complete === false;
   const reason = errors.some((error) => /429|rate.?limit/i.test(String(error)))
     ? 'The data provider is rate-limiting requests.'
     : 'Some positions could not be read.';

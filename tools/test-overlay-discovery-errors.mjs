@@ -54,6 +54,7 @@ const failures = [
   { v4: { unavailable: 'Blockscout HTTP 429' } },
   { discovery: { v3: { complete: false } } },
   { discovery: { v4: { complete: false } } },
+  { discovery: { smartLp: { complete: false } } },
 ];
 for (const failure of failures) {
   for (const projectx of [false, true]) {
@@ -72,6 +73,14 @@ const partial = harness([{ ...empty(), positions: [{ version: 'v3', pool: POOL }
 assert.equal((await partial.dispatch()).data.positions.length, 1);
 assert.match((await partial.dispatch()).data.unavailable, /Some positions could not be read/);
 assert.equal(partial.loads(), 2);
+
+const vault = harness([{ ...empty(), positions: [
+  { version: 'vault', pool: POOL, tokenId: '42', vault: { strategy: 'Balanced band' } },
+  { version: 'v3', pool: '0x' + '33'.repeat(20) },
+] }]);
+const vaultResult = await vault.dispatch();
+assert.equal(vaultResult.data.positions.length, 1);
+assert.equal(vaultResult.data.positions[0].version, 'vault', 'Dexscreener matches a vault by underlying pool, not the share contract');
 
 const complete = harness([empty()]);
 assert.equal((await complete.dispatch()).data.unavailable, null);

@@ -24,6 +24,7 @@ import {
   costBasisUsd, collectedProceedsUsd, strategyReturn, usdPairAt,
 } from './histprice.js';
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
+import { SMART_LP, scanSmartLp, normalizeSmartLpScope } from './smart-lp.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
 const gaugeCache = new Map(); // voter -> {at, gauges}; discovery acceleration only
@@ -294,9 +295,13 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     positions: [], held: 0, shown: 0, closedHidden: 0, unreadable: 0,
     unavailable: null, source: 'skipped', discovery: { complete: true, ids: [] },
   } : await scanV4(chainKey, owner, opts);
+  // Specialized UP33/ProjectX page scans must not include unrelated vaults.
+  const smartLp = chainKey === SMART_LP.chainKey && !requestedDeploymentIds
+    ? await scanSmartLp(owner, opts) : null;
   let positions = [
     ...deploymentRows.flatMap((row) => row.positions || []),
     ...v4.positions.map((position) => tagPosition(position, chainKey)),
+    ...(smartLp?.positions || []),
   ];
   if (opts.withUsd) {
     positions = (await mapLimit(positions, 2, async (position) => {
@@ -320,11 +325,11 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     truncated: deploymentRows.some((row) => row.truncated),
     stoppedEarly: false,
     enumSource: deployments.length > 1 ? 'rpc-verified-deployments' : 'rpc-verified',
-    deploymentIssues: deploymentRows.filter((row) => row.unavailable).map((row) => ({
+    deploymentIssues: [...deploymentRows.filter((row) => row.unavailable).map((row) => ({
       deploymentId: row.deployment.id,
       protocol: row.deployment.protocol,
       error: row.unavailable,
-    })),
+    })), ...(smartLp?.unavailable ? [{ deploymentId: 'smart-lp', protocol: 'Smart LP', error: smartLp.unavailable }] : [])],
     positions,
     v4,
     discovery: {
@@ -336,6 +341,7 @@ export async function loadPositions(chainKey, owner, opts = {}) {
         records,
       },
       v4: v4.discovery,
+      smartLp: smartLp?.discovery || normalizeSmartLpScope(null, chainKey),
     },
   };
 }
@@ -474,7 +480,8 @@ export async function loadKnownSweep(owners, chainKeys, scopes, opts = {}) {
     try { await onProgress({ ...meta, phase: 'start' }); } catch { /* UI must not fail */ }
     try {
       const scope = byScope.get(`${job.address}@${job.chainKey}`);
-      if (!scope || !scope.v3?.complete || !scope.v4?.complete) {
+      if (!scope || !scope.v3?.complete || !scope.v4?.complete
+          || !normalizeSmartLpScope(scope.smartLp, job.chainKey).complete) {
         throw new Error('Run Full rescan once to discover positions');
       }
       const rpcOverride = (opts.rpcOverrides && opts.rpcOverrides[job.chainKey]) || null;
@@ -539,7 +546,8 @@ function positionIsClosed(version, position) {
 export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
   const chain = CHAINS[chainKey];
   if (!chain) throw new Error(`unknown chain ${chainKey}`);
-  if (!scope || !scope.v3?.complete || !scope.v4?.complete) {
+  if (!scope || !scope.v3?.complete || !scope.v4?.complete
+      || !normalizeSmartLpScope(scope.smartLp, chainKey).complete) {
     throw new Error('Run Full rescan once to discover positions');
   }
   const rpc = opts.rpcOverride || chain.rpc;
@@ -702,6 +710,14 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
     positions.push(tagPosition(position, chainKey));
   }
 
+  const smartLp = chainKey === SMART_LP.chainKey
+    ? await scanSmartLp(owner, opts, normalizeSmartLpScope(scope.smartLp, chainKey).addresses) : null;
+  for (const p of smartLp?.positions || []) {
+    try { positions.push(opts.withUsd ? await attachUsd(chainKey, p, opts) : p); }
+    catch { positions.push(p); }
+  }
+  if (smartLp) keep.smartLp = smartLp.discovery;
+
   return {
     chain: chainKey,
     count: wanted.length,
@@ -716,6 +732,8 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
     refreshMode: 'current',
     positions,
     currentIndex: keep,
+    deploymentIssues: smartLp?.unavailable
+      ? [{ deploymentId: 'smart-lp', protocol: 'Smart LP', error: smartLp.unavailable }] : [],
     v4: {
       positions: positions.filter((position) => position.version === 'v4'),
       held: rememberedIds(scope, 'v4').length,
@@ -1299,7 +1317,7 @@ export async function attachUsd(chainKey, p, opts = {}) {
       pnl: ret.pnl,
       pnlPct: ret.pnlPct,
       currentValue: currentNow,
-      currentValueIncomplete: p.custody === 'gauge' && currentNow === null,
+      currentValueIncomplete: (p.custody === 'gauge' || !!p.vault) && currentNow === null,
       // Compatibility aliases for existing local harnesses and old consumers.
       // UI copy no longer calls gross additions a cost basis.
       costBasis: basis ? basis.basis : null,

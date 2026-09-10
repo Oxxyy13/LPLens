@@ -661,17 +661,18 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
     const hasTotal = u && u.pnl !== null && u.pnl !== undefined;
     const hasVsUsd = u && u.vsHodl !== null && u.vsHodl !== undefined;
     const cls = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : 'muted');
+    const benchmark = d.vault ? 'after vault fees' : 'fees minus IL';
     const vsPct = v && Number.isFinite(v.pct)
-      ? `${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}% · fees minus IL`
-      : 'fees minus IL';
+      ? `${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}% · ${benchmark}`
+      : benchmark;
 
     const vsInner = h && h.unavailable
       ? ['muted', '—', 'lifetime history unavailable']
       : hasVsUsd
         ? [cls(u.vsHodl), money(u.vsHodl, Math.abs(u.vsHodl) < 10 ? 2 : 2), vsPct]
         : v
-          ? [cls(v.pct), `${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}%`, 'fees minus IL']
-          : ['muted', '—', 'no history'];
+          ? [cls(v.pct), `${v.pct >= 0 ? '+' : ''}${v.pct.toFixed(2)}%`, benchmark]
+          : ['muted', '—', h?.vsHodlUnavailable ? esc(h.vsHodlUnavailable) : 'no history'];
 
     const totInner = h && h.unavailable
       ? ['muted', '—', 'unavailable']
@@ -709,6 +710,7 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
    * rather than "sold/bought": that phrasing is precisely true.
    */
   function rebalance(d, h) {
+    if (d.vault) return null; // Vault zaps/recenters are not one fixed NFT's IL.
     if (!h || h.unavailable || h.deposited0 === undefined) return null;
     if (d.collectable0 === null || d.collectable1 === null) return null;
     const net0 = h.received0 + (d.amount0 || 0) + d.collectable0 - h.deposited0;
@@ -769,7 +771,7 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
       rows.push(`<div class="kv"><span>pending ${esc(reward.symbol)}</span><span class="num ${tone}">${fmt(reward.amount)} ${esc(reward.symbol)}</span></div>`);
     }
 
-    if (v) {
+    if (v && Number.isFinite(v.feesPct) && Number.isFinite(v.ilPct)) {
       rows.push(`<div class="kv"><span>fees earned</span><span class="num pos">+${v.feesPct.toFixed(3)}%</span></div>`);
       rows.push(`<div class="kv"><span>impermanent loss</span><span class="num ${v.il > 0 ? 'neg' : ''}">${v.il > 0 ? '−' : '+'}${Math.abs(v.ilPct).toFixed(3)}%</span></div>`);
     }
@@ -811,8 +813,8 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
       // against a token that was up 59% while the panel showed −34%. So the
       // unit travels with the number, and the drift states which side won.
       rows.push('<div class="sep"></div>');
-      const standardPrices = priceHistoryRows(d, h, s0, s1, false);
-      if (flippable) {
+      const standardPrices = d.vault ? '' : priceHistoryRows(d, h, s0, s1, false);
+      if (flippable && !d.vault) {
         rows.push(`<div data-price-view="standard">${standardPrices}</div>`);
         rows.push(`<div data-price-view="inverse">${priceHistoryRows(d, h, s0, s1, true)}</div>`);
       } else {
@@ -854,7 +856,21 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
       }
     }
 
+    if (d.vault) {
+      const vault = d.vault;
+      const when = vault.lastRecenterAt > 0
+        ? new Date(vault.lastRecenterAt * 1000).toLocaleString('en-US') : 'not recorded';
+      rows.push('<div class="sep"></div>');
+      rows.push(`<div class="kv"><span>vault strategy</span><span class="num">${esc(vault.strategy)}</span></div>`);
+      rows.push(`<div class="kv"><span>your share</span><span class="num">${fmt(vault.sharePercent, 6)}%</span></div>`);
+      rows.push(`<div class="kv"><span>underlying NFT</span><span class="num">${vault.positionId === '0' ? 'none (idle assets)' : '#' + esc(vault.positionId)}</span></div>`);
+      rows.push(`<div class="kv"><span>last recentered</span><span class="num">${esc(when)}</span></div>`);
+      rows.push(`<div class="kv"><span>performance / exit fee</span><span class="num">${fmt(vault.perfFeeBps / 100)}% / ${fmt(vault.withdrawFeeBps / 100)}%</span></div>`);
+      rows.push(`<div class="kv"><span>vault</span><span class="num" title="${esc(vault.address)}">${esc(vault.address.slice(0, 8))}…${esc(vault.address.slice(-6))}</span></div>`);
+    }
     const caveats = [];
+    if (d.vault) caveats.push('Estimated exit value includes your share of active liquidity, idle assets and pending fees, after current vault fees and before gas. Pending fees remain inside the vault. PnL follows your wallet deposits and withdrawals across rebalances; USD cash flows use block-time prices, not execution quotes. Fee/IL decomposition is not available for managed vaults.');
+    if (d.vault?.valueUnavailable) caveats.push(esc(d.vault.valueUnavailable));
     if (v && v.apr !== null && v.aprDays !== null && v.aprDays < 7) {
       caveats.push(`*APR extrapolated from ${humanSpan(v.aprDays)} — a ×${Math.round(365.25 / v.aprDays)} annualisation, so a direction not a rate.`);
     }
@@ -888,6 +904,7 @@ button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
   }
 
   function rangeBar(d, h, flippable = false) {
+    if (d.vault && d.status === 'idle') return '<div class="note">Vault assets are idle. No active LP range.</div>';
     const s0 = d.token0Meta && d.token0Meta.symbol;
     const s1 = d.token1Meta && d.token1Meta.symbol;
     const standard = priceOrientation(d, h, s0, s1, false);
