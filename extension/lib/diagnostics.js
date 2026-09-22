@@ -7,6 +7,8 @@
  * A user must still press Copy before anything leaves chrome.storage.local.
  */
 
+import { validateReturnCoverage } from './scan-quality.js';
+
 export const DIAGNOSTIC_STORAGE_KEY = 'lplensDiagnosticSummary';
 
 export const ERROR_CODES = Object.freeze([
@@ -72,7 +74,7 @@ export function buildScanDiagnostic({
   surface, startedAt, finishedAt = Date.now(), jobs = [], states = {},
   positionCount = 0, hiddenCount = 0, includeClosed = false,
   savedWalletCount = 0, accessState = 'unknown', telemetryEnabled = true,
-  optionalPageAccess = {},
+  optionalPageAccess = {}, lpReturns = null,
 }) {
   const manifest = chrome.runtime.getManifest();
   const allowedChains = new Set(jobs.map((job) => String(job.chainKey || '').toLowerCase()));
@@ -146,6 +148,7 @@ export function buildScanDiagnostic({
       jobs: { total: jobs.length, complete, failed, issues },
       chains: chainRows,
       errors: errorCounts,
+      ...(lpReturns === null ? {} : { lpReturns: validateReturnCoverage(lpReturns) }),
     },
   };
 }

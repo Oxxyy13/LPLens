@@ -227,6 +227,7 @@ export async function historyRelayCredentials() {
   return {
     url: new URL('history', VALIDATE_URL).href,
     receiptUrl: new URL('receipt', VALIDATE_URL).href,
+    priceUrl: new URL('price', VALIDATE_URL).href,
     key,
     installationId: await installationId(),
   };

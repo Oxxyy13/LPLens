@@ -93,13 +93,13 @@ KEYS[unitHash] = { label: 'unit', expires: '2099-12-31' };
 const writes = [];
 const env = {
   DB: {
+    async batch(statements) {
+      writes.push(...statements);
+      return statements.map(() => ({ success: true }));
+    },
     prepare(sql) {
       return {
-        bind(...args) {
-          return {
-            async run() { writes.push({ sql, args }); return { success: true }; },
-          };
-        },
+        bind(...args) { return { sql, args }; },
       };
     },
   },

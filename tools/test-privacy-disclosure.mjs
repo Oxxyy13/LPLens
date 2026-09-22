@@ -18,8 +18,42 @@ const optionsJs = readFileSync(new URL('../extension/options.js', import.meta.ur
 const v4 = readFileSync(new URL('../extension/lib/v4.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url)));
 
-assert.match(worker, /Effective 4 September 2026/,
-  'privacy policy effective date must match the external Revert-link disclosure change');
+assert.match(worker, /Effective 22 September 2026/,
+  'privacy policy effective date must match the 0.35 release disclosures');
+for (const [name, body] of [['options', options], ['README', readme], ['SECURITY', security],
+  ['privacy policy', worker], ...localStoreSurface]) {
+  const copy = body.replace(/\s+/g, ' ');
+  assert.match(copy, /Smart LP/i, `${name} omits Smart LP`);
+  assert.match(copy, /\/locker\/smart-lp/, `${name} omits the Smart LP route`);
+  assert.match(copy, /modal visibility\/boundaries/, `${name} omits modal geometry reads`);
+  assert.match(copy, /public vault details could be correlated to an owner/i,
+    `${name} omits Smart LP page-correlation disclosure`);
+  assert.match(copy, /panel position and collapsed state/i, `${name} omits local panel state`);
+}
+for (const origin of manifest.optional_host_permissions.filter((host) => host.includes('stonkbrokers'))) {
+  assert.ok(worker.includes(new URL(origin).hostname), `privacy policy omits ${origin}`);
+}
+for (const [name, body] of [['options', options], ['README', readme], ['SECURITY', security],
+  ['privacy policy', worker], ...localStoreSurface]) {
+  const copy = body.replace(/\s+/g, ' ');
+  assert.match(copy, /separate[^.]{0,60}LP-return coverage[^.]{0,80}opt-in[^.]{0,80}off by default/i,
+    `${name} omits the separate default-off coverage consent`);
+  assert.match(copy, /(?:no|never) amounts or position identifiers/i,
+    `${name} omits the coverage data exclusions`);
+  assert.match(copy, /traffic group from the validated access-key role/i,
+    `${name} omits server-derived broad role separation`);
+  assert.match(copy, /no past scans are backfilled/i, `${name} omits the no-backfill boundary`);
+}
+assert.match(options, /id="returnCoverageEnabled"/);
+assert.doesNotMatch(options, /id="returnCoverageEnabled"[^>]*checked/);
+for (const [name, body] of [['options', options], ['README', readme], ['SECURITY', security],
+  ['privacy policy', worker], ...localStoreSurface]) {
+  assert.match(body, /historical reference[\s-]pric/i, `${name} omits reference pricing`);
+  assert.match(body, /\/price/, `${name} omits the narrow route`);
+  assert.match(body, /300 successful historical\s+reference-price proofs/i, `${name} omits bounded price cache`);
+  assert.match(body, /canonical (?:Ethereum )?block hashes[^.]{0,100}recheck|recheck[^.]{0,100}canonical (?:Ethereum )?block hashes/i,
+    `${name} omits cache revalidation`);
+}
 assert.match(worker, /saved addresses and labels/i,
   'privacy policy must describe the current all-chain wallet selection model');
 assert.match(worker, /separately selected active overlay wallet address/i,
@@ -103,7 +137,7 @@ assert.match(optionsJs, /Once matched[^.]{0,240}selected public NFT ID[^.]{0,180
 assert.match(optionsJs, /(?:not\s+persisted|Neither state is persisted),\s*transmitted,\s*or\s*included\s+in\s+telemetry/i,
   'granted-permission report omits UP33 selection exclusions');
 
-const clickSelection = overlay.match(/addEventListener\('click',[\s\S]*?\}, \{ passive: true, capture: true \}\);/);
+const clickSelection = overlay.match(/^addEventListener\('click',[\s\S]*?\}, \{ passive: true, capture: true \}\);/m);
 assert.ok(clickSelection, 'UP33 trusted-click selection handler is missing');
 assert.match(clickSelection[0], /event\.isTrusted\s*!==\s*true/,
   'UP33 selection must reject synthetic clicks');

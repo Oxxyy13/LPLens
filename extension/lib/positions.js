@@ -22,6 +22,7 @@ import {
 import { enumerateV4, loadV4Position, V4 } from './v4.js';
 import {
   costBasisUsd, collectedProceedsUsd, strategyReturn, usdPairAt,
+  RETRYABLE_PRICE_FAILURES,
 } from './histprice.js';
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
 import { SMART_LP, scanSmartLp, normalizeSmartLpScope } from './smart-lp.js';
@@ -1231,6 +1232,21 @@ async function scanV4(chainKey, owner, opts = {}) {
  *
  * Marks come from DexScreener and are best-effort: an unpriced leg yields null,
  * never zero, because a missing price must not read as a worthless position.
+ *
+ * WHY A RETURN IS MISSING is reported alongside the fact that it is. Three
+ * unrelated situations used to render the same dash: a pair with no dollar
+ * route at all, a basis that could only be bounded, and a public index that
+ * refused one request. Only the last is worth asking again about, and without
+ * the distinction the surface could neither offer a retry nor rule one out.
+ * The reasons are a closed vocabulary of slugs from `lib/histprice.js` and
+ * carry no endpoint, key, address or wallet detail.
+ *
+ * READ AN EMPTY REASON LIST NARROWLY. It means no CLASSIFIED pricing failure
+ * was recorded — history was unavailable, or there were no additions to
+ * price. It is not proof that no request failed: an unexpected exception
+ * anywhere under these calls is still swallowed into the same null, and the
+ * existing fail-closed behaviour is deliberately unchanged. Treat the list as
+ * evidence for offering a retry, never as evidence that the network was fine.
  */
 export async function attachUsd(chainKey, p, opts = {}) {
   let prices = {};
@@ -1243,9 +1259,17 @@ export async function attachUsd(chainKey, p, opts = {}) {
   // position's own pool plus the USD reference, so the current value and the
   // historical cash flows are produced the same way. DexScreener only fills the gap for
   // pairs with no leg in the reference token or the stablecoin.
+  // One sink per component, never one shared set. A position whose history is
+  // unavailable records no basis reason, and a transient failure on the
+  // unrelated current mark must not then be read as a retryable basis.
+  const basisFailures = new Set();
+  const proceedsFailures = new Set();
+  const markFailures = new Set();
+
   let chainPair = null;
   try {
-    chainPair = await usdPairAt(chainKey, p.token0, p.token1, p.price, 'latest', opts);
+    chainPair = await usdPairAt(chainKey, p.token0, p.token1, p.price, 'latest',
+      { ...opts, priceFailures: markFailures });
   } catch { chainPair = null; }
 
   const p0 = chainPair ? chainPair.usd0 : prices[p.token0.toLowerCase()];
@@ -1265,9 +1289,14 @@ export async function attachUsd(chainKey, p, opts = {}) {
   // tokens are no longer assumed to remain in the wallet forever — doing that
   // double-counts them when they are re-used in a new NFT.
   let basis = null;
-  try { basis = await costBasisUsd(chainKey, p, opts); } catch { basis = null; }
+  try {
+    basis = await costBasisUsd(chainKey, p, { ...opts, priceFailures: basisFailures });
+  } catch { basis = null; }
   let proceeds = null;
-  try { proceeds = await collectedProceedsUsd(chainKey, p, opts); } catch { proceeds = null; }
+  try {
+    proceeds = await collectedProceedsUsd(
+      chainKey, p, { ...opts, priceFailures: proceedsFailures });
+  } catch { proceeds = null; }
 
   // Decreased-but-uncollected principal lives in collectable, so a remove does
   // not change return until the assets actually leave the position.
@@ -1286,12 +1315,37 @@ export async function attachUsd(chainKey, p, opts = {}) {
     ...leg,
     kind: index === 0 ? 'opened' : 'added',
   })) : [];
+  // The wording is unchanged: existing surfaces render these exact strings.
   let returnUnavailable = null;
-  if (!basis) returnUnavailable = 'gross additions unpriced';
-  else if (!basis.exact) returnUnavailable = 'gross additions are bounded';
-  else if (!proceeds) returnUnavailable = 'collected proceeds unpriced';
-  else if (!proceeds.exact) returnUnavailable = 'collected proceeds are bounded';
-  else if (currentNow === null) returnUnavailable = 'current collectable unavailable';
+  let returnUnavailableReasons = [];
+  let returnRetryable = false;
+  const slugs = (sink) => [...sink].sort();
+  const retryable = (sink) => RETRYABLE_PRICE_FAILURES.some((r) => sink.has(r));
+  if (!basis) {
+    returnUnavailable = 'gross additions unpriced';
+    returnUnavailableReasons = slugs(basisFailures);
+    returnRetryable = retryable(basisFailures);
+  } else if (!basis.exact) {
+    // A bounded basis was priced. Asking again returns the same bound, so this
+    // is reported without inviting a retry that cannot change the answer.
+    returnUnavailable = 'gross additions are bounded';
+    returnUnavailableReasons = slugs(basisFailures);
+  } else if (!proceeds) {
+    returnUnavailable = 'collected proceeds unpriced';
+    returnUnavailableReasons = slugs(proceedsFailures);
+    returnRetryable = retryable(proceedsFailures);
+  } else if (!proceeds.exact) {
+    returnUnavailable = 'collected proceeds are bounded';
+    returnUnavailableReasons = slugs(proceedsFailures);
+  } else if (currentNow === null) {
+    returnUnavailable = 'current collectable unavailable';
+    // Only when the amounts themselves were readable. A gauge or vault that
+    // withholds its collectable is a custody limit, not a pricing failure.
+    if (p.collectable0 !== null && p.collectable1 !== null) {
+      returnUnavailableReasons = slugs(markFailures);
+      returnRetryable = retryable(markFailures);
+    }
+  }
 
   return {
     ...p,
@@ -1314,6 +1368,10 @@ export async function attachUsd(chainKey, p, opts = {}) {
       netCashIn: basis && proceeds && basis.exact && proceeds.exact
         ? basis.basis - proceeds.proceeds : null,
       returnUnavailable,
+      // Sanitized slugs explaining the line above, and whether another attempt
+      // is worth making. Both are empty/false whenever a return IS available.
+      returnUnavailableReasons,
+      returnRetryable,
       pnl: ret.pnl,
       pnlPct: ret.pnlPct,
       currentValue: currentNow,

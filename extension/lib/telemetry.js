@@ -1,6 +1,16 @@
 import { telemetryCredentials } from './license.js';
+import { validateReturnCoverage } from './scan-quality.js';
 
 export const TELEMETRY_SETTING_KEY = 'shareAnonymousScanOutcomes';
+export const RETURN_COVERAGE_SETTING_KEY = 'shareLpReturnCoverageV1';
+
+/** New data requires a separate affirmative choice, including existing installs. */
+export async function returnCoverageEnabled() {
+  try {
+    const s = await chrome.storage.local.get([TELEMETRY_SETTING_KEY, RETURN_COVERAGE_SETTING_KEY]);
+    return s[TELEMETRY_SETTING_KEY] !== false && s[RETURN_COVERAGE_SETTING_KEY] === true;
+  } catch { return false; }
+}
 
 /** Existing beta installs share coarse outcomes unless the user turns it off. */
 export async function telemetryEnabled() {
@@ -22,6 +32,15 @@ export async function sendScanTelemetry(report) {
     if (!await telemetryEnabled()) return false;
     const credentials = await telemetryCredentials();
     if (!credentials || !report || !report.scan) return false;
+    // Recheck consent after awaiting credentials. Turning sharing off also
+    // suppresses a pending scan report; enabling it later does not backfill.
+    const settings = await chrome.storage.local.get([TELEMETRY_SETTING_KEY, RETURN_COVERAGE_SETTING_KEY]);
+    if (settings[TELEMETRY_SETTING_KEY] === false) return false;
+    let lpReturns = null;
+    if (settings[RETURN_COVERAGE_SETTING_KEY] === true && report.scan.lpReturns) {
+      try { lpReturns = validateReturnCoverage(report.scan.lpReturns); }
+      catch { /* Invalid coverage cannot suppress the ordinary scan report. */ }
+    }
     const response = await fetch(credentials.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -33,6 +52,7 @@ export async function sendScanTelemetry(report) {
         positionBucket: report.scan.positionBucket,
         durationBucket: report.scan.duration,
         errors: report.scan.errors,
+        ...(lpReturns === null ? {} : { lpReturns }),
       }),
     });
     return response.ok;
@@ -40,4 +60,3 @@ export async function sendScanTelemetry(report) {
     return false;
   }
 }
-

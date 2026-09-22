@@ -12,7 +12,9 @@
  * eth_getTransactionReceipt), all reads,
  * exactly as the popup does.
  */
-import { loadPositionByVersion, loadPositions } from './lib/positions.js';
+import { loadPositionByVersion, loadPositions, attachUsd } from './lib/positions.js';
+import { scanSmartLp } from './lib/smart-lp.js';
+import { smartLpDisplayPosition } from './lib/smart-lp-display.js';
 import { entitlement, historyRelayCredentials } from './lib/license.js';
 import { CHAINS } from './lib/chains.js';
 import { createDexscreenerPairCache } from './lib/dexscreener.js';
@@ -24,6 +26,100 @@ const dexscreenerPairs = createDexscreenerPairCache();
 const DEXSCREENER_CACHE_MS = 60_000;
 const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
 const UP33_OVERLAY_ORIGIN = 'https://up33.xyz/*';
+const SMART_LP_OVERLAY_ORIGINS = Object.freeze([
+  'https://stonkbrokers.io/*', 'https://www.stonkbrokers.io/*',
+  'https://www.stonkbrokers.cash/*',
+]);
+const smartLpScans = new Map(); // In-flight only; never cache completed custody proofs.
+let smartLpScopeRevision = 0;
+
+function smartLpRoute(value) {
+  try {
+    const url = new URL(value);
+    return SMART_LP_OVERLAY_ORIGINS.includes(`${url.origin}/*`)
+      && /^\/locker\/smart-lp(?:\/.*)?$/.test(url.pathname) ? url.origin : null;
+  } catch { return null; }
+}
+
+async function smartLpPageAccess(sender, recheckTab = false) {
+  if (sender?.frameId !== 0 || !Number.isInteger(sender?.tab?.id)) return false;
+  const origin = smartLpRoute(sender.url);
+  if (!origin || smartLpRoute(sender.tab.url) !== origin) return false;
+  try {
+    if (!await chrome.permissions.contains({ origins: [`${origin}/*`] })) return false;
+    return !recheckTab || smartLpRoute((await chrome.tabs.get(sender.tab.id)).url) === origin;
+  } catch { return false; }
+}
+
+async function notifySmartLpScopeChanged() {
+  try {
+    const granted = [];
+    for (const origin of SMART_LP_OVERLAY_ORIGINS) {
+      if (await chrome.permissions.contains({ origins: [origin] })) granted.push(origin);
+    }
+    if (!granted.length) return;
+    const tabs = await chrome.tabs.query({ url: granted });
+    await Promise.allSettled(tabs.filter((tab) => Number.isInteger(tab.id)).map((tab) =>
+      chrome.tabs.sendMessage(tab.id, { type: 'LPLENS_SMART_LP_SCOPE_CHANGED' })));
+  } catch { /* A revoked/navigated tab will fail its next worker permission check. */ }
+}
+
+async function smartLpOverlayScan(address, store, revision) {
+  const key = JSON.stringify([address, store.rpcOverrides || {}, store.etherscanKey || '', revision]);
+  if (smartLpScans.has(key)) return smartLpScans.get(key);
+  const work = (async () => {
+    await slot();
+    try {
+      if (revision !== smartLpScopeRevision) return { positions: [], unavailable: true };
+      const opts = {
+        rpcOverride: store.rpcOverrides?.robinhood || undefined,
+        rpcOverrides: store.rpcOverrides || {}, etherscanKey: store.etherscanKey || undefined,
+        historyRelay: await historyRelayCredentials(),
+      };
+      const result = await scanSmartLp(address, opts);
+      // Bounded sequential pricing avoids one site tab fanning out across all chains.
+      const positions = [];
+      for (const p of (result.positions || [])) {
+        if (revision !== smartLpScopeRevision) break;
+        let priced = p;
+        try { priced = await attachUsd('robinhood', p, opts); } catch { /* Keep readable current assets. */ }
+        const display = smartLpDisplayPosition(priced);
+        if (display) positions.push(display);
+      }
+      return { positions, unavailable: result.unavailable || result.unreadable > 0
+        || result.discovery?.complete !== true };
+    } finally { release(); }
+  })();
+  smartLpScans.set(key, work);
+  try { return await work; }
+  finally { if (smartLpScans.get(key) === work) smartLpScans.delete(key); }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== 'LPLENS_SMART_LP_PORTFOLIO') return false;
+  (async () => {
+    if (!await smartLpPageAccess(sender)) return { ok: false, permissionRevoked: true };
+    const revision = smartLpScopeRevision;
+    if (!(await entitlement()).allowed) return { ok: false, gated: true,
+      error: 'Check your LPLens access key in Settings.' };
+    const store = await chrome.storage.local.get(['address', 'rpcOverrides', 'etherscanKey']);
+    const address = String(store.address || '').trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(address)) return { ok: false,
+      error: 'Open LPLens and select an overlay wallet first.' };
+    const result = await smartLpOverlayScan(address, store, revision);
+    if (!await smartLpPageAccess(sender, true)) return { ok: false, permissionRevoked: true };
+    const latest = await chrome.storage.local.get('address');
+    if (revision !== smartLpScopeRevision
+        || String(latest.address || '').trim().toLowerCase() !== address) return { ok: false, stale: true };
+    return { ok: true, data: {
+      walletLabel: `${address.slice(0, 6)}…${address.slice(-4)}`,
+      positions: result.positions, refreshedAt: Date.now(),
+      unavailable: result.unavailable ? 'Some vaults could not be read. Refresh to retry.' : null,
+    } };
+  })().then(sendResponse, () => sendResponse({ ok: false,
+    error: 'Smart LP could not be read from Robinhood Chain. Refresh to retry.' }));
+  return true;
+});
 
 async function dexscreenerPageAccess(sender) {
   try {
@@ -1373,6 +1469,7 @@ const OPTIONAL_OVERLAY_ORIGINS = new Set([
   PROJECTX_OVERLAY_ORIGIN,
   DEXSCREENER_OVERLAY_ORIGIN,
   UP33_OVERLAY_ORIGIN,
+  ...SMART_LP_OVERLAY_ORIGINS,
 ]);
 
 async function stopRevokedOverlayTabs(origins) {
@@ -1429,26 +1526,28 @@ const sameStrings = (actual, expected) =>
   Array.isArray(actual) && actual.length === expected.length
   && expected.every((value, index) => actual[index] === value);
 
-function currentOverlayRegistration(script, matches) {
+function currentOverlayRegistration(script, matches, js = OVERLAY_JS) {
   return !!script
     && sameStrings(script.matches, matches)
-    && sameStrings(script.js, OVERLAY_JS)
+    && sameStrings(script.js, js)
     && script.runAt === 'document_idle';
 }
 
-async function syncOneOverlay({ id, origin, matches }) {
+async function syncOneOverlay({ id, origin, matches, js = OVERLAY_JS }) {
   const granted = await chrome.permissions.contains({ origins: [origin] });
   const registered = await overlayRegistration(id);
   const definition = {
     id,
     matches: [...matches],
-    js: [...OVERLAY_JS],
+    js: [...js],
     runAt: 'document_idle',
   };
 
   if (granted && !registered) {
     await chrome.scripting.registerContentScripts([definition]);
-  } else if (granted && !currentOverlayRegistration(registered, matches)) {
+  } else if (granted && !(js === OVERLAY_JS
+    ? currentOverlayRegistration(registered, matches)
+    : currentOverlayRegistration(registered, matches, js))) {
     // Dynamic registrations persist across extension updates. Reconcile the
     // old 0.27 definition or the new list-page match would never take effect.
     await chrome.scripting.updateContentScripts([definition]);
@@ -1474,6 +1573,14 @@ async function syncOverlayRegistration() {
     origin: UP33_OVERLAY_ORIGIN,
     matches: UP33_OVERLAY_MATCHES,
   });
+  for (const [index, origin] of SMART_LP_OVERLAY_ORIGINS.entries()) {
+    const base = origin.slice(0, -2);
+    await syncOneOverlay({
+      id: `lplens-smart-lp-overlay-${index}`, origin,
+      matches: [`${base}/locker/smart-lp`, `${base}/locker/smart-lp/*`],
+      js: ['render.js', 'smart-lp-overlay.js'],
+    });
+  }
 }
 
 chrome.runtime.onInstalled.addListener(syncOverlayRegistration);
@@ -1488,6 +1595,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (['address', 'rpcOverrides', 'etherscanKey', 'licenseKey']
     .some((key) => Object.prototype.hasOwnProperty.call(changes, key))) {
     dexscreenerScanCache.clear();
+    smartLpScopeRevision++;
+    void notifySmartLpScopeChanged();
   }
 });
 syncOverlayRegistration();

@@ -1,7 +1,7 @@
 import { CHAINS, PUBLIC_RPC } from './lib/chains.js';
 import { GATING_ENABLED, TRIAL_LENGTH_DAYS, entitlement } from './lib/license.js';
 import { RPC_METHODS } from './lib/rpc.js';
-import { TELEMETRY_SETTING_KEY } from './lib/telemetry.js';
+import { TELEMETRY_SETTING_KEY, RETURN_COVERAGE_SETTING_KEY } from './lib/telemetry.js';
 
 const escape = (s) => String(s).replace(/[&<>"]/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -30,7 +30,7 @@ if (GATING_ENABLED) {
   licenseSection.hidden = true;
 }
 
-chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey', TELEMETRY_SETTING_KEY], (s) => {
+chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey', TELEMETRY_SETTING_KEY, RETURN_COVERAGE_SETTING_KEY], (s) => {
   const o = s.rpcOverrides || {};
   for (const k of keys) {
     // Only the user's saved override goes in the field. Never the live
@@ -40,6 +40,9 @@ chrome.storage.local.get(['rpcOverrides', 'etherscanKey', 'licenseKey', TELEMETR
   if (s.etherscanKey) document.getElementById('etherscanKey').value = s.etherscanKey;
   if (GATING_ENABLED && s.licenseKey) document.getElementById('licenseKey').value = s.licenseKey;
   document.getElementById('telemetryEnabled').checked = s[TELEMETRY_SETTING_KEY] !== false;
+  const coverage = document.getElementById('returnCoverageEnabled');
+  coverage.disabled = s[TELEMETRY_SETTING_KEY] === false;
+  coverage.checked = !coverage.disabled && s[RETURN_COVERAGE_SETTING_KEY] === true;
 });
 
 const showLicense = document.getElementById('showLicense');
@@ -57,8 +60,17 @@ if (showEtherscan) {
 }
 
 const telemetryBox = document.getElementById('telemetryEnabled');
+const coverageBox = document.getElementById('returnCoverageEnabled');
 telemetryBox.addEventListener('change', () => {
-  chrome.storage.local.set({ [TELEMETRY_SETTING_KEY]: telemetryBox.checked });
+  coverageBox.disabled = !telemetryBox.checked;
+  if (!telemetryBox.checked) coverageBox.checked = false;
+  chrome.storage.local.set({
+    [TELEMETRY_SETTING_KEY]: telemetryBox.checked,
+    [RETURN_COVERAGE_SETTING_KEY]: coverageBox.checked,
+  });
+});
+coverageBox.addEventListener('change', () => {
+  chrome.storage.local.set({ [RETURN_COVERAGE_SETTING_KEY]: telemetryBox.checked && coverageBox.checked });
 });
 
 document.getElementById('save').addEventListener('click', () => {
@@ -72,6 +84,7 @@ document.getElementById('save').addEventListener('click', () => {
     rpcOverrides,
     etherscanKey,
     [TELEMETRY_SETTING_KEY]: document.getElementById('telemetryEnabled').checked,
+    [RETURN_COVERAGE_SETTING_KEY]: telemetryBox.checked && coverageBox.checked,
   };
   // While gating is off, do not write licenseKey / licenseSeen — leftover
   // values from earlier testing stay in storage, ignored.
@@ -100,11 +113,15 @@ const OVERLAY_ORIGIN = 'https://app.uniswap.org/*';
 const PROJECTX_OVERLAY_ORIGIN = 'https://www.prjx.com/*';
 const DEXSCREENER_OVERLAY_ORIGIN = 'https://dexscreener.com/*';
 const UP33_OVERLAY_ORIGIN = 'https://up33.xyz/*';
+const SMART_LP_OVERLAY_ORIGINS = [
+  'https://stonkbrokers.io/*', 'https://www.stonkbrokers.io/*', 'https://www.stonkbrokers.cash/*',
+];
 const DEXSCREENER_CHART_CONSENT_KEY = 'dexscreenerChartConsentV1';
 const permBox = document.getElementById('overlayPerm');
 const projectxPermBox = document.getElementById('projectxOverlayPerm');
 const dexscreenerPermBox = document.getElementById('dexscreenerOverlayPerm');
 const up33PermBox = document.getElementById('up33OverlayPerm');
+const smartLpPermBox = document.getElementById('smartLpOverlayPerm');
 const dexscreenerChartConsentBox = document.getElementById('dexscreenerChartConsent');
 const report = document.getElementById('permReport');
 
@@ -131,6 +148,10 @@ async function paintPermissions() {
   projectxPermBox.checked = projectxGranted;
   dexscreenerPermBox.checked = dexscreenerGranted;
   up33PermBox.checked = up33Granted;
+  const smartLpGrants = await Promise.all(SMART_LP_OVERLAY_ORIGINS.map(
+    (origin) => chrome.permissions.contains({ origins: [origin] })));
+  smartLpPermBox.checked = smartLpGrants.every(Boolean);
+  smartLpPermBox.indeterminate = smartLpGrants.some(Boolean) && !smartLpPermBox.checked;
   dexscreenerChartConsentBox.checked = chartConsented;
 
   const pageRows = [];
@@ -163,6 +184,15 @@ async function paintPermissions() {
   const pageAccess = pageRows.length ? pageRows.join('')
     : `<li class="no"><b>No web page at all.</b> All overlays are off, so no
          content script is registered anywhere.</li>`;
+  const smartLpRows = SMART_LP_OVERLAY_ORIGINS.filter((_origin, index) => smartLpGrants[index])
+    .map((origin) => `<li class="yes"><b>${escape(origin.slice(0, -2))}/locker/smart-lp</b>:
+      can add a separate Smart LP panel on this route and its subpages. It uses the
+      active wallet selected in LPLens, not the site's connected wallet. Only the
+      route and modal visibility/boundaries are read; no row text, forms, wallet
+      provider, transaction controls or dialog contents. Minimized public-chain
+      display fields and a shortened wallet label enter the isolated script.
+      The rendered panel is visible to the site; the full wallet address, raw
+      receipts and credentials are not sent to the content script.</li>`).join('');
   const chartAccess = chartConsented
     ? `<li class="yes"><b>Separately approved.</b> While a matching overlay is open,
        a packaged short-lived MAIN-world function repeats so the range follows the chart.
@@ -181,7 +211,7 @@ async function paintPermissions() {
 
   report.innerHTML = `
     <h3>Web pages it can read or modify</h3>
-    <ul>${pageAccess}</ul>
+    <ul>${pageRows.length || !smartLpRows ? pageAccess : ''}${smartLpRows}</ul>
     <h3>Dexscreener chart alignment</h3>
     <ul>${chartAccess}</ul>
     <h3>Servers it can send requests to</h3>
@@ -251,6 +281,16 @@ up33PermBox.addEventListener('change', async () => {
     await removeOverlayPermission(UP33_OVERLAY_ORIGIN);
   }
   paintPermissions();
+});
+
+smartLpPermBox.addEventListener('change', async () => {
+  try {
+    if (smartLpPermBox.checked) {
+      await chrome.permissions.request({ origins: SMART_LP_OVERLAY_ORIGINS });
+    } else {
+      for (const origin of SMART_LP_OVERLAY_ORIGINS) await removeOverlayPermission(origin);
+    }
+  } finally { await paintPermissions(); }
 });
 
 dexscreenerChartConsentBox.addEventListener('change', async () => {

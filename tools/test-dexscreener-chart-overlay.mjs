@@ -230,7 +230,7 @@ assert.match(dataRefresh,
   /dexscreenerGeneration\+\+;[\s\S]*stopDexscreenerChartSession\(\);[\s\S]*lastKey = null;[\s\S]*void syncDexscreener\(\)/,
   'a timed data refresh must invalidate stale chart work before rescanning');
 assert.match(overlay,
-  /finally \{[\s\S]*scheduleDexscreenerDataRefresh\(\);[\s\S]*\}\n\}\n\nasync function syncList/,
+  /finally \{[\s\S]*scheduleDexscreenerDataRefresh\(\);[\s\S]*\}\n\}\n\n\/\/ BEGIN UNISWAP LIST ROW READ/,
   'every completed unchanged-route scan must schedule the next data refresh');
 assert.match(overlay,
   /function teardown\(\) \{[\s\S]*clearTimeout\(dexscreenerDataTimer\);[\s\S]*dexscreenerDataTimer = null/,

@@ -60,10 +60,10 @@ assert.doesNotMatch(popup, /chrome\.storage\.local\.clear\(/,
 // first request. This is the slow 120-NFT case: a wallet change must queue one
 // replacement request, discard the old response, and render only the new one.
 const projectxBlock = overlay.match(
-  /let projectxBusy = false;[\s\S]*?\n}\n\nasync function syncList\(\)/,
+  /let projectxBusy = false;[\s\S]*?(?=\nlet up33Busy = false;)/,
 );
 assert.ok(projectxBlock, 'could not isolate the ProjectX refresh controller');
-const controller = projectxBlock[0].replace(/\n\nasync function syncList\(\)$/, '');
+const controller = projectxBlock[0];
 const requests = [];
 const renders = [];
 const context = vm.createContext({

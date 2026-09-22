@@ -43,6 +43,13 @@
         <input type="checkbox" id="telemetryEnabled">
         <span class="switch" aria-hidden="true"></span>
       </label>
+      <label class="perm switch-row">
+        <span><b>Include LP-return coverage</b><small>Off by default. Share counts of available or missing LP returns and fixed missing-data reasons, including historical-price failures. No amounts or position identifiers. Requires scan sharing above.</small></span>
+        <input type="checkbox" id="returnCoverageEnabled">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+      <p class="section-copy">The separate LP-return coverage opt-in is off by default. It adds daily counts, not financial results. Counts describe returned positions per scan, not unique LPs, and a successful scan does not prove complete PnL. The service assigns only a broad traffic group from the validated access-key role: tester, internal (owner/reviewer), or unclassified. No individual key label or hash is stored with scan reports. Owner/reviewer checks are excluded from tester totals; older mixed reports remain separate. Turning scan sharing off also turns coverage sharing off. No past scans are backfilled.</p>
+      <p class="section-copy">Historical reference pricing sends your access key, random installation ID, and an Ethereum block number or public cash-flow timestamp to the authenticated <code>/price</code> route. It queries only the fixed Ethereum USDC/WETH reference pool. No wallet address or position ID is included; timestamps can still be correlated with public activity. The provider key stays server-side. Up to 300 successful historical reference-price proofs stay in <code>chrome.storage.local</code>; canonical block hashes are rechecked before reuse. Missing or partial results are not cached as prices, and today's prices never fill missing historical cash flows. The service does not store timestamps or price proofs.</p>
       <div class="privacy-grid">
         <span><b>Stored locally</b><small>Wallets and display preferences</small></span>
         <span><b>Sent only to</b><small>RPC, price &amp; history APIs</small></span>
@@ -71,6 +78,20 @@
         <input type="checkbox" id="up33OverlayPerm">
         <span class="switch" aria-hidden="true"></span>
       </label>
+      <label class="perm switch-row">
+        <span><b>Show the Smart LP overlay</b><small>On Stonkbrokers Smart LP pages (.io and www.stonkbrokers.cash)</small></span>
+        <input type="checkbox" id="smartLpOverlayPerm">
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+      <p class="section-copy">Smart LP access is optional and off at install. On <code>/locker/smart-lp</code>
+        and its subpages, LPLens adds a separate movable panel for the active wallet selected in LPLens.
+        It reads only the route and modal visibility/boundaries so the panel does not cover dialogs.
+        It does not read site row text, dialog contents, forms, transaction controls, connected-wallet
+        state or the wallet provider. The isolated script receives a shortened wallet label and
+        allowlisted public-chain display fields, not the full wallet address, raw receipts or credentials.
+        The rendered panel is visible to the site and its public vault details could be correlated to an owner.
+        Only panel position and collapsed state are saved locally. No page data is transmitted or added
+        to telemetry. Turning this off clears the open panel and unregisters future injection.</p>
       <label class="perm switch-row">
         <span><b>Show the Dexscreener overlay</b><small>On <code>dexscreener.com</code> pair pages</small></span>
         <input type="checkbox" id="dexscreenerOverlayPerm">

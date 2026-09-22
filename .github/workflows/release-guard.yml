@@ -28,7 +28,9 @@ jobs:
         run: |
           node tools/test-privacy-disclosure.mjs
           node tools/test-diagnostics-telemetry.mjs
+          node tools/test-scan-quality.mjs
           node tools/test-overlay-list.mjs
+          node tools/test-overlay-return-recovery.mjs
           node tools/test-overlay-panel-layout.mjs
           node tools/test-projectx-overlay.mjs
           node tools/test-active-projectx-wallet.mjs
@@ -56,6 +58,9 @@ jobs:
           node tools/test-position-lineage.mjs
           node tools/test-portfolio-presentation.mjs
           node tools/test-sidepanel.mjs
+          node tools/test-position-value.mjs
+          node tools/test-smart-lp.mjs
+          node tools/test-smart-lp-overlay.mjs
           node tools/test-blockscout-relay.mjs
           node tools/test-rpc-retry.mjs
           node tools/test-robinhood-rpc-batch.mjs
@@ -63,6 +68,8 @@ jobs:
           node tools/test-history-cache-v2.mjs
           node tools/test-histprice-archive.mjs
           node tools/test-histprice-blockscout.mjs
+          node tools/test-histprice-recovery.mjs
+          node tools/test-reference-price.mjs
           node tools/test-last-log-retry.mjs
           node tools/test-filtered-log-splitting.mjs
           node tools/test-v4-history.mjs
