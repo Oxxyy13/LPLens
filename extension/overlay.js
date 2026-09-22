@@ -674,6 +674,10 @@ let listBusy = false;     // a scan is in flight
 let listTimer = null;
 let gutterRows = [];
 let gutterRaf = false;
+let listRows = [];
+let listGeneration = 0;
+let listPaint = null;
+const LIST_RETRY_COOLDOWN_MS = 10_000;
 
 /** Created once per list visit; never torn down mid-session. */
 function listHost() {
@@ -692,12 +696,26 @@ function listHost() {
   const cards = document.createElement('div');
   cards.id = 'cards';
   shadow.appendChild(cards);
+  shadow.addEventListener('click', handleListRetry);
   host.__shadow = shadow;
   document.body.appendChild(host);   // the only observed mutation we make
   return host;
 }
 
+function handleListRetry(event) {
+  const button = event.target?.closest?.('button[data-list-retry]');
+  if (!button || event.isTrusted !== true) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const row = listRows.find((item) => item.retryId === button.dataset.listRetry);
+  if (row) void retryListRow(row, listGeneration);
+}
+
 function teardownList() {
+  listGeneration++;
+  for (const row of listRows) clearTimeout(row.retryTimer);
+  listRows = [];
+  listPaint = null;
   const host = document.getElementById(LIST_HOST_ID);
   if (host) host.remove();
   gutterRows = [];
@@ -888,13 +906,70 @@ const placeSoon = () => {
   requestAnimationFrame(placeGutterCards);
 };
 
+// BEGIN PURE LIST RETURN STATE
+function listReturnState(data) {
+  if (Number.isFinite(data?.usd?.pnl)) return null;
+  if (data?.error) return {
+    label: 'Read failed',
+    description: 'This position could not be read. Retry this position without rescanning your wallet.',
+    canRetry: true,
+  };
+  if (data?.history?.unavailable) return {
+    label: 'History missing',
+    description: 'Lifetime transaction history is unavailable. This is not a zero return.',
+    // This is a position-history read, separate from the USD pricing retry
+    // flag. Known unsupported custody/lifecycles do not gain a retry control.
+    canRetry: !data.vault && data.custody !== 'gauge'
+      && !/unsupported|not supported|not implemented/i.test(String(data.history.unavailable)),
+  };
+  const retryable = data?.usd?.returnRetryable;
+  const reasons = data?.usd?.returnUnavailableReasons;
+  if (Array.isArray(reasons) && reasons.includes('unsupported-pair')) return {
+    label: 'No USD route',
+    description: 'This pair does not have a supported historical USD pricing route. Current token prices cannot replace it.',
+    canRetry: false,
+  };
+  if (retryable === true) return {
+    label: 'Prices missing',
+    description: 'A historical USD price lookup failed. Retry to calculate LP return; current value and vs holding are separate.',
+    canRetry: true,
+  };
+  const reason = data?.usd?.returnUnavailable;
+  if (reason === 'gross additions unpriced' || reason === 'collected proceeds unpriced') return {
+    label: 'Prices missing',
+    description: 'USD prices at the time of a deposit or withdrawal are missing. This is not a zero return.',
+    canRetry: retryable !== false,
+  };
+  if (reason === 'gross additions are bounded' || reason === 'collected proceeds are bounded') return {
+    label: 'Basis inexact',
+    description: 'Historical cash flows cannot be priced exactly, so LP return is withheld.',
+    canRetry: false,
+  };
+  return {
+    label: 'USD unavailable',
+    description: 'There is not enough verified USD pricing to calculate LP return.',
+    canRetry: false,
+  };
+}
+// END PURE LIST RETURN STATE
+
+function listRetryControl(row, state) {
+  if (!row.allowRetry || row.gated || !state?.canRetry) return '';
+  const waiting = row.reading || Date.now() < (row.retryAfter || 0);
+  const label = row.reading ? 'Retrying this position' : waiting
+    ? 'Please wait briefly before retrying again' : 'Retry LP return for this position';
+  return `<button type="button" class="gc-retry" data-list-retry="${esc(row.retryId)}"
+    title="${esc(label)}" aria-label="${esc(label)}" ${waiting ? 'disabled' : ''}>${row.reading ? '…' : '↻'}</button>`;
+}
+
 function gutterCard(row, includeRange = true) {
   if (!row.data) {
     return `<div class="gc-pair">${esc(row.label || '')}</div><div class="gc-sub">reading…</div>`;
   }
   if (row.data.error) {
-    return `<div class="gc-pair">${esc(row.label || '')}</div>
-      <div class="gc-sub err">${esc(String(row.data.error)).slice(0, 42)}</div>`;
+    const state = listReturnState(row.data);
+    return `<div class="gc-heading"><div class="gc-pair">${esc(row.label || '')}</div>${listRetryControl(row, state)}</div>
+      <div class="gc-sub err">${row.gated ? 'Check access in Settings' : 'Read failed'}</div>`;
   }
 
   const d = row.data, h = d.history || {};
@@ -933,12 +1008,13 @@ function gutterCard(row, includeRange = true) {
   // page, and showing only vs-holding answered a different one — a position up
   // $15.94 displayed as -3.4% and read as a loss. vs-holding stays directly
   // underneath, because the two genuinely disagree in sign and both matter.
-  const hasTotal = u && u.pnl !== null && u.pnl !== undefined;
+  const hasTotal = Number.isFinite(u?.pnl);
   // The headline has one semantic contract: dollar LP return. A missing USD
   // leg must not replace it with the differently-scoped vs-holding percent;
   // that made two otherwise identical cards answer different questions in the
   // largest type. Keep vs holding below and show an honest dash here.
-  const headline = hasTotal ? cash(u.pnl) : '—';
+  const returnState = listReturnState(d);
+  const headline = hasTotal ? cash(u.pnl) : esc(returnState.label);
   const headTone = hasTotal ? tone(u.pnl) : '';
 
   const lines = [];
@@ -968,8 +1044,8 @@ function gutterCard(row, includeRange = true) {
   }
 
   const protocol = d.protocol && d.protocol !== 'Uniswap' ? d.protocol : null;
-  return `<div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${feeLabel}</span></div>
-    <div class="gc-main"><div class="gc-lbl">LP return</div><div class="gc-val ${headTone}">${headline}</div></div>
+  return `<div class="gc-heading"><div class="gc-pair"><span class="gc-dot ${dotClass}"></span>${esc(d.token0Meta.symbol)}/${esc(d.token1Meta.symbol)} <span class="gc-fee">${feeLabel}</span></div>${listRetryControl(row, returnState)}</div>
+    <div class="gc-main"${returnState ? ` title="${esc(returnState.description)}"` : ''}><div class="gc-lbl">LP return</div><div class="gc-val ${hasTotal ? headTone : 'gc-unavailable'}">${headline}</div></div>
     ${lines.length ? `<div class="gc-sub gc-metrics">${lines.join('<br>')}</div>` : ''}
     ${denseLines.length ? `<div class="gc-sub gc-dense-metrics">${denseLines.join(' · ')}</div>` : ''}
     ${bar}
@@ -1232,7 +1308,8 @@ function dexscreenerPortfolioCard(position, pair, wrappedNative, pairError, rang
   const tokenId = position && position.tokenId !== undefined ? String(position.tokenId) : '';
   return `<div class="portfolio-card"${rangeId ? ` data-dex-range-id="${esc(rangeId)}"` : ''}>
     ${gutterCard({ data: position }, false)}
-    ${tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
+    ${position?.vault ? `<div class="gc-sub">Smart LP · ${esc(position.vault.strategy)} · ${fmt(position.vault.sharePercent, 4)}% share</div>`
+      : tokenId ? `<div class="gc-sub">position #${esc(tokenId)}</div>` : ''}
     ${dexscreenerRangeRuler(position, pair, wrappedNative, pairError)}
     ${rangeId ? `<div class="dex-range-aligned">
       <span class="dex-range-aligned-copy">Range drawn on chart</span>
@@ -2445,6 +2522,56 @@ async function syncDexscreener() {
   }
 }
 
+// BEGIN UNISWAP LIST ROW READ
+function listRowCurrent(row, generation) {
+  return !torndown && generation === listGeneration && listRows.includes(row)
+    && LIST_ROUTE.test(location.pathname) && row.anchor?.isConnected
+    && row.anchor.getAttribute('href') === row.href;
+}
+
+async function readListRow(row, generation) {
+  if (row.reading || !listRowCurrent(row, generation)) return;
+  if (!contextAlive()) return shutdownOrphan('list');
+  row.reading = true;
+  listPaint?.();
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'LPLENS_POSITION', chain: row.chain, tokenId: row.tokenId,
+      version: row.version,
+    });
+    if (!listRowCurrent(row, generation)) return;
+    row.gated = !!(res?.gated && res.entitlement && !res.entitlement.allowed);
+    row.data = row.gated ? { error: 'LPLens access is required; check Options.' }
+      : res?.ok ? res.data : { error: 'Position read unavailable' };
+  } catch (err) {
+    if (isOrphanError(err)) return shutdownOrphan('list');
+    if (listRowCurrent(row, generation)) row.data = { error: 'Position read unavailable' };
+  } finally {
+    row.reading = false;
+    if (listRowCurrent(row, generation)) listPaint?.();
+  }
+}
+
+async function retryListRow(row, generation) {
+  if (!listRowCurrent(row, generation) || !row.chain || !row.allowRetry
+      || row.gated || row.reading || Date.now() < (row.retryAfter || 0)
+      || !listReturnState(row.data)?.canRetry) return;
+  row.retryAfter = Date.now() + LIST_RETRY_COOLDOWN_MS;
+  try {
+    await readListRow(row, generation);
+  } finally {
+    if (listRowCurrent(row, generation)) {
+      // Only repaint the control when its cooldown expires. No timed network
+      // retries: a failing public provider must not trigger a scan loop.
+      clearTimeout(row.retryTimer);
+      row.retryTimer = setTimeout(() => {
+        if (listRowCurrent(row, generation)) listPaint?.();
+      }, Math.max(0, row.retryAfter - Date.now()));
+    }
+  }
+}
+// END UNISWAP LIST ROW READ
+
 async function syncList() {
   if (torndown) return;
   if (listBusy) return;
@@ -2453,11 +2580,18 @@ async function syncList() {
 
   // Layout-independent by design — see LOOP SAFETY note 2.
   const key = anchors.map((a) => a.getAttribute('href')).join('|');
-  if (key === listScanned) return placeSoon();
+  if (key === listScanned) {
+    // React may replace a row without changing its semantic position link.
+    const byHref = new Map(anchors.map((anchor) => [anchor.getAttribute('href'), anchor]));
+    for (const row of listRows) row.anchor = byHref.get(row.href) || row.anchor;
+    return placeSoon();
+  }
 
   listBusy = true;
   try {
     listScanned = key;
+    const generation = ++listGeneration;
+    for (const row of listRows) clearTimeout(row.retryTimer);
     const shadow = listHost().__shadow;
     const cards = shadow.getElementById('cards');
     const panel = shadow.querySelector('.panel');
@@ -2474,12 +2608,15 @@ async function syncList() {
         version: m[1].toLowerCase(),
         chain,
         tokenId: m[3],
+        retryId: String(rows.length),
+        allowRetry: !!chain,
         // An unreadable row still gets a card saying why; a silently absent one
         // would read as "nothing to report" on a position we cannot see.
         data: chain ? null : { error: `chain ${m[2]} not supported` },
       });
     }
     if (!rows.length) return;
+    listRows = rows;
 
     const wide = gutterWidth() >= GUTTER_MIN;
     let paint;
@@ -2515,30 +2652,17 @@ async function syncList() {
       };
       paint();
     }
+    listPaint = paint;
 
     for (const row of rows) {
       if (!row.chain || row.data) continue;
-      if (!contextAlive()) return shutdownOrphan('list');
-      try {
-        const res = await chrome.runtime.sendMessage({
-          type: 'LPLENS_POSITION', chain: row.chain, tokenId: row.tokenId,
-          version: row.version,
-        });
-        if (res && res.gated && res.entitlement && !res.entitlement.allowed) {
-          row.data = { error: res.entitlement.reason || 'LPLens access is required; check Options.' };
-        } else {
-          row.data = res && res.ok ? res.data : { error: (res && res.error) || 'no response' };
-        }
-      } catch (err) {
-        if (isOrphanError(err)) return shutdownOrphan('list');
-        row.data = { error: err.message || String(err) };
-      }
+      await readListRow(row, generation);
       if (torndown) return;
-      if (listScanned !== key) return;   // rows changed while we were fetching
-      paint();
+      if (listGeneration !== generation) return;
     }
   } finally {
     listBusy = false;
+    if (!torndown && LIST_ROUTE.test(location.pathname)) scheduleList();
   }
 }
 

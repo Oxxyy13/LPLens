@@ -15,7 +15,7 @@ const UP33_ORIGIN = 'https://up33.xyz/*';
 const ADDRESS = '0x2222222222222222222222222222222222222222';
 const LIQUIDITY_URL = 'https://up33.xyz/liquidity';
 
-assert.equal(manifest.version, '0.34.0');
+assert.equal(manifest.version, '0.35.0');
 assert.ok(manifest.optional_host_permissions.includes(UP33_ORIGIN),
   'UP33 must remain optional site access');
 assert.ok(!(manifest.host_permissions || []).includes(UP33_ORIGIN),

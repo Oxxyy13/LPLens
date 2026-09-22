@@ -21,6 +21,7 @@ globalThis.chrome = {
 
 const index = await import(`../extension/lib/current-position-index.js?t=${Date.now()}`);
 const { v3Deployment } = await import('../extension/lib/chains.js');
+const { SMART_LP } = await import('../extension/lib/smart-lp.js');
 const OWNER = '0x' + '11'.repeat(20);
 const BASE_V3 = v3Deployment('base');
 const ROBINHOOD_V3 = v3Deployment('robinhood');
@@ -305,6 +306,7 @@ await index.writeFullDiscoveryScope({
   chainKey: 'robinhood',
   at: 650,
   discovery: {
+    smartLp: { complete: true, registry: SMART_LP.registry, addresses: [] },
     v3: {
       complete: true,
       records: [

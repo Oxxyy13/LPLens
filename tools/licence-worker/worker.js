@@ -5,12 +5,16 @@
  * POST /history { key, installationId, chainId, fields } -> provider logs
  * POST /blockscout remains a backwards-compatible alias for 0.27 clients.
  * POST /receipt { key, installationId, chainId, transactionHash } -> receipt
+ * POST /price { key, installationId, chainId: '1', block OR timestamp } -> proof
  * POST /telemetry { key, version, surface, outcome, buckets, errors } -> ok
  *
  * Keys are stored as SHA-256 hex hashes, never plaintext. Add or revoke a
  * tester by editing KEYS and redeploying. Unknown hashes and expired keys
  * both answer valid: false; only a known expired entry names the date.
  */
+
+import { priceQuery, resolveReferenceProof, priceFailureCode } from './reference-price.js';
+import { validateReturnCoverage } from '../../extension/lib/scan-quality.js';
 
 export const KEYS = {
   // '<sha256 hex>': { label: 'Dave', expires: '2026-09-02' },
@@ -125,8 +129,8 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>LPLens privacy policy</h1>
-<p class="meta">Effective 4 September 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
-<p>LPLens is a read-only Chrome extension that inspects concentrated-liquidity positions from Uniswap, ProjectX and UP33 for an Ethereum-style address you paste. It never connects a wallet, never asks for a signature, and never sees a private key.</p>
+<p class="meta">Effective 22 September 2026. Contact: <a href="mailto:oxxyy13@gmail.com">oxxyy13@gmail.com</a>.</p>
+<p>LPLens is a read-only Chrome extension that inspects concentrated-liquidity positions and supported Smart LP vault shares for an Ethereum-style address you paste. It never connects a wallet, never asks for a signature, and never sees a private key.</p>
 <p>This policy uses the Chrome Web Store data-category names so the store listing and this page say the same things.</p>
 
 <h2>Data categories we handle</h2>
@@ -169,18 +173,27 @@ const PRIVACY_HTML = `<!DOCTYPE html>
 <p>This site provides the access check, authenticated history and Robinhood v4 receipt relays, and optional anonymous scan counters. It receives the access key and random installation identifier when access is checked. For history requests it also receives a chain id, an allowlisted Uniswap or ProjectX position-manager or PoolManager contract and event-log filters. A v3-family filter identifies a public position NFT; a v4 ownership filter can contain the public address being inspected; and a v4 history filter identifies a public pool and PositionManager. After the public RPC and public Blockscout v2 receipt sources are unavailable, a Robinhood receipt request contains the access key, random installation identifier, chain id 4663, and public transaction hash. The Worker asks Blockscout Pro for the exact successful receipt, strictly requires the expected v4 PoolManager <code>ModifyLiquidity</code> event attributed to the configured PositionManager, and does not store the transaction hash or receipt body. The Worker forwards allowlisted history filters to Blockscout Pro or Etherscan V2 but does not store wallet addresses, token ids, contract filters, response bodies or IP addresses. A telemetry request includes the access key only for validation; it does not include the random installation identifier, and the stored aggregate scan rows contain neither the access-code hash nor an installation hash.</p>
 <p>We retain hashed installation records and per-licence daily request totals to operate the beta, diagnose sharing and protect the shared API allowance. Separately, when enabled, we retain anonymous daily scan outcomes and allowlisted error-category totals to improve reliability. These are operational and product-quality counters, not advertising analytics. Cloudflare, which hosts the Worker, processes the HTTPS requests.</p>
 
+<h2>Optional LP-return coverage</h2>
+
+<p>The separate LP-return coverage opt-in is off by default, including existing installs. If both scan sharing and this opt-in are on, a completed popup or side-panel scan also sends counts of available or missing LP returns, fixed missing-data reasons, and allowlisted historical-price failure categories. No amounts or position identifiers are sent. These are observations of returned positions, including locally hidden positions, not unique LPs or proof of PnL accuracy. Positions not returned by discovery cannot be measured; scans above 1,000 positions omit coverage. Turning scan sharing off also clears the coverage opt-in; no past scans are backfilled. The service assigns a broad traffic group from the validated access-key role: tester, internal (owner/reviewer), or unclassified. New daily aggregate rows contain no individual key label, key hash, installation hash or per-event timestamp. Owner/reviewer checks are excluded from tester totals; legacy mixed reports are not relabelled. The coverage preference stays in local Chrome storage. Anonymous reporting is optional and best-effort, not a complete activity record.</p>
+<p>Historical reference pricing: the authenticated <code>/price</code> route receives the access key, random installation identifier, chain id 1, and either an Ethereum block number or a public cash-flow timestamp. This request contains no wallet address, position ID, caller-selected pool, custom endpoint, or provider key. A timestamp can still be correlated with public chain activity; it is not anonymous. The Worker queries only the fixed Ethereum USDC/WETH reference pool and the block headers needed to verify its price and time alignment, using the encrypted Blockscout Pro credential. Each upstream request counts against the existing daily relay allowance. The Worker does not store timestamps, price proofs, query parameters or provider response bodies. Provider errors are reduced to generic failure messages.</p>
 <h2>What stays on your machine</h2>
+<p>The extension may store up to 300 successful historical reference-price proofs in <code>chrome.storage.local</code>, containing public reference-pool, block, timestamp, block-hash and Swap-event facts. Only proofs at least one hour old are persisted. Before reuse it rechecks the canonical Ethereum block hashes through the configured Ethereum RPC; a failed check is a cache miss. Age is not a consensus-finality claim. These proofs contain no access key or installation ID, are not sent in telemetry, and never substitute current prices for missing historical cash flows. Missing, malformed or partial results are not cached as prices.</p>
 <p><code>chrome.storage.local</code> may hold: saved addresses and labels, the separately selected active overlay wallet address, selected portfolio chains and refresh scope, locally hidden-position choices, custom RPC URLs, an optional Etherscan key, the access key, the random installation identifier and last validation result, overlay placement and collapse preferences, the versioned Dexscreener chart-alignment consent, the anonymous-scan setting, a sanitized most-recent diagnostic summary, a cache of immutable position event history, a local current-position ID index, an exact v4 ownership block checkpoint, bounded per-position refresh comparison samples, receipt-proven v3 replacement links, and the most recent rendered portfolio view used by the browser side panel. Refresh samples contain public position identity, observation time, range state, position value, LP return, vs-holding result, cumulative token fees, marks and cash-flow counters. Replacement links contain public wallet, chain, manager, pool, position, transaction, block-hash, log-index and event-amount proof facts. They are rechecked against the receipt and canonical block before display. The refresh samples and replacement links are not sent in telemetry or used to fill missing current data. The position index and ownership checkpoint contain only public wallet, chain, protocol deployment, manager, position ID, direct or gauge custody, custodian contract, ownership, and block-checkpoint data. They are verified against live chain state before use and are never accounting or price input. The diagnostic summary contains no wallet address, token name, pool id, position id, key or raw error text, and it leaves the browser only if you explicitly copy and share it. Local data does not sync through LPLens servers. Completed portfolio views are not sent to or stored by LPLens. Clearing extension data, or uninstalling LPLens, removes the local data from the computer.</p>
 
 <h2>What we do not do</h2>
 <ul>
-  <li>No advertising analytics, tracking pixels, browser fingerprinting, crash reporters, or ad networks. Operational data is limited to hashed browser installations, per-licence relay-request totals, and optional anonymous aggregate scan outcomes and error categories.</li>
+  <li>No advertising analytics, tracking pixels, browser fingerprinting, crash reporters, or ad networks. Operational data is limited to hashed browser installations, per-licence relay-request totals, optional anonymous aggregate scan outcomes and error categories, and separately opted-in LP-return coverage counters. New scan aggregates include only the broad traffic group described above, not an individual key label.</li>
   <li>No sale of data. No server-side user account. No mailing list built from extension use.</li>
   <li>No wallet connection: the extension never calls <code>eth_requestAccounts</code>, <code>eth_sendTransaction</code>, or <code>personal_sign</code>. Persistent optional content scripts cannot reach <code>window.ethereum</code>. The separately approved, short-lived MAIN-world chart function technically runs where page objects are visible, but its implementation does not read or call a wallet provider.</li>
 </ul>
 
 <h2>Optional on-page overlays</h2>
 <p>Access to <code>app.uniswap.org</code>, <code>www.prjx.com</code>, <code>up33.xyz</code> and <code>dexscreener.com</code> is separately optional and off at install. Before Chrome asks for a permission, Settings explains the access described above. Granting Uniswap access lets LPLens show its panel on Uniswap position pages; granting ProjectX access lets it show an active-wallet panel only on the ProjectX portfolio; granting UP33 access lets it show that active wallet's concentrated positions only on the UP33 liquidity route. On the exact liquidity list, LPLens reads only each concentrated-position row's public <code>data-flow="cl-&lt;NFT ID&gt;"</code> attribute, matching visible <code>#ID</code>, and row geometry to align local PnL cards. A user-initiated activation of a validated row keeps that public NFT ID and click state in memory for up to five seconds while LPLens associates a newly opened Manage drawer with the matching already-scanned position. Once matched, the selected public NFT ID remains in memory only until drawer close, route or active-wallet change, or permission revocation. Neither state is persisted, transmitted, or included in telemetry. The drawer contributes only its visible boundary; dialog contents are not read. Expanded values use an explicit allowlist of public on-chain display fields. Page-derived IDs are matched only against the active-wallet scan. It does not read connected-wallet state, balances, forms, transaction controls, signing prompts, the wallet provider, or other UP33 page content. Granting Dexscreener access lets it show matching positions for that same active wallet on pair pages. UP33 v2 LP and liquidity-locker positions are not read. Dexscreener chart alignment has its own consent control and remains off when <code>dexscreenerChartConsentV1</code> is missing or is not strictly <code>true</code>. Enabling site access alone leaves LPLens on its exact on-chain ruler. Turning chart alignment off stops the repeated measurement, removes the chart graphic, and restores that ruler. Revoking a site permission tells any open LPLens overlay on that site to shut down and unregisters future injection. The service worker also re-checks UP33 and Dexscreener permission before returning position data and re-checks Dexscreener chart consent before measuring geometry, so an already-open stale script fails closed.</p>
+
+<h2>Optional Smart LP overlay in version 0.35</h2>
+<p>Smart LP site access is optional and off at install. The three exact hosts are <code>stonkbrokers.io</code>, <code>www.stonkbrokers.io</code> and <code>www.stonkbrokers.cash</code>, restricted to <code>/locker/smart-lp</code> and its subpages. Enabling this control grants those hosts together. The isolated script reads only the route and modal visibility/boundaries to avoid covering dialogs. These reads fall under Web history and Website content above. It does not read site row text, dialog contents, forms, transaction controls, connected-wallet state or the wallet provider, and never runs in MAIN world.</p>
+<p>The panel uses the active wallet explicitly selected in LPLens. Supported vault shares, idle assets, active ranges, fees, event history and estimated exit value are read from public chain data through the extension, using the existing read-only providers described above. The script receives only a shortened wallet label and allowlisted public-chain display fields, not the full wallet address, raw receipts, endpoints, credentials or provider errors. The rendered panel is visible to the site and its public vault details could be correlated to an owner. Only panel position and collapsed state are saved locally. No page data is transmitted or included in telemetry. Turning this off clears the open panel and unregisters future injection. The service worker rechecks exact origin, route, top frame, permission and active-wallet context before returning data. LPLens never deposits, withdraws or changes the vault strategy.</p>
 
 <h2>Limited Use</h2>
 <p>Data listed above is used only to provide LPLens’s single purpose: showing concentrated-liquidity positions and available performance or reward context for an address you choose, placing that context on optional protocol and Dexscreener pages, offering an explicit outbound position link, controlling beta access, protecting the shared history allowance, and improving scan reliability through the optional anonymous counters described above. It is not used or transferred for advertising, credit, or unrelated profiling. Transfers to RPC providers, DexScreener, Etherscan, Blockscout, and this Worker happen only as needed for that purpose, or as required by law. Revert receives the public network and NFT ID only when the user follows the external link, under Revert Finance's own policies.</p>
@@ -477,6 +490,33 @@ async function relayRequest(payload, env) {
   }
 }
 
+/** A fixed Ethereum reference price, never an arbitrary pool or RPC proxy. */
+async function priceRequest(payload, env) {
+  const query = priceQuery(payload);
+  if (!query) return json({ error: 'Invalid reference-price request.' }, 400);
+  const key = payload.key.trim(), installationId = payload.installationId.trim();
+  if (!key || !INSTALLATION_ID.test(installationId)) return json({ error: 'Access not granted.' }, 401);
+  let auth;
+  try { auth = await authorise(key, installationId, env); }
+  catch { return json({ error: 'Access verification is temporarily unavailable.' }, 503); }
+  if (!auth.valid) return json({ error: auth.reason || GENERIC }, 403);
+  if (!env?.BLOCKSCOUT_PRO_API_KEY) return json({ error: 'Reference pricing is not configured.' }, 503);
+  try {
+    const proof = await resolveReferenceProof(query, {
+      secret: env.BLOCKSCOUT_PRO_API_KEY,
+      beforeFetch: async () => {
+        const quota = await takeRelayQuota(env, auth.keyHash, auth.entry);
+        if (!quota.allowed) { const error = new Error('quota'); error.quota = true; throw error; }
+      },
+    });
+    return proof ? json({ proof }) : json({ error: 'Reference price is unavailable.' }, 404);
+  } catch (error) {
+    return error?.quota
+      ? json({ error: 'This access key reached its daily history allowance.' }, 429)
+      : json({ error: 'Reference pricing is temporarily unavailable.', code: priceFailureCode(error) }, 502);
+  }
+}
+
 /** Validate the only transaction-receipt request this relay is allowed to make. */
 export function receiptQuery(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -587,6 +627,7 @@ export function telemetryEvent(payload) {
   }
   const allowedTop = new Set([
     'key', 'version', 'surface', 'outcome', 'positionBucket', 'durationBucket', 'errors',
+    'lpReturns',
   ]);
   if (Object.keys(payload).some((name) => !allowedTop.has(name))) {
     throw new Error('unsupported telemetry field');
@@ -628,7 +669,21 @@ export function telemetryEvent(payload) {
     const [chain, code] = key.split(':');
     return { chain, code, count };
   });
-  return { version, surface, outcome, positionBucket, durationBucket, errors };
+  const event = { version, surface, outcome, positionBucket, durationBucket, errors };
+  if (Object.hasOwn(payload, 'lpReturns')) {
+    event.lpReturns = validateReturnCoverage(payload.lpReturns);
+    const n = Object.values(event.lpReturns.counts).reduce((a, b) => a + b, 0);
+    const bucket = n === 0 ? '0' : n === 1 ? '1' : n <= 5 ? '2-5' : n <= 20 ? '6-20' : '21+';
+    if (bucket !== positionBucket) throw new Error('LP-return count does not match scan');
+  }
+  return event;
+}
+
+/** Only a broad role, never the key, label or installation, enters aggregates. */
+export function telemetryCohort(entry) {
+  if (['owner-primary', 'cws-reviewer'].includes(entry?.label)) return 'internal';
+  if (/^beta-[0-9]{3}$/.test(entry?.label || '')) return 'tester';
+  return 'unclassified';
 }
 
 async function telemetryRequest(payload, env) {
@@ -647,30 +702,41 @@ async function telemetryRequest(payload, env) {
 
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
-  const at = iso(now);
+  const cohort = telemetryCohort(auth.entry);
   try {
-    await env.DB.prepare(`
-      INSERT INTO scan_outcomes_daily
-        (day, extension_version, surface, outcome, position_bucket, duration_bucket, scans, last_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
-      ON CONFLICT (day, extension_version, surface, outcome, position_bucket, duration_bucket)
-      DO UPDATE SET scans = scans + 1, last_at = excluded.last_at
-    `).bind(
-      day, event.version, event.surface, event.outcome,
-      event.positionBucket, event.durationBucket, at,
-    ).run();
+    // New tables deliberately leave the legacy mixed-traffic history untouched.
+    // Day-level aggregates have no event timestamp or individual identity.
+    const statements = [env.DB.prepare(`
+      INSERT INTO scan_outcomes_v2_daily
+        (day, extension_version, surface, cohort, outcome, position_bucket, duration_bucket, coverage_reported, scans)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+      ON CONFLICT (day, extension_version, surface, cohort, outcome, position_bucket, duration_bucket, coverage_reported)
+      DO UPDATE SET scans = scans + 1
+    `).bind(day, event.version, event.surface, cohort, event.outcome,
+      event.positionBucket, event.durationBucket, event.lpReturns ? 1 : 0)];
     for (const error of event.errors) {
-      await env.DB.prepare(`
-        INSERT INTO scan_errors_daily
-          (day, extension_version, surface, chain_key, error_code, occurrences, last_at)
+      statements.push(env.DB.prepare(`
+        INSERT INTO scan_errors_v2_daily
+          (day, extension_version, surface, cohort, chain_key, error_code, occurrences)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ON CONFLICT (day, extension_version, surface, chain_key, error_code)
-        DO UPDATE SET occurrences = occurrences + excluded.occurrences,
-                      last_at = excluded.last_at
-      `).bind(
-        day, event.version, event.surface, error.chain, error.code, error.count, at,
-      ).run();
+        ON CONFLICT (day, extension_version, surface, cohort, chain_key, error_code)
+        DO UPDATE SET occurrences = occurrences + excluded.occurrences
+      `).bind(day, event.version, event.surface, cohort, error.chain, error.code, error.count));
     }
+    for (const [metric, counters] of event.lpReturns
+      ? [['availability', event.lpReturns.counts], ['price_cause', event.lpReturns.priceCauses]] : []) {
+      for (const [code, count] of Object.entries(counters)) {
+        statements.push(env.DB.prepare(`
+          INSERT INTO lp_return_coverage_daily
+            (day, extension_version, surface, cohort, metric, code, positions)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+          ON CONFLICT (day, extension_version, surface, cohort, metric, code)
+          DO UPDATE SET positions = positions + excluded.positions
+        `).bind(day, event.version, event.surface, cohort, metric, code, count));
+      }
+    }
+    // One atomic event: a failed write must not leave a misleading denominator.
+    await env.DB.batch(statements);
   } catch {
     return json({ error: 'Telemetry database is temporarily unavailable.' }, 503);
   }
@@ -693,7 +759,7 @@ export default {
     try { payload = await readPayload(request); }
     catch {
       return path === '/blockscout' || path === '/history'
-        || path === '/receipt' || path === '/telemetry'
+        || path === '/receipt' || path === '/telemetry' || path === '/price'
         ? json({ error: 'Invalid request.' }, 400)
         : json({ valid: false, expires: null, reason: GENERIC }, 400);
     }
@@ -701,6 +767,7 @@ export default {
     if (path === '/') return validateRequest(payload, env);
     if (path === '/blockscout' || path === '/history') return relayRequest(payload, env);
     if (path === '/receipt') return receiptRequest(payload, env);
+    if (path === '/price') return priceRequest(payload, env);
     if (path === '/telemetry') return telemetryRequest(payload, env);
     return json({ error: 'Not found.' }, 404);
   },

@@ -19,6 +19,24 @@ distribution points.
 
 ## Wallet boundary
 
+Historical reference pricing uses the authenticated `/price` route. It accepts
+only chain id 1 and one explicit Ethereum block number or public cash-flow
+timestamp, plus the existing access key and random installation ID. It never
+accepts an arbitrary pool, URL, topic, method, wallet address or position ID.
+The server fixes the Ethereum USDC/WETH reference pool and provider endpoints,
+charges every upstream request against the existing daily allowance, and bounds
+queries, response sizes and elapsed time. It returns only a validated reference
+proof or a generic error. The provider key stays server-side; timestamps and
+price proofs are not stored by the Worker. Timestamps can be correlated with
+public activity and are not claimed to be anonymous.
+
+Up to 300 successful historical reference-price proofs stay in
+`chrome.storage.local`. Canonical block hashes are rechecked before reuse;
+proofs less than an hour old, failures and partial results are not persisted.
+These are provider-backed chain facts, not cryptographic receipt inclusion
+proofs. They contain no access code or installation identifier and are not sent
+in telemetry. No current-price substitute can unlock historical LP return.
+
 The extension has no wallet-provider or signing integration. It does not call
 `eth_requestAccounts`, `eth_sendTransaction`, `personal_sign`, or
 `window.ethereum`. Every JSON-RPC request passes through the frozen
@@ -36,6 +54,25 @@ keys. Dexscreener chart alignment has a separate, versioned consent control and
 uses the narrow, explicitly disclosed MAIN-world measurement described below.
 
 ## Permissions and data flow
+
+Version 0.35 adds an optional Smart LP panel on `stonkbrokers.io`,
+`www.stonkbrokers.io` and `www.stonkbrokers.cash`, restricted to
+`/locker/smart-lp` and its subpages. These hosts are not granted at install.
+The panel runs in an isolated world, never MAIN world. It reads only the
+route and modal visibility/boundaries, not row text, dialog contents, forms,
+transaction controls, connected-wallet state or the wallet provider. The
+worker checks exact origin, route, top frame and permission before chain work
+and before returning data, then rechecks the active LPLens wallet/settings.
+Only simultaneous work is coalesced; completed custody proofs are not reused.
+
+The content script receives a shortened wallet label and allowlisted public
+vault display fields. It does not receive the full wallet address, raw receipts,
+provider errors, endpoints or credentials. The rendered panel is visible to
+the site and its public vault details could be correlated to an owner. Only
+panel position and collapsed state are stored locally; page data is not
+transmitted or included in telemetry. Revocation clears the current panel,
+removes listeners and unregisters future injection. See README for the current
+Chrome Store publication status; these permissions describe the 0.35 package.
 
 The complete permission list is in `extension/manifest.json`. LPLens requests
 `storage`, `scripting`, and `sidePanel`, plus named hosts used for public-chain
@@ -141,10 +178,23 @@ data.
 
 When enabled in Settings, anonymous scan telemetry is limited to extension
 version, popup or side-panel surface, coarse outcome/count/duration buckets,
-and allowlisted per-chain error categories. Those aggregate database rows have
+and allowlisted per-chain error categories, with the additional opt-in below. Those aggregate database rows have
 no access-code hash, installation hash, wallet, token, pool, position, custom
 endpoint, provider key, or raw error. The local Copy diagnostics report follows
 the same exclusion boundary and leaves the browser only by explicit user action.
+
+The separate LP-return coverage opt-in is off by default and is cleared when
+scan sharing is turned off. It sends only available/missing position counts,
+fixed missing-data reasons and allowlisted historical-price failure categories,
+never amounts or position identifiers. No past scans are backfilled. Coverage
+is measured per returned position per completed scan, not unique LPs or verified
+PnL accuracy; absent opt-in reports are not zero-missing reports. The service
+assigns a broad traffic group from the validated access-key role: tester,
+internal (owner/reviewer), or unclassified. No individual key label or hash is
+stored in the new daily aggregates, and no per-event timestamp is retained.
+Legacy mixed reports are untouched. Client-supplied traffic groups are rejected,
+counts/categories are strictly bounded and allowlisted, and each event's
+outcome, error and coverage writes commit together or roll back together.
 
 ## Reproduce the Store package
 
@@ -153,10 +203,10 @@ digest. There is no bundler or minifier: the packaged extension tree must be
 byte-identical to `extension/`.
 
 ```bash
-git checkout v0.33.0
+git checkout v0.34.0
 node tools/check-repo-secrets.mjs
 node tools/package.mjs
-diff -r extension build/lplens-0.33.0
+diff -r extension build/lplens-0.34.0
 ```
 
 The final `diff` must print nothing on a release commit. `tools/package.mjs`

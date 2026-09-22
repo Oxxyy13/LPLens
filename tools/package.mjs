@@ -290,11 +290,13 @@ async function main() {
 
   const mf = JSON.parse(readFileSync(join(EXT, 'manifest.json'), 'utf8'));
   const version = mf.version;
-  if (!version) abort('manifest.json has no version');
+  if (!/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(version || '')) abort('manifest.json has no safe numeric version');
   const dest = join(BUILD, 'lplens-' + version);
   const zipPath = join(BUILD, 'lplens-' + version + '.zip');
 
-  if (existsSync(BUILD)) rmSync(BUILD, { recursive: true, force: true });
+  // Rebuilding dev must not erase previously shipped packages in build/.
+  // The numeric version above confines this target to one build subdirectory.
+  if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
   cpSync(EXT, dest, { recursive: true });
   console.log('package: copied extension/ -> ' + relative(ROOT, dest));

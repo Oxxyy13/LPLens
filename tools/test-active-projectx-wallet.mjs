@@ -9,7 +9,7 @@ const css = readFileSync(new URL('../extension/popup.css', import.meta.url), 'ut
 const overlay = readFileSync(new URL('../extension/overlay.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
 
-assert.equal(manifest.version, '0.34.0');
+assert.equal(manifest.version, '0.35.0');
 assert.match(html, /id="activeWallet"[^>]*role="status"[^>]*>Overlay wallet: none selected</);
 assert.match(css, /\.active-wallet\.pending/);
 assert.match(css, /\.active-wallet\.empty/);
@@ -60,10 +60,10 @@ assert.doesNotMatch(popup, /chrome\.storage\.local\.clear\(/,
 // first request. This is the slow 120-NFT case: a wallet change must queue one
 // replacement request, discard the old response, and render only the new one.
 const projectxBlock = overlay.match(
-  /let projectxBusy = false;[\s\S]*?\n}\n\nasync function syncList\(\)/,
+  /let projectxBusy = false;[\s\S]*?(?=\nlet up33Busy = false;)/,
 );
 assert.ok(projectxBlock, 'could not isolate the ProjectX refresh controller');
-const controller = projectxBlock[0].replace(/\n\nasync function syncList\(\)$/, '');
+const controller = projectxBlock[0];
 const requests = [];
 const renders = [];
 const context = vm.createContext({

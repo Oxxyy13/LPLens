@@ -26,6 +26,64 @@ See [SECURITY.md](SECURITY.md) for the official extension identity, data-flow
 boundary, reproducible-build steps, and private vulnerability-reporting route.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for public bug reports and changes.
 
+## Release candidate: 0.35.0 (not yet published in Chrome)
+
+Version 0.35 adds read-only Stonkbrokers Smart LP shares to the
+portfolio and Dexscreener. An optional, movable on-site panel is available on
+`stonkbrokers.io`, `www.stonkbrokers.io` and `www.stonkbrokers.cash`, restricted
+to `/locker/smart-lp` and its subpages. Enable **Show the Smart LP overlay** in
+Settings, then refresh the site. It uses the active wallet selected in LPLens,
+not the site's connected wallet. It does not attach to guessed site rows.
+
+The new optional hosts are off at install. The isolated content script reads
+only the route and modal visibility/boundaries to avoid covering dialogs. It
+does not read row text, dialog contents, forms, transaction controls, connected
+wallet state or the wallet provider. Only a shortened wallet label and
+allowlisted public-chain display fields enter the script. Raw receipts, the
+full wallet address, endpoints and credentials stay in the extension context.
+The rendered panel is visible to the site and public vault details could be
+correlated to an owner. Panel position and collapsed state stay locally in
+Chrome storage; page data is not transmitted or included in telemetry.
+
+Each portfolio card now shows its **position value**, including uncollected
+fees, without opening details. Smart LP uses **estimated exit value** after
+vault fees and before gas. Current value can be available while historical
+deposit prices are missing; that does not make lifetime LP return available.
+Staked positions label active liquidity separately from pending rewards.
+Missing current assets or prices are not displayed as zero.
+
+Uniswap list cards distinguish missing historical prices from missing position
+history. A small retry control re-reads just that position, with a cooldown to
+avoid request bursts. It does not rescan the wallet or start automatic retries.
+Verified returns still require complete, exact deposit and withdrawal prices;
+retrying never substitutes current prices for missing historical cash flows.
+
+Version 0.35 adds authenticated historical reference pricing through
+`/price`. It reads only the fixed Ethereum USDC/WETH reference pool for a
+specific Ethereum block or public cash-flow timestamp, including Robinhood's
+bridged-WETH dollar route. The provider key stays server-side. The request
+includes the access key and random installation ID, but no wallet address,
+position ID, caller-selected pool or custom endpoint. Timestamps can still be
+correlated with public chain activity; they are not anonymous.
+
+Up to 300 successful historical reference-price proofs stay in
+`chrome.storage.local`. Only proofs at least one hour old are persisted, and
+canonical block hashes are rechecked before reuse. An unavailable or changed
+anchor is a cache miss, never permission to use an old price. The Worker does
+not store timestamps or price proofs. Every upstream pricing call counts
+against the existing daily relay allowance. Invalid or truncated logs fail
+closed, and existing public/custom sources remain fallbacks. Current marks and
+unsupported reference markets keep their existing paths. This does not make
+missing position history, unsupported cash flows or arbitrary tokens priceable.
+
+The on-site panel supports range orientation, details, manual refresh, dragging,
+keyboard movement and minimizing. It clears stale wallet data during wallet
+switches, navigation and permission revocation. Out-of-range vaults remain
+visible; idle assets have no active range. Unsupported cash flows or incomplete
+receipts withhold lifetime returns. This does not change a vault strategy,
+deposit, withdraw, rebalance or connect a wallet. Chrome production remains
+0.34.0 until Google approves and publishes this update.
+
 ## Status: 0.34.0 live
 
 The public Chrome Web Store listing was verified at version 0.34.0 on
@@ -568,6 +626,24 @@ enabled in Settings, the extension sends the same coarse version/surface,
 outcome, count bucket, duration bucket, and per-chain error categories. Worker
 storage has no access-code hash or installation hash on those aggregate rows.
 
+The separate **LP-return coverage** opt-in is off by default, including existing
+installs. It adds only counts of available/missing LP returns and fixed
+missing-data reasons (history, unpriced deposits/proceeds, bounded cash flows,
+incomplete current value, unreadable positions, unknown), plus allowlisted
+historical-price failure categories. No amounts or position identifiers are
+sent. Turning scan sharing off also clears this opt-in; no past scans are
+backfilled. Counts are position observations per completed scan, not unique
+LPs, and a successful scan does not guarantee complete PnL. Hidden returned
+positions are included; positions a failed discovery never returns cannot be
+measured. Scans above 1,000 positions omit coverage instead of sampling it.
+
+The service assigns a broad traffic group from the validated access-key role:
+tester, internal (owner/reviewer), or unclassified. No individual key label or
+hash is retained in these reports. New daily tables separate internal checks
+from tester totals; older mixed reports remain separate and are not relabelled.
+No per-event timestamp is stored in the new tables. Reporting is optional and
+best-effort; these counters are not a measure of unique users or PnL accuracy.
+
 Supported standard Uniswap cards may contain a Revert link constructed locally
 from the public network and NFT ID. No request goes to Revert unless the user
 clicks that link, and the extension requests no Revert site permission. Revert
@@ -678,10 +754,10 @@ applies to any unpacked extension, not just this one.
     against Etherscan on the same positions: Ethereum 961877 returns the
     identical 4 events from both. The Etherscan key is **optional everywhere**
     — it is tried first when configured, then the Pro relay, public Blockscout,
-    and finally the RPC. The same public index supplies timestamp-to-block
-    mapping and historical reference-pool `Swap` events for keyless Robinhood
-    dollar returns. This avoids the burst of Ethereum block-header requests
-    that previously exhausted an anonymous RPC window on a multi-card overlay.
+    and finally the RPC. Public timestamp and reference-pool lookups remain
+    fallbacks; development 0.35 uses the authenticated `/price` route first
+    for Ethereum historical reference prices and bridged Robinhood WETH.
+    The canonical local proof cache avoids repeating successful Pro reads.
   - **But an empty Blockscout answer cannot be trusted, and LPLens encodes
     that.** `polygon.blockscout.com` silently misses positions below roughly
     tokenId 1.2M — measured, Etherscan returns 3 events for tokenIds 100000 /

@@ -15,8 +15,9 @@
  * form had to go. Historical `eth_call` is no longer used for pricing on any
  * chain, and an archive RPC is no longer required for any of this.
  *
- * No CoinGecko, no additional DexScreener call, no new key. The reference pool
- * itself is derived from the v3 factory rather than hardcoded, and all four
+ * No CoinGecko, no additional DexScreener call, no new user-supplied key. The
+ * authenticated Ethereum route pins the factory-verified USDC/WETH 0.05% pool;
+ * other reference pools are derived from the v3 factory. Historically, all four
  * chains independently produce the same WETH price to within 0.4 basis points —
  * which is the cross-check that the derivation is right.
  *
@@ -45,12 +46,154 @@ import {
 import { CHAINS } from './chains.js';
 import { fetchLastLogBefore } from './logs.js';
 import { humanPrice } from './v3.js';
+import { protectedReferencePrice } from './reference-price.js';
 
 const SEL_TOKEN0 = '0x0dfe1681';   // token0(), derived with keccak256
 
 // Swap(address,address,int256,int256,uint160,uint128,int24), derived with
 // keccak256 via lib/keccak.js on 2026-08-23 — never recalled.
 const SWAP_TOPIC = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67';
+
+/**
+ * Why a historical dollar lookup produced nothing.
+ *
+ * Every path in this module fails closed to `null`, which is right for the
+ * arithmetic and useless for the reader: "gross additions unpriced" reads the
+ * same whether the pair simply has no dollar route or a public index refused
+ * one request out of forty. The UI cannot offer a retry it cannot justify, so
+ * a position that lost a single reference lookup stayed blank for the life of
+ * the rendered list.
+ *
+ * This is a CLOSED vocabulary of slugs, deliberately. Text carrying an
+ * endpoint, an API key, a pool address or a wallet identifier must never reach
+ * a surface that renders, logs or exports it, and this repository is public.
+ * `notePriceFailure` drops anything that is not one of these constants, so the
+ * guarantee holds even if a future caller passes an exception through.
+ */
+export const PRICE_FAILURE = Object.freeze({
+  /** The chain's reference pool could not be resolved from its factory. */
+  REFERENCE_POOL: 'reference-pool-unavailable',
+  /** The reference pool was known but its price at that block did not read. */
+  REFERENCE_PRICE: 'reference-price-unavailable',
+  /** A bridged asset's block/timestamp alignment did not resolve. */
+  REFERENCE_TIME: 'reference-time-unavailable',
+  /** The position's own pool had no readable Swap at or before the block. */
+  POOL_PRICE: 'pool-price-unavailable',
+  /** Neither leg is the reference token or the stablecoin: no dollar route. */
+  UNSUPPORTED_PAIR: 'unsupported-pair',
+});
+
+/**
+ * Failures a later attempt can plausibly recover from.
+ *
+ * Deliberately narrow. `UNSUPPORTED_PAIR` is a property of the pair and will
+ * never improve. `POOL_PRICE` is excluded because `fetchLastLogBefore`
+ * returns the same null for a provider refusal and for a pool that genuinely
+ * did not trade inside the lookback window, so offering a retry would promise
+ * a recovery this module cannot distinguish. Widening this set needs a source
+ * that separates those two cases, not a guess here.
+ */
+export const RETRYABLE_PRICE_FAILURES = Object.freeze([
+  PRICE_FAILURE.REFERENCE_POOL,
+  PRICE_FAILURE.REFERENCE_PRICE,
+  PRICE_FAILURE.REFERENCE_TIME,
+]);
+
+const KNOWN_PRICE_FAILURES = new Set(Object.values(PRICE_FAILURE));
+
+/**
+ * Record why a lookup failed, when the caller asked to be told.
+ *
+ * `opts.priceFailures` is an optional Set supplied by the caller. Callers that
+ * do not pass one see exactly the previous behaviour, which keeps every
+ * existing consumer and test of these exports unchanged.
+ */
+function notePriceFailure(opts, reason) {
+  if (!reason || !KNOWN_PRICE_FAILURES.has(reason)) return null;
+  const sink = opts && opts.priceFailures;
+  if (sink && typeof sink.add === 'function') sink.add(reason);
+  return null;
+}
+
+/**
+ * Share one in-flight network resolution between concurrent callers.
+ *
+ * Positions are priced two at a time, and every position on a bridged chain
+ * asks for the same reference pool and the same `latest` reference price. The
+ * completed-value caches already dedupe those once the first answer lands;
+ * until then each caller opened its own request against exactly the endpoint
+ * most likely to rate-limit. Sharing the pending promise removes the duplicate
+ * without adding a cache.
+ *
+ * Two properties matter. The entry is dropped the moment it settles, so a
+ * refusal is never handed to a later caller and recovery is never poisoned —
+ * only the existing success caches outlive a request. And the resolver returns
+ * its diagnosis alongside its value rather than recording it, because a shared
+ * promise must not give the first caller the reason and leave the rest with an
+ * unexplained null.
+ *
+ * Sharing is keyed on the provider configuration as well as the chain, pool
+ * and block. A completed price is a chain fact and stays endpoint-independent,
+ * but a PENDING request is not: a user who has just corrected a failing RPC
+ * override must not be made to wait on the old endpoint's doomed request
+ * merely because the block matches. See `providerScope`.
+ */
+function shareInFlight(map, key, resolve) {
+  const existing = map.get(key);
+  if (existing) return existing;
+  let task;
+  const settle = () => { if (map.get(key) === task) map.delete(key); };
+  task = (async () => resolve())().then(
+    (value) => { settle(); return value; },
+    (err) => { settle(); throw err; },
+  );
+  map.set(key, task);
+  return task;
+}
+
+/**
+ * Opaque, process-local stand-in for one endpoint or key.
+ *
+ * An RPC override can carry a credential in its path, and a configured
+ * explorer key is a credential outright. Neither may appear in a map key that
+ * some future diagnostic might print, so the scope is an arbitrary counter
+ * value instead. This table is module-private, never exported, never
+ * serialized, and holds only references to strings the caller already owns.
+ */
+const scopeTokens = new Map();
+let nextScopeToken = 0;
+function scopeToken(value) {
+  if (!value) return '-';
+  let token = scopeTokens.get(value);
+  if (token === undefined) {
+    token = `s${++nextScopeToken}`;
+    scopeTokens.set(value, token);
+  }
+  return token;
+}
+
+/**
+ * Which providers a pending lookup would actually use.
+ *
+ * Two callers may differ in their local RPC, in the origin-chain RPC a bridged
+ * price needs, or in whether an explorer key is configured. Those requests can
+ * succeed and fail independently, so they must not be coalesced into one.
+ */
+function providerScope(chainKey, opts = {}) {
+  const chain = CHAINS[chainKey] || {};
+  const via = chain.usdRef && chain.usdRef.via;
+  const origin = via
+    ? (opts.rpcOverrides && opts.rpcOverrides[via]) || (CHAINS[via] || {}).rpc
+    : null;
+  return [
+    scopeToken(opts.rpcOverride || chain.rpc),
+    scopeToken(origin),
+    scopeToken(opts.etherscanKey || chain.etherscanKey),
+    scopeToken(opts.historyRelay?.priceUrl),
+    scopeToken(opts.historyRelay?.key),
+    scopeToken(opts.historyRelay?.installationId),
+  ].join('/');
+}
 
 /**
  * A v3 pool's price at a historical block, read as an EVENT rather than as
@@ -95,6 +238,11 @@ const priceCache = new Map();   // `${chain}:${block}` -> number | null
 const positionPriceCache = new Map(); // `${chain}:${pool}:${block}` -> pool price
 const timeBlockCache = new Map(); // `${chain}:${timestamp}` -> reference-chain block
 const blockHeaderCache = new Map(); // `${chain}:${block}` -> {number,timestamp}
+// Pending requests, keyed by provider scope as well as subject: see
+// `providerScope`. Entries live only until the request settles.
+const refPriceInFlight = new Map();      // `${chain}:${block}/${scope}`
+const referencePoolInFlight = new Map(); // `${chain}/${scope}`
+const positionPriceInFlight = new Map(); // `${chain}:${pool}:${block}/${scope}`
 const LATEST_PRICE_TTL_MS = 60_000;
 const ETHERSCAN_LOOKUP_GAP_MS = 350;
 const BLOCKSCOUT_LOOKUP_GAP_MS = 250;
@@ -279,27 +427,32 @@ export async function referencePool(chainKey, rpc) {
   const ref = chain && chain.usdRef;
   if (!ref) { poolCache.set(chainKey, null); return null; }
 
-  let resolved = null;
-  for (const fee of [500, 3000, 100]) {
-    try {
-      const hex = await ethCall(rpc, chain.factory,
-        SELECTOR.getPool + encAddress(ref.stable) + encAddress(ref.weth) + encUint(fee));
-      const pool = toAddress(words(hex)[0] || '');
-      if (/^0x0{40}$/i.test(pool)) continue;
-      const t0 = toAddress(words(await ethCall(rpc, pool, SEL_TOKEN0))[0]);
-      resolved = {
-        pool,
-        stableIsToken0: t0.toLowerCase() === ref.stable.toLowerCase(),
-        stableDecimals: ref.stableDecimals ?? 6,
-      };
-      break;
-    } catch { /* try the next fee tier */ }
-  }
-  // A configured reference pool can be deployed later, and a zero response is
-  // indistinguishable from a lagging or misbehaving RPC. Only a successfully
-  // decoded nonzero pool is immutable enough to cache.
-  if (resolved) poolCache.set(chainKey, resolved);
-  return resolved;
+  // Three fee tiers times two reads is the most expensive thing this module
+  // does per chain, and every position on that chain needs the same answer.
+  return shareInFlight(referencePoolInFlight, `${chainKey}/${scopeToken(rpc)}`, async () => {
+    if (poolCache.has(chainKey)) return poolCache.get(chainKey);
+    let resolved = null;
+    for (const fee of [500, 3000, 100]) {
+      try {
+        const hex = await ethCall(rpc, chain.factory,
+          SELECTOR.getPool + encAddress(ref.stable) + encAddress(ref.weth) + encUint(fee));
+        const pool = toAddress(words(hex)[0] || '');
+        if (/^0x0{40}$/i.test(pool)) continue;
+        const t0 = toAddress(words(await ethCall(rpc, pool, SEL_TOKEN0))[0]);
+        resolved = {
+          pool,
+          stableIsToken0: t0.toLowerCase() === ref.stable.toLowerCase(),
+          stableDecimals: ref.stableDecimals ?? 6,
+        };
+        break;
+      } catch { /* try the next fee tier */ }
+    }
+    // A configured reference pool can be deployed later, and a zero response
+    // is indistinguishable from a lagging or misbehaving RPC. Only a
+    // successfully decoded nonzero pool is immutable enough to cache.
+    if (resolved) poolCache.set(chainKey, resolved);
+    return resolved;
+  });
 }
 
 /**
@@ -309,36 +462,86 @@ export async function referencePool(chainKey, rpc) {
  * unlike anything keyed on current state.
  */
 export async function refUsdAtBlock(chainKey, block, opts = {}) {
+  const { price, failure } = await refUsdResult(chainKey, block, opts);
+  // Noted here rather than inside the shared resolution, so that every waiter
+  // on one coalesced request learns why it came back empty.
+  if (price === null || price === undefined) notePriceFailure(opts, failure);
+  return price;
+}
+
+/** `refUsdAtBlock` plus its diagnosis, shared across concurrent callers. */
+async function refUsdResult(chainKey, block, opts = {}) {
   const key = `${chainKey}:${block}`;
-  if (priceCache.has(key)) {
+  const proofRoute = block !== 'latest' && opts.historyRelay?.priceUrl
+    && (chainKey === 'ethereum' || CHAINS[chainKey]?.usdRef?.via === 'ethereum');
+  if (priceCache.has(key) && !proofRoute) {
     const hit = priceCache.get(key);
-    if (block !== 'latest') return hit;
-    if (hit && Date.now() - hit.at < LATEST_PRICE_TTL_MS) return hit.price;
+    // Only proven prices are ever stored, so a hit is never a cached refusal.
+    if (block !== 'latest') return { price: hit, failure: null };
+    if (hit && Date.now() - hit.at < LATEST_PRICE_TTL_MS) {
+      return { price: hit.price, failure: null };
+    }
     priceCache.delete(key);
+  }
+  return shareInFlight(refPriceInFlight, `${key}/${providerScope(chainKey, opts)}`,
+    () => resolveRefUsd(chainKey, key, block, opts));
+}
+
+async function resolveRefUsd(chainKey, key, block, opts) {
+  const proofRoute = block !== 'latest' && opts.historyRelay?.priceUrl
+    && (chainKey === 'ethereum' || CHAINS[chainKey]?.usdRef?.via === 'ethereum');
+  // A second caller can have landed the answer while this one queued.
+  if (priceCache.has(key) && block !== 'latest' && !proofRoute) {
+    return { price: priceCache.get(key), failure: null };
   }
   const remember = (price) => {
     // Null usually means a provider refusal or rate limit, not a chain fact.
     // Keeping it would make a transient failure stick for the service worker's
     // whole lifetime, so only successful immutable prices are memoised.
     if (price !== null && price !== undefined) {
-      priceCache.set(key, block === 'latest' ? { price, at: Date.now() } : price);
-    } else {
-      priceCache.delete(key);
+      if (!proofRoute) priceCache.set(key, block === 'latest' ? { price, at: Date.now() } : price);
+      return price;
     }
-    return price;
+    // A failure never evicts and never overwrites. Requests on different
+    // providers run independently, so a slow refusal can land after a fast
+    // success for the same immutable block; deleting here would throw away a
+    // verified price. Expiring a stale `latest` mark belongs in the lookup,
+    // which already does it, and writing nothing still leaves a failed
+    // historical block free to be retried.
+    if (block !== 'latest' && priceCache.has(key) && !proofRoute) return priceCache.get(key);
+    return null;
   };
 
   const chain = CHAINS[chainKey];
   const rpc = opts.rpcOverride || (chain && chain.rpc);
 
+  // `remember` can hand back a price another provider proved while this
+  // attempt was failing, so the diagnosis follows what the caller actually
+  // receives rather than what this attempt managed on its own.
+  const settled = (price, failure) => {
+    const kept = remember(price);
+    return { price: kept, failure: kept === null ? failure : null };
+  };
+
   // Bridged chain: price the asset where it actually has dollar liquidity.
   if (chain && chain.usdRef && chain.usdRef.via) {
-    const price = await bridgedUsd(chainKey, block, opts);
-    return remember(price);
+    const bridged = await bridgedUsd(chainKey, block, opts);
+    if (bridged.protected) return { price: bridged.price, failure: null };
+    return settled(bridged.price, bridged.failure);
+  }
+
+  if (chainKey === 'ethereum' && block !== 'latest') {
+    const protectedPrice = await protectedReferencePrice({ block: Number(block) }, opts);
+    if (protectedPrice !== null) return { price: protectedPrice, failure: null };
   }
 
   const ref = await referencePool(chainKey, rpc);
-  if (!ref) return remember(null);
+  if (!ref) {
+    // A chain with no configured reference has no dollar route at all; a
+    // configured one that did not resolve is a lookup that can be retried.
+    return settled(null, chain && chain.usdRef
+      ? PRICE_FAILURE.REFERENCE_POOL : PRICE_FAILURE.UNSUPPORTED_PAIR);
+  }
 
   // Latest is state every node serves; anything historical is read as a Swap
   // event, because a historical eth_call cannot be trusted (see
@@ -354,7 +557,7 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
   } catch {
     sqrtX96 = null;
   }
-  if (!sqrtX96) return remember(null);
+  if (!sqrtX96) return settled(null, PRICE_FAILURE.REFERENCE_PRICE);
 
   let price = null;
   const sqrtP = Number(sqrtX96) / 2 ** 96;
@@ -363,7 +566,7 @@ export async function refUsdAtBlock(chainKey, block, opts = {}) {
   // Orientation depends on which side the stablecoin sorted to.
   price = ref.stableIsToken0 ? scale / raw : raw * scale;
   if (!Number.isFinite(price) || price <= 0) price = null;
-  return remember(price);
+  return settled(price, PRICE_FAILURE.REFERENCE_PRICE);
 }
 
 /**
@@ -379,14 +582,17 @@ async function bridgedUsd(chainKey, block, opts = {}) {
   const chain = CHAINS[chainKey];
   const via = chain.usdRef.via;
   const target = CHAINS[via];
-  if (!target) return null;
+  if (!target) return { price: null, failure: PRICE_FAILURE.UNSUPPORTED_PAIR };
 
-  // 'latest' needs no time alignment.
+  // 'latest' needs no time alignment. The origin chain reports its own
+  // diagnosis; this side adds nothing to it. The sink is dropped because the
+  // caller of the bridged read records the outcome once, for every waiter.
   const viaOpts = {
     ...opts,
+    priceFailures: null,
     rpcOverride: opts.rpcOverrides?.[via] || undefined,
   };
-  if (block === 'latest') return refUsdAtBlock(via, 'latest', viaOpts);
+  if (block === 'latest') return refUsdResult(via, 'latest', viaOpts);
 
   let timestamp = null;
   try {
@@ -394,8 +600,13 @@ async function bridgedUsd(chainKey, block, opts = {}) {
     const blk = await rpcCall(rpc, 'eth_getBlockByNumber',
       ['0x' + BigInt(block).toString(16), false]);
     if (blk && blk.timestamp) timestamp = Number(BigInt(blk.timestamp));
-  } catch { return null; }
-  if (!timestamp) return null;
+  } catch { return { price: null, failure: PRICE_FAILURE.REFERENCE_TIME }; }
+  if (!timestamp) return { price: null, failure: PRICE_FAILURE.REFERENCE_TIME };
+
+  if (via === 'ethereum') {
+    const protectedPrice = await protectedReferencePrice({ timestamp }, viaOpts);
+    if (protectedPrice !== null) return { price: protectedPrice, failure: null, protected: true };
+  }
 
   const key = opts.etherscanKey || target.etherscanKey;
   let targetBlock = key && target.etherscanChainId
@@ -406,9 +617,11 @@ async function bridgedUsd(chainKey, block, opts = {}) {
   if (!targetBlock) {
     targetBlock = await referenceBlockOnChain(via, target, timestamp, viaOpts);
   }
-  if (!targetBlock) return null;
+  // Every mapper refused. A past timestamp always has a block, so this is a
+  // failed lookup rather than a fact about the chain.
+  if (!targetBlock) return { price: null, failure: PRICE_FAILURE.REFERENCE_TIME };
 
-  return refUsdAtBlock(via, targetBlock, viaOpts);
+  return refUsdResult(via, targetBlock, viaOpts);
 }
 
 /**
@@ -427,7 +640,9 @@ async function bridgedUsd(chainKey, block, opts = {}) {
 export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts = {}) {
   const chain = CHAINS[chainKey];
   const ref = chain && chain.usdRef;
-  if (!ref || !(poolPrice > 0)) return null;
+  if (!ref) return notePriceFailure(opts, PRICE_FAILURE.UNSUPPORTED_PAIR);
+  // A missing ratio is the caller's own gap, not a property of this pair.
+  if (!(poolPrice > 0)) return null;
 
   const weth = (ref.weth || '').toLowerCase();
   const normaliseToken = (token) => {
@@ -458,31 +673,48 @@ export async function usdPairAt(chainKey, token0, token1, poolPrice, block, opts
       ? { usd0: poolPrice * wethUsd, usd1: wethUsd, bridged: !!ref.via }
       : { usd0: wethUsd, usd1: wethUsd / poolPrice, bridged: !!ref.via };
   }
-  return null;
+  // Neither leg is the reference token or the stablecoin. Reaching dollars
+  // would need a second hop through a pool that may not exist, so there is
+  // nothing here for a later attempt to recover.
+  return notePriceFailure(opts, PRICE_FAILURE.UNSUPPORTED_PAIR);
 }
 
 /** Exact position-pool price at a historical block, read as a `Swap` event. */
 async function positionPoolPrice(chainKey, p, block, opts = {}) {
-  if (!p.pool || block === null || block === undefined) return null;
-  const key = `${chainKey}:${String(p.pool).toLowerCase()}:${block}`;
-  if (positionPriceCache.has(key)) return positionPriceCache.get(key);
-  const chain = CHAINS[chainKey];
-  if (!chain) return null;
-  try {
-    // Was a historical eth_call, which carried the same silent-latest-state
-    // defect as the reference read and would have stamped a single-sided add
-    // or fee-only collect exact on a present-day price.
-    const sqrtX96 = await poolSqrtAtBlock(chainKey, p.pool, block, opts);
-    if (!sqrtX96) return null;
-    const price = humanPrice(
-      sqrtX96, p.token0Meta.decimals, p.token1Meta.decimals);
-    if (!(price > 0) || !Number.isFinite(price)) return null;
-    positionPriceCache.set(key, price);
-    return price;
-  } catch {
-    // Do not cache failure: a transient index refusal is not a chain fact.
-    return null;
+  if (!p.pool || block === null || block === undefined) {
+    return { price: null, failure: null };
   }
+  const key = `${chainKey}:${String(p.pool).toLowerCase()}:${block}`;
+  if (positionPriceCache.has(key)) {
+    return { price: positionPriceCache.get(key), failure: null };
+  }
+  const chain = CHAINS[chainKey];
+  if (!chain) return { price: null, failure: null };
+  // Several flows of one position, and several positions in one pool, land on
+  // the same block often enough to be worth sharing the pending log query.
+  const pending = `${key}/${providerScope(chainKey, opts)}`;
+  return shareInFlight(positionPriceInFlight, pending, async () => {
+    if (positionPriceCache.has(key)) {
+      return { price: positionPriceCache.get(key), failure: null };
+    }
+    try {
+      // Was a historical eth_call, which carried the same silent-latest-state
+      // defect as the reference read and would have stamped a single-sided add
+      // or fee-only collect exact on a present-day price.
+      const sqrtX96 = await poolSqrtAtBlock(chainKey, p.pool, block, opts);
+      if (!sqrtX96) return { price: null, failure: PRICE_FAILURE.POOL_PRICE };
+      const price = humanPrice(
+        sqrtX96, p.token0Meta.decimals, p.token1Meta.decimals);
+      if (!(price > 0) || !Number.isFinite(price)) {
+        return { price: null, failure: PRICE_FAILURE.POOL_PRICE };
+      }
+      positionPriceCache.set(key, price);
+      return { price, failure: null };
+    } catch {
+      // Do not cache failure: a transient index refusal is not a chain fact.
+      return { price: null, failure: PRICE_FAILURE.POOL_PRICE };
+    }
+  });
 }
 
 /**
@@ -540,11 +772,15 @@ async function historicalPairAt(chainKey, p, flow, opts = {}) {
   const direct = await directPairAt(chainKey, p, flow, opts);
   if (direct) return direct;
 
-  const poolPrice = await positionPoolPrice(chainKey, p, flow.block, opts);
-  if (poolPrice) {
+  const pool = await positionPoolPrice(chainKey, p, flow.block, opts);
+  if (pool.price) {
     const pair = await usdPairAt(
-      chainKey, p.token0, p.token1, poolPrice, flow.block, opts);
+      chainKey, p.token0, p.token1, pool.price, flow.block, opts);
     if (pair) return { ...pair, exact: true, source: 'pool-swap-event' };
+  } else {
+    // Recorded, but not treated as retryable: an unreadable pool and a pool
+    // that simply did not trade in the window look identical from here.
+    notePriceFailure(opts, pool.failure);
   }
 
   if (flow.entry && flow.entry.price > 0) {
@@ -569,7 +805,9 @@ export async function costBasisUsd(chainKey, p, opts = {}) {
   const chain = CHAINS[chainKey];
   const ref = chain && chain.usdRef;
   const h = p.history;
-  if (!ref || !h || h.unavailable) return null;
+  if (!ref) return notePriceFailure(opts, PRICE_FAILURE.UNSUPPORTED_PAIR);
+  // Missing history is not a pricing failure; the caller already says so.
+  if (!h || h.unavailable) return null;
   const deposits = h.deposits && h.deposits.length ? h.deposits : (
     h.entry && h.firstBlock ? [{
       block: h.firstBlock, amount0: h.deposited0, amount1: h.deposited1, entry: h.entry,

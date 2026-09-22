@@ -22,8 +22,9 @@ import {
   buildScanDiagnostic, copyDiagnosticReport, readDiagnosticReport, saveDiagnosticReport,
 } from './lib/diagnostics.js';
 import {
-  sendScanTelemetry, telemetryEnabled as scanTelemetryEnabled,
+  sendScanTelemetry, telemetryEnabled as scanTelemetryEnabled, returnCoverageEnabled,
 } from './lib/telemetry.js';
+import { buildReturnCoverage } from './lib/scan-quality.js';
 import {
   DISABLED_PORTFOLIO_CHAINS_KEY,
   enabledPortfolioChains,
@@ -67,7 +68,7 @@ let activePositionFilter = 'all';
 // to 0.8 landed only in the overlay — so both now render through one copy.
 const {
   esc, fmt, ageText, priceText, priceOrientation, hero, rangeBar, details,
-  rebalanceLine, pendingRewards, CSS_COMPONENTS,
+  rebalanceLine, pendingRewards, positionValueRow, CSS_COMPONENTS,
 } = globalThis.LPLens;
 
 // The overlay renders inside a shadow root; the popup has none, so the shared
@@ -159,6 +160,7 @@ async function recordScanDiagnostic(startedAt, final, includeClosed) {
       accessState: latestAccessState,
       telemetryEnabled: enabled,
       optionalPageAccess: await optionalPageAccess(),
+      lpReturns: await returnCoverageEnabled() ? buildReturnCoverage(final.allPositions) : null,
     });
     await saveDiagnosticReport(report);
     void sendScanTelemetry(report);
@@ -1600,12 +1602,6 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
     : standard;
 
   // Same restraint as the overlay: answer the question, then offer the rest.
-  const value = u && u.totalNow !== null && u.totalNow !== undefined
-    ? '$' + u.totalNow.toLocaleString('en-US', { maximumFractionDigits: 2 })
-    : (valueUsd(p.amount0, p.amount1, p0, p1) !== null
-        ? usd(valueUsd(p.amount0, p.amount1, p0, p1)) : 'unpriced');
-  const valueLabel = p.custody === 'gauge' ? 'active liquidity' : 'value';
-
   const fees = u && u.collectable !== null && u.collectable !== undefined
     ? '$' + u.collectable.toLocaleString('en-US', { maximumFractionDigits: 2 })
     : `${fmt(p.collectable0)} ${esc(s0)} + ${fmt(p.collectable1)} ${esc(s1)}`;
@@ -1651,18 +1647,19 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
       </div>
       ${rangeBar(p, h, flippable)}
       ${hero(p, h, s1)}
+      ${positionValueRow(p, p0, p1)}
       ${refreshDeltaBlock(p, priceViews, s0, s1)}
       ${lineageBlock(p)}
       <div class="stats">
         <div class="stat">
-          <span class="stat-l">${p.custody === 'gauge' ? rewardLabel : 'collectable'}</span>
+          <span class="stat-l">${p.vault ? 'pending in vault' : p.custody === 'gauge' ? rewardLabel : 'collectable'}</span>
           <span class="stat-v muted">${p.custody === 'gauge' ? rewardValue : fees}</span>
           ${p.custody === 'gauge' && !rewards.length ? '<span class="stat-n">unavailable</span>' : ''}
         </div>
         <div class="stat">
-          <span class="stat-l">entry</span>
-          <span class="stat-v muted">${entry}</span>
-          <span class="stat-n">${entryNote}</span>
+          <span class="stat-l">${p.vault ? 'vault strategy' : 'entry'}</span>
+          <span class="stat-v muted">${p.vault ? esc(p.vault.strategy) : entry}</span>
+          <span class="stat-n">${p.vault ? `${fmt(p.vault.sharePercent, 4)}% share` : entryNote}</span>
         </div>
       </div>
       ${rebalanceLine(p, h, s0, s1)}
@@ -1678,10 +1675,9 @@ function card(p, prices, locallyHidden = false, showWallet = true) {
           title="${scanBusy || dashboardMutationBusy ? 'Wait for the portfolio update to finish' : `${locallyHidden ? 'Restore' : 'Hide'} this position in local portfolio views`}">${locallyHidden ? 'restore' : 'hide'}</button>` : ''}
       </div>
       <div class="extra">
-        <div class="kv"><span>${valueLabel}</span><span class="num">${value}</span></div>
         <div class="kv"><span>current price</span><span class="num">${currentPrice}</span></div>
         <div class="kv"><span>range</span><span class="num">${rangePrice}</span></div>
-        <div class="kv"><span>holds</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>
+        <div class="kv"><span>${p.vault ? 'your assets, net exit fee' : 'holds'}</span><span class="num">${fmt(p.amount0)} ${esc(s0)}<br>${fmt(p.amount1)} ${esc(s1)}</span></div>
         ${details(p, h, s0, s1, flippable)}
       </div>
     </div>`;

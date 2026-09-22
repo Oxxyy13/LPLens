@@ -22,8 +22,10 @@ import {
 import { enumerateV4, loadV4Position, V4 } from './v4.js';
 import {
   costBasisUsd, collectedProceedsUsd, strategyReturn, usdPairAt,
+  RETRYABLE_PRICE_FAILURES,
 } from './histprice.js';
 import { positionAmounts, humanPrice, scale, tickToPrice } from './v3.js';
+import { SMART_LP, scanSmartLp, normalizeSmartLpScope } from './smart-lp.js';
 
 const tokenCache = new Map(); // `${chain}:${addr}` -> {symbol, decimals}
 const gaugeCache = new Map(); // voter -> {at, gauges}; discovery acceleration only
@@ -294,9 +296,13 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     positions: [], held: 0, shown: 0, closedHidden: 0, unreadable: 0,
     unavailable: null, source: 'skipped', discovery: { complete: true, ids: [] },
   } : await scanV4(chainKey, owner, opts);
+  // Specialized UP33/ProjectX page scans must not include unrelated vaults.
+  const smartLp = chainKey === SMART_LP.chainKey && !requestedDeploymentIds
+    ? await scanSmartLp(owner, opts) : null;
   let positions = [
     ...deploymentRows.flatMap((row) => row.positions || []),
     ...v4.positions.map((position) => tagPosition(position, chainKey)),
+    ...(smartLp?.positions || []),
   ];
   if (opts.withUsd) {
     positions = (await mapLimit(positions, 2, async (position) => {
@@ -320,11 +326,11 @@ export async function loadPositions(chainKey, owner, opts = {}) {
     truncated: deploymentRows.some((row) => row.truncated),
     stoppedEarly: false,
     enumSource: deployments.length > 1 ? 'rpc-verified-deployments' : 'rpc-verified',
-    deploymentIssues: deploymentRows.filter((row) => row.unavailable).map((row) => ({
+    deploymentIssues: [...deploymentRows.filter((row) => row.unavailable).map((row) => ({
       deploymentId: row.deployment.id,
       protocol: row.deployment.protocol,
       error: row.unavailable,
-    })),
+    })), ...(smartLp?.unavailable ? [{ deploymentId: 'smart-lp', protocol: 'Smart LP', error: smartLp.unavailable }] : [])],
     positions,
     v4,
     discovery: {
@@ -336,6 +342,7 @@ export async function loadPositions(chainKey, owner, opts = {}) {
         records,
       },
       v4: v4.discovery,
+      smartLp: smartLp?.discovery || normalizeSmartLpScope(null, chainKey),
     },
   };
 }
@@ -474,7 +481,8 @@ export async function loadKnownSweep(owners, chainKeys, scopes, opts = {}) {
     try { await onProgress({ ...meta, phase: 'start' }); } catch { /* UI must not fail */ }
     try {
       const scope = byScope.get(`${job.address}@${job.chainKey}`);
-      if (!scope || !scope.v3?.complete || !scope.v4?.complete) {
+      if (!scope || !scope.v3?.complete || !scope.v4?.complete
+          || !normalizeSmartLpScope(scope.smartLp, job.chainKey).complete) {
         throw new Error('Run Full rescan once to discover positions');
       }
       const rpcOverride = (opts.rpcOverrides && opts.rpcOverrides[job.chainKey]) || null;
@@ -539,7 +547,8 @@ function positionIsClosed(version, position) {
 export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
   const chain = CHAINS[chainKey];
   if (!chain) throw new Error(`unknown chain ${chainKey}`);
-  if (!scope || !scope.v3?.complete || !scope.v4?.complete) {
+  if (!scope || !scope.v3?.complete || !scope.v4?.complete
+      || !normalizeSmartLpScope(scope.smartLp, chainKey).complete) {
     throw new Error('Run Full rescan once to discover positions');
   }
   const rpc = opts.rpcOverride || chain.rpc;
@@ -702,6 +711,14 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
     positions.push(tagPosition(position, chainKey));
   }
 
+  const smartLp = chainKey === SMART_LP.chainKey
+    ? await scanSmartLp(owner, opts, normalizeSmartLpScope(scope.smartLp, chainKey).addresses) : null;
+  for (const p of smartLp?.positions || []) {
+    try { positions.push(opts.withUsd ? await attachUsd(chainKey, p, opts) : p); }
+    catch { positions.push(p); }
+  }
+  if (smartLp) keep.smartLp = smartLp.discovery;
+
   return {
     chain: chainKey,
     count: wanted.length,
@@ -716,6 +733,8 @@ export async function loadKnownPositions(chainKey, owner, scope, opts = {}) {
     refreshMode: 'current',
     positions,
     currentIndex: keep,
+    deploymentIssues: smartLp?.unavailable
+      ? [{ deploymentId: 'smart-lp', protocol: 'Smart LP', error: smartLp.unavailable }] : [],
     v4: {
       positions: positions.filter((position) => position.version === 'v4'),
       held: rememberedIds(scope, 'v4').length,
@@ -1213,6 +1232,21 @@ async function scanV4(chainKey, owner, opts = {}) {
  *
  * Marks come from DexScreener and are best-effort: an unpriced leg yields null,
  * never zero, because a missing price must not read as a worthless position.
+ *
+ * WHY A RETURN IS MISSING is reported alongside the fact that it is. Three
+ * unrelated situations used to render the same dash: a pair with no dollar
+ * route at all, a basis that could only be bounded, and a public index that
+ * refused one request. Only the last is worth asking again about, and without
+ * the distinction the surface could neither offer a retry nor rule one out.
+ * The reasons are a closed vocabulary of slugs from `lib/histprice.js` and
+ * carry no endpoint, key, address or wallet detail.
+ *
+ * READ AN EMPTY REASON LIST NARROWLY. It means no CLASSIFIED pricing failure
+ * was recorded — history was unavailable, or there were no additions to
+ * price. It is not proof that no request failed: an unexpected exception
+ * anywhere under these calls is still swallowed into the same null, and the
+ * existing fail-closed behaviour is deliberately unchanged. Treat the list as
+ * evidence for offering a retry, never as evidence that the network was fine.
  */
 export async function attachUsd(chainKey, p, opts = {}) {
   let prices = {};
@@ -1225,9 +1259,17 @@ export async function attachUsd(chainKey, p, opts = {}) {
   // position's own pool plus the USD reference, so the current value and the
   // historical cash flows are produced the same way. DexScreener only fills the gap for
   // pairs with no leg in the reference token or the stablecoin.
+  // One sink per component, never one shared set. A position whose history is
+  // unavailable records no basis reason, and a transient failure on the
+  // unrelated current mark must not then be read as a retryable basis.
+  const basisFailures = new Set();
+  const proceedsFailures = new Set();
+  const markFailures = new Set();
+
   let chainPair = null;
   try {
-    chainPair = await usdPairAt(chainKey, p.token0, p.token1, p.price, 'latest', opts);
+    chainPair = await usdPairAt(chainKey, p.token0, p.token1, p.price, 'latest',
+      { ...opts, priceFailures: markFailures });
   } catch { chainPair = null; }
 
   const p0 = chainPair ? chainPair.usd0 : prices[p.token0.toLowerCase()];
@@ -1247,9 +1289,14 @@ export async function attachUsd(chainKey, p, opts = {}) {
   // tokens are no longer assumed to remain in the wallet forever — doing that
   // double-counts them when they are re-used in a new NFT.
   let basis = null;
-  try { basis = await costBasisUsd(chainKey, p, opts); } catch { basis = null; }
+  try {
+    basis = await costBasisUsd(chainKey, p, { ...opts, priceFailures: basisFailures });
+  } catch { basis = null; }
   let proceeds = null;
-  try { proceeds = await collectedProceedsUsd(chainKey, p, opts); } catch { proceeds = null; }
+  try {
+    proceeds = await collectedProceedsUsd(
+      chainKey, p, { ...opts, priceFailures: proceedsFailures });
+  } catch { proceeds = null; }
 
   // Decreased-but-uncollected principal lives in collectable, so a remove does
   // not change return until the assets actually leave the position.
@@ -1268,12 +1315,37 @@ export async function attachUsd(chainKey, p, opts = {}) {
     ...leg,
     kind: index === 0 ? 'opened' : 'added',
   })) : [];
+  // The wording is unchanged: existing surfaces render these exact strings.
   let returnUnavailable = null;
-  if (!basis) returnUnavailable = 'gross additions unpriced';
-  else if (!basis.exact) returnUnavailable = 'gross additions are bounded';
-  else if (!proceeds) returnUnavailable = 'collected proceeds unpriced';
-  else if (!proceeds.exact) returnUnavailable = 'collected proceeds are bounded';
-  else if (currentNow === null) returnUnavailable = 'current collectable unavailable';
+  let returnUnavailableReasons = [];
+  let returnRetryable = false;
+  const slugs = (sink) => [...sink].sort();
+  const retryable = (sink) => RETRYABLE_PRICE_FAILURES.some((r) => sink.has(r));
+  if (!basis) {
+    returnUnavailable = 'gross additions unpriced';
+    returnUnavailableReasons = slugs(basisFailures);
+    returnRetryable = retryable(basisFailures);
+  } else if (!basis.exact) {
+    // A bounded basis was priced. Asking again returns the same bound, so this
+    // is reported without inviting a retry that cannot change the answer.
+    returnUnavailable = 'gross additions are bounded';
+    returnUnavailableReasons = slugs(basisFailures);
+  } else if (!proceeds) {
+    returnUnavailable = 'collected proceeds unpriced';
+    returnUnavailableReasons = slugs(proceedsFailures);
+    returnRetryable = retryable(proceedsFailures);
+  } else if (!proceeds.exact) {
+    returnUnavailable = 'collected proceeds are bounded';
+    returnUnavailableReasons = slugs(proceedsFailures);
+  } else if (currentNow === null) {
+    returnUnavailable = 'current collectable unavailable';
+    // Only when the amounts themselves were readable. A gauge or vault that
+    // withholds its collectable is a custody limit, not a pricing failure.
+    if (p.collectable0 !== null && p.collectable1 !== null) {
+      returnUnavailableReasons = slugs(markFailures);
+      returnRetryable = retryable(markFailures);
+    }
+  }
 
   return {
     ...p,
@@ -1296,10 +1368,14 @@ export async function attachUsd(chainKey, p, opts = {}) {
       netCashIn: basis && proceeds && basis.exact && proceeds.exact
         ? basis.basis - proceeds.proceeds : null,
       returnUnavailable,
+      // Sanitized slugs explaining the line above, and whether another attempt
+      // is worth making. Both are empty/false whenever a return IS available.
+      returnUnavailableReasons,
+      returnRetryable,
       pnl: ret.pnl,
       pnlPct: ret.pnlPct,
       currentValue: currentNow,
-      currentValueIncomplete: p.custody === 'gauge' && currentNow === null,
+      currentValueIncomplete: (p.custody === 'gauge' || !!p.vault) && currentNow === null,
       // Compatibility aliases for existing local harnesses and old consumers.
       // UI copy no longer calls gross additions a cost basis.
       costBasis: basis ? basis.basis : null,

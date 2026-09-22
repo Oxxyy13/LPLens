@@ -10,6 +10,7 @@
  */
 
 import { v3Deployment, v3DeploymentsFor } from './chains.js';
+import { normalizeSmartLpScope } from './smart-lp.js';
 
 export const CURRENT_POSITION_INDEX_PREFIX = 'current:v1:';
 export const CURRENT_POSITION_INDEX_VERSION = 2;
@@ -263,6 +264,7 @@ function cleanScope(raw, owner, chainKey) {
     // gauge ownership is inferred during migration.
     v3: cleanV3Protocol(raw.v3, chainKey),
     v4: cleanProtocol(raw.v4),
+    smartLp: normalizeSmartLpScope(raw.smartLp, chainKey),
   };
 }
 
@@ -303,6 +305,14 @@ function mergeProtocol(previous, incoming) {
     complete: false,
     ids: normalizeCurrentPositionIds([...previous.ids, ...next.ids]),
   };
+}
+
+function mergeSmartLp(previous, incoming, chainKey) {
+  const next = normalizeSmartLpScope(incoming, chainKey);
+  if (next.complete) return next;
+  return normalizeSmartLpScope({ ...next, addresses: [
+    ...normalizeSmartLpScope(previous, chainKey).addresses, ...next.addresses,
+  ] }, chainKey);
 }
 
 function mergeV3Protocol(previous, incoming, chainKey) {
@@ -349,6 +359,7 @@ export async function writeFullDiscoveryScope({
       deploymentCoverage: configuredV3DeploymentCoverage(chainKey),
     }, chainKey),
     v4: mergeProtocol(previous.v4, discovery.v4),
+    smartLp: mergeSmartLp(previous.smartLp, discovery.smartLp, chainKey),
   };
   try {
     await writeRaw(keyFor(owner, chainKey), value);
@@ -409,6 +420,12 @@ export async function writeCurrentRefreshScope({
     refreshedAt: Number.isFinite(at) && at > 0 ? at : Date.now(),
     v3: nextV3,
     v4: { ...previous.v4, ids: normalizeCurrentPositionIds(ids.v4 ?? previous.v4.ids) },
+    smartLp: normalizeSmartLpScope({
+      ...previous.smartLp,
+      addresses: ids.smartLp?.addresses ?? previous.smartLp?.addresses,
+      // A fast refresh cannot promote a partial discovery to complete.
+      complete: previous.smartLp?.complete === true,
+    }, chainKey),
   };
   try {
     await writeRaw(keyFor(owner, chainKey), value);
@@ -434,6 +451,7 @@ export async function markCurrentPositionScopeIncomplete({
     ...previous,
     v3: { ...previous.v3, complete: false },
     v4: { ...previous.v4, complete: false },
+    smartLp: { ...previous.smartLp, complete: false },
   };
   try {
     await writeRaw(keyFor(owner, chainKey), value);
@@ -459,7 +477,7 @@ export async function readCurrentPositionJobs(owners, chainKeys) {
         owner,
         chainKey,
         scope,
-        ready: !!(scope && scope.v3.complete && scope.v4.complete),
+        ready: !!(scope && scope.v3.complete && scope.v4.complete && scope.smartLp.complete),
       });
     }
   }

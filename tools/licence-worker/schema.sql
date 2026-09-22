@@ -63,3 +63,43 @@ CREATE TABLE IF NOT EXISTS scan_errors_daily (
 
 CREATE INDEX IF NOT EXISTS scan_errors_day
   ON scan_errors_daily (day);
+
+-- Forward-only role-separated counters. Legacy scan_*_daily rows above are
+-- mixed traffic and are never guessed, copied, deleted or relabelled.
+-- These tables contain only calendar days, closed categories and counters.
+CREATE TABLE IF NOT EXISTS scan_outcomes_v2_daily (
+  day TEXT NOT NULL,
+  extension_version TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  cohort TEXT NOT NULL CHECK (cohort IN ('tester', 'internal', 'unclassified')),
+  outcome TEXT NOT NULL,
+  position_bucket TEXT NOT NULL,
+  duration_bucket TEXT NOT NULL,
+  coverage_reported INTEGER NOT NULL CHECK (coverage_reported IN (0, 1)),
+  scans INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, extension_version, surface, cohort, outcome, position_bucket, duration_bucket, coverage_reported)
+);
+
+CREATE TABLE IF NOT EXISTS scan_errors_v2_daily (
+  day TEXT NOT NULL,
+  extension_version TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  cohort TEXT NOT NULL CHECK (cohort IN ('tester', 'internal', 'unclassified')),
+  chain_key TEXT NOT NULL,
+  error_code TEXT NOT NULL,
+  occurrences INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, extension_version, surface, cohort, chain_key, error_code)
+);
+
+-- Availability is one primary code per observed position. Price causes can
+-- overlap, so they must never be added to the availability denominator.
+CREATE TABLE IF NOT EXISTS lp_return_coverage_daily (
+  day TEXT NOT NULL,
+  extension_version TEXT NOT NULL,
+  surface TEXT NOT NULL,
+  cohort TEXT NOT NULL CHECK (cohort IN ('tester', 'internal', 'unclassified')),
+  metric TEXT NOT NULL CHECK (metric IN ('availability', 'price_cause')),
+  code TEXT NOT NULL,
+  positions INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, extension_version, surface, cohort, metric, code)
+);

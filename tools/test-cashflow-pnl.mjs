@@ -211,7 +211,7 @@ async function testOverlayKeepsDollarReturnAsHeadline() {
     readFile(new URL('../extension/overlay.js', import.meta.url), 'utf8'),
     readFile(new URL('../extension/sw.js', import.meta.url), 'utf8'),
   ]);
-  assert.match(overlay, /const headline = hasTotal \? cash\(u\.pnl\) : '—';/,
+  assert.match(overlay, /const headline = hasTotal \? cash\(u\.pnl\) : esc\(returnState\.label\);/,
     'the compact headline must never substitute vs-holding percent for dollar LP return');
   assert.match(overlay, /<div class="gc-lbl">LP return<\/div>/,
     'the compact headline must always identify itself as LP return');
